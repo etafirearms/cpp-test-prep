@@ -161,6 +161,19 @@ def chat_with_ai(messages, user_id=None):
         print(f"AI Chat Error: {e}")
         return "Sorry, I'm experiencing technical difficulties. Please try again in a moment."
 
+# Database Initialization Route (IMPORTANT FIX!)
+@app.route('/init-db')
+def init_database():
+    """Initialize database tables - run this once after deployment"""
+    try:
+        with app.app_context():
+            db.create_all()
+            print("Database tables created successfully!")
+        return "<h1>Database tables created successfully!</h1><p><a href='/'>Go to Homepage</a></p>"
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+        return f"<h1>Error creating tables:</h1><p>{str(e)}</p>"
+
 # Routes
 @app.route('/')
 def home():
@@ -696,14 +709,26 @@ def privacy():
     """Privacy Policy page"""
     return render_template('privacy.html')
 
-# Initialize database
+# Initialize database on first request
+@app.before_first_request
+def initialize_database():
+    """Initialize database tables automatically on first request"""
+    try:
+        db.create_all()
+        print("Database tables created successfully!")
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+
+# Initialize database and sample data
 def create_tables():
+    """Create database tables"""
     with app.app_context():
         db.create_all()
         print("Database tables created successfully!")
 
 # For production
 if __name__ == '__main__':
+    # Initialize database tables on startup
     create_tables()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
