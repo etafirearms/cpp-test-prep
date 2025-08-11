@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="card p-5 text-center">
+            <h1 class="display-4 fw-bold mb-4">
+                <i class="fas fa-certificate text-primary me-3"></i>
+                CPP Test Prep
+            </h1>
+            <p class="lead mb-4">
+                Master the Certified Payroll Professional exam with AI-powered study tools, 
+                practice quizzes, and personalized learning paths.
+            </p>
+            
+            <!-- Important Legal Disclaimer -->
+            <div class="alert alert-info mb-4">
+                <h6><i class="fas fa-info-circle me-2"></i>Important Notice</h6>
+                <p class="mb-1"><strong>This course is NOT affiliated with, endorsed by, or approved by ASIS International.</strong></p>
+                <p class="mb-0 small">Independent study aid • No guarantee of exam success • Individual results may vary</p>
+            </div>
+            
+            <div class="row mb-4">
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-primary">
+                        <div class="card-body">
+                            <i class="fas fa-robot fa-3x text-primary mb-3"></i>
+                            <h5>AI Tutor</h5>
+                            <p class="small">Get instant answers and explanations from our CPP specialist AI</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-success">
+                        <div class="card-body">
+                            <i class="fas fa-quiz fa-3x text-success mb-3"></i>
+                            <h5>Practice Quizzes</h5>
+                            <p class="small">Test your knowledge with unlimited practice questions</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-4 mb-3">
+                    <div class="card h-100 border-info">
+                        <div class="card-body">
+                            <i class="fas fa-chart-line fa-3x text-info mb-3"></i>
+                            <h5>Progress Tracking</h5>
+                            <p class="small">Monitor your learning progress and identify weak areas</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="d-grid gap-2 d-md-block">
+                <a href="/register" class="btn btn-primary btn-lg px-5">
+                    Start Free Trial <i class="fas fa-arrow-right ms-2"></i>
+                </a>
+                <a href="/login" class="btn btn-outline-secondary btn-lg px-5">Login</a>
+            </div>
+            
+            <p class="mt-3 text-muted">
+                <i class="fas fa-gift me-1"></i>7-day free trial • No credit card required
+            </p>
+            
+            <!-- Footer Disclaimer -->
+            <div class="mt-4 p-3 bg-light rounded">
+                <p class="small text-muted mb-1">
+                    <strong>Disclaimer:</strong> This course is not affiliated with, endorsed by, or approved by ASIS International. 
+                    CPP® is a registered trademark of ASIS International. This is an independent study aid and does not guarantee exam success.
+                </p>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 

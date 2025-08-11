@@ -1,0 +1,146 @@
+{% extends "base.html" %}
+
+{% block title %}{{ quiz_data.title }} - CPP Test Prep{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-8">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-quiz me-2"></i>{{ quiz_data.title }}</h4>
+                <div class="progress mt-2">
+                    <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
+                </div>
+            </div>
+            <div class="card-body">
+                <form id="quiz-form">
+                    {% for i, question in enumerate(quiz_data.questions) %}
+                        <div class="question mb-4" data-question="{{ i }}">
+                            <h5>{{ i + 1 }}. {{ question.question }}</h5>
+                            {% for key, option in question.options.items() %}
+                                <div class="form-check quiz-option p-3 mb-2" onclick="selectOption({{ i }}, '{{ key }}')">
+                                    <input class="form-check-input" type="radio" name="question_{{ i }}" value="{{ key }}" id="q{{ i }}_{{ key }}">
+                                    <label class="form-check-label w-100" for="q{{ i }}_{{ key }}">
+                                        <strong>{{ key }}.</strong> {{ option }}
+                                    </label>
+                                </div>
+                            {% endfor %}
+                        </div>
+                    {% endfor %}
+                    
+                    <div class="text-center">
+                        <button type="button" class="btn btn-primary btn-lg" onclick="submitQuiz()">
+                            <i class="fas fa-check me-2"></i>Submit Quiz
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Results Modal -->
+<div class="modal fade" id="resultsModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">Quiz Results</h5>
+            </div>
+            <div class="modal-body" id="resultsContent">
+                <!-- Results will be loaded here -->
+            </div>
+            <div class="modal-footer">
+                <a href="/dashboard" class="btn btn-primary">Back to Dashboard</a>
+                <a href="/quiz/{{ quiz_type }}" class="btn btn-secondary">Take Again</a>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+let selectedAnswers = {};
+const totalQuestions = {{ quiz_data.questions|length }};
+
+function selectOption(questionIndex, option) {
+    selectedAnswers[questionIndex] = option;
+    
+    // Update visual selection
+    document.querySelectorAll(`input[name="question_${questionIndex}"]`).forEach(input => {
+        input.checked = input.value === option;
+        const option_div = input.closest('.quiz-option');
+        if (input.checked) {
+            option_div.classList.add('selected');
+        } else {
+            option_div.classList.remove('selected');
+        }
+    });
+    
+    // Update progress
+    const progress = (Object.keys(selectedAnswers).length / totalQuestions) * 100;
+    document.getElementById('progress-bar').style.width = progress + '%';
+}
+
+function submitQuiz() {
+    if (Object.keys(selectedAnswers).length < totalQuestions) {
+        alert('Please answer all questions before submitting.');
+        return;
+    }
+    
+    const quizData = {
+        quiz_type: '{{ quiz_type }}',
+        answers: selectedAnswers,
+        questions: {{ quiz_data.questions|tojson }}
+    };
+    
+    fetch('/submit-quiz', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(quizData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        showResults(data);
+    })
+    .catch(error => {
+        alert('Error submitting quiz. Please try again.');
+    });
+}
+
+function showResults(data) {
+    let html = `
+        <div class="text-center mb-4">
+            <h3>Score: ${data.correct}/${data.total} (${data.score.toFixed(1)}%)</h3>
+            <div class="progress mb-3">
+                <div class="progress-bar ${data.score >= 70 ? 'bg-success' : 'bg-danger'}" style="width: ${data.score}%"></div>
+            </div>
+        </div>
+        
+        <div class="results-details">
+    `;
+    
+    data.results.forEach((result, index) => {
+        html += `
+            <div class="card mb-3">
+                <div class="card-body">
+                    <h6>Question ${index + 1}: ${result.question}</h6>
+                    <p><strong>Your Answer:</strong> ${result.user_answer} 
+                       <span class="badge ${result.is_correct ? 'bg-success' : 'bg-danger'}">
+                           ${result.is_correct ? 'Correct' : 'Incorrect'}
+                       </span>
+                    </p>
+                    ${!result.is_correct ? `<p><strong>Correct Answer:</strong> ${result.correct_answer}</p>` : ''}
+                    ${result.explanation ? `<p class="text-muted"><em>${result.explanation}</em></p>` : ''}
+                </div>
+            </div>
+        `;
+    });
+    
+    html += '</div>';
+    
+    document.getElementById('resultsContent').innerHTML = html;
+    new bootstrap.Modal(document.getElementById('resultsModal')).show();
+}
+</script>
+{% endblock %} 

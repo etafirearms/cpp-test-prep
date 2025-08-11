@@ -1,0 +1,13 @@
+ 
+services:
+  - type: web
+    name: cpp-test-prep
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn --bind 0.0.0.0:$PORT app:app
+    healthCheckPath: /
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: OPENAI_API_KEY
+        value: sk-proj-Y37-tHXzj2ttsF4dCOGV5dU6SFjNQPxtVw3fvQVjAY

@@ -1,0 +1,278 @@
+ 
+{% extends "base.html" %}
+
+{% block title %}Subscribe - CPP Test Prep{% endblock %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-lg-10">
+        <div class="card">
+            <div class="card-header text-center">
+                <h3><i class="fas fa-crown me-2 text-warning"></i>Choose Your CPP Prep Plan</h3>
+                <p class="mb-0 text-muted">Unlock full access to all CPP preparation materials</p>
+            </div>
+            <div class="card-body">
+                <!-- Special Launch Offer Alert -->
+                <div class="alert alert-success text-center mb-4">
+                    <h5><i class="fas fa-fire me-2"></i>🎉 LAUNCH SPECIAL - 50% OFF! 🎉</h5>
+                    <p class="mb-2">Use discount code: <strong class="badge bg-success fs-6">LAUNCH50</strong></p>
+                    <p class="mb-0 small">Limited time offer for early adopters!</p>
+                </div>
+                
+                <div class="row">
+                    <!-- 3-Month Plan -->
+                    <div class="col-lg-6 mb-4">
+                        <div class="card border-primary h-100">
+                            <div class="card-body text-center">
+                                <div class="badge bg-primary mb-3">MOST POPULAR</div>
+                                <h4 class="text-primary">3-Month Plan</h4>
+                                <div class="pricing mb-3">
+                                    <h2 class="display-4 text-primary">$89.97</h2>
+                                    <p class="text-muted">
+                                        <s class="text-muted">$89.97</s> 
+                                        <span class="text-success fw-bold">$44.99 with LAUNCH50</span>
+                                    </p>
+                                    <p class="text-muted">One-time payment • 90 days access</p>
+                                </div>
+                                
+                                <ul class="list-unstyled text-start mb-4">
+                                    <li><i class="fas fa-check text-success me-2"></i>Unlimited AI CPP Tutor</li>
+                                    <li><i class="fas fa-check text-success me-2"></i>Practice Quizzes & Mock Exams</li>
+                                    <li><i class="fas fa-check text-success me-2"></i>Interactive Flashcards</li>
+                                    <li><i class="fas fa-check text-success me-2"></i>Progress Tracking & Analytics</li>
+                                    <li><i class="fas fa-check text-success me-2"></i>Mobile & Desktop Access</li>
+                                    <li><i class="fas fa-check text-success me-2"></i>Latest CPP Exam Updates</li>
+                                    <li><i class="fas fa-check text-success me-2"></i>Perfect for focused preparation</li>
+                                </ul>
+                                
+                                <form action="/create-checkout-session" method="POST" class="subscription-form">
+                                    <input type="hidden" name="plan_type" value="3month">
+                                    <div class="mb-3">
+                                        <input type="text" name="discount_code" class="form-control" 
+                                               placeholder="Enter discount code (optional)" 
+                                               value="LAUNCH50">
+                                    </div>
+                                    <button type="submit" class="btn btn-primary btn-lg w-100">
+                                        <i class="fas fa-credit-card me-2"></i>Get 3-Month Access
+                                    </button>
+                                </form>
+                                
+                                <p class="mt-3 text-muted small">
+                                    <i class="fas fa-shield-alt me-1"></i>Perfect for exam preparation<br>
+                                    Most students pass within 3 months
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- 6-Month Plan -->
+                    <div class="col-lg-6 mb-4">
+                        <div class="card border-success h-100">
+                            <div class="card-body text-center">
+                                <div class="badge bg-success mb-3">BEST VALUE</div>
+                                <h4 class="text-success">6-Month Plan</h4>
+                                <div class="pricing mb-3">
+                                    <h2 class="display-4 text-success">$99.00</h2>
+                                    <p class="text-muted">
+                                        <s class="text-muted">$99.00</s> 
+                                        <span class="text-success fw-bold">$49.50 with LAUNCH50</span>
+                                    </p>
+                                    <p class="text-muted">One-time payment • 180 days access</p>
+                                </div>
+                                
+                                <ul class="list-unstyled text-start mb-4">
+                                    <li><i class="fas fa-check text-success me-2"></i>Everything in 3-Month Plan</li>
+                                    <li><i class="fas fa-star text-warning me-2"></i>Extended study time</li>
+                                    <li><i class="fas fa-star text-warning me-2"></i>Retake exam if needed</li>
+                                    <li><i class="fas fa-star text-warning me-2"></i>More practice opportunities</li>
+                                    <li><i class="fas fa-star text-warning me-2"></i>Comprehensive mastery</li>
+                                    <li><i class="fas fa-star text-warning me-2"></i>Flexible study schedule</li>
+                                    <li><i class="fas fa-trophy text-warning me-2"></i>Highest success rate</li>
+                                </ul>
+                                
+                                <form action="/create-checkout-session" method="POST" class="subscription-form">
+                                    <input type="hidden" name="plan_type" value="6month">
+                                    <div class="mb-3">
+                                        <input type="text" name="discount_code" class="form-control" 
+                                               placeholder="Enter discount code (optional)" 
+                                               value="LAUNCH50">
+                                    </div>
+                                    <button type="submit" class="btn btn-success btn-lg w-100">
+                                        <i class="fas fa-credit-card me-2"></i>Get 6-Month Access
+                                    </button>
+                                </form>
+                                
+                                <p class="mt-3 text-muted small">
+                                    <i class="fas fa-trophy me-1"></i>Maximum flexibility<br>
+                                    Perfect for thorough preparation
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Comparison Table -->
+                <div class="row mt-5">
+                    <div class="col-12">
+                        <h5 class="text-center mb-4">Plan Comparison</h5>
+                        <div class="table-responsive">
+                            <table class="table table-striped">
+                                <thead>
+                                    <tr>
+                                        <th>Feature</th>
+                                        <th class="text-center">3-Month Plan</th>
+                                        <th class="text-center">6-Month Plan</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>AI CPP Tutor Access</td>
+                                        <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                                        <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Practice Quizzes</td>
+                                        <td class="text-center">Unlimited</td>
+                                        <td class="text-center">Unlimited</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Mock Exams</td>
+                                        <td class="text-center">Unlimited</td>
+                                        <td class="text-center">Unlimited</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Progress Analytics</td>
+                                        <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                                        <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Mobile Access</td>
+                                        <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                                        <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Study Duration</td>
+                                        <td class="text-center">90 Days</td>
+                                        <td class="text-center">180 Days</td>
+                                    </tr>
+                                    <tr>
+                                        <td>Price (Regular)</td>
+                                        <td class="text-center">$89.97</td>
+                                        <td class="text-center">$99.00</td>
+                                    </tr>
+                                    <tr class="table-success">
+                                        <td><strong>Launch Special (LAUNCH50)</strong></td>
+                                        <td class="text-center"><strong>$44.99</strong></td>
+                                        <td class="text-center"><strong>$49.50</strong></td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- FAQ Section -->
+                <div class="row mt-5">
+                    <div class="col-12">
+                        <h5 class="text-center mb-4">Frequently Asked Questions</h5>
+                        <div class="accordion" id="faqAccordion">
+                            <div class="accordion-item">
+                                <h2 class="accordion-header">
+                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq1">
+                                        How long is the LAUNCH50 discount valid?
+                                    </button>
+                                </h2>
+                                <div id="faq1" class="accordion-collapse collapse" data-bs-parent="#faqAccordion">
+                                    <div class="accordion-body">
+                                        The LAUNCH50 discount code is available for a limited time during our testing phase. 
+                                        This 50% off offer helps us gather feedback from early users.
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="accordion-item">
+                                <h2 class="accordion-header">
+                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq2">
+                                        What happens after my subscription expires?
+                                    </button>
+                                </h2>
+                                <div id="faq2" class="accordion-collapse collapse" data-bs-parent="#faqAccordion">
+                                    <div class="accordion-body">
+                                        Your access will end after 3 or 6 months. You can purchase a new plan if needed. 
+                                        Your progress and chat history will be saved for future access.
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="accordion-item">
+                                <h2 class="accordion-header">
+                                    <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq3">
+                                        Can I upgrade from 3-month to 6-month plan?
+                                    </button>
+                                </h2>
+                                <div id="faq3" class="accordion-collapse collapse" data-bs-parent="#faqAccordion">
+                                    <div class="accordion-body">
+                                        Yes! Contact our support team and we'll help you upgrade. You'll only pay the difference between plans.
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Important Disclaimers -->
+                <div class="alert alert-warning mt-4">
+                    <h6><i class="fas fa-exclamation-triangle me-2"></i>Important Notice</h6>
+                    <p class="mb-2"><strong>This course is NOT affiliated with, endorsed by, or approved by ASIS International.</strong></p>
+                    <p class="mb-2">This is an independent study aid created to help students prepare for the CPP exam. ASIS International has not reviewed or approved this content.</p>
+                    <p class="mb-0"><strong>We do not guarantee that using this course will result in passing the CPP exam.</strong> Exam success depends on individual study habits, prior knowledge, and exam performance.</p>
+                </div>
+                
+                <div class="text-center mt-4">
+                    <p class="text-muted">
+                        <i class="fas fa-lock me-1"></i>Secure payment with Stripe • 
+                        <i class="fas fa-envelope me-1"></i>Questions? <a href="mailto:support@cpptestprep.com">Contact Support</a>
+                    </p>
+                    <p class="text-muted">
+                        Current trial status: 
+                        {% if user.subscription_status == 'trial' %}
+                            <span class="badge bg-info">{{ ((user.subscription_end_date - moment.utcnow()).days if user.subscription_end_date else 0) }} days left</span>
+                        {% else %}
+                            <span class="badge bg-warning">Trial expired</span>
+                        {% endif %}
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Auto-fill discount code and calculate savings
+document.querySelectorAll('.subscription-form').forEach(form => {
+    const discountInput = form.querySelector('input[name="discount_code"]');
+    const button = form.querySelector('button[type="submit"]');
+    
+    discountInput.addEventListener('input', function() {
+        if (this.value.toUpperCase() === 'LAUNCH50') {
+            button.classList.add('btn-success');
+            button.classList.remove('btn-primary');
+        } else {
+            button.classList.add('btn-primary');
+            button.classList.remove('btn-success');
+        }
+    });
+});
+
+// Form validation
+document.querySelectorAll('.subscription-form').forEach(form => {
+    form.addEventListener('submit', function(e) {
+        const button = this.querySelector('button[type="submit"]');
+        button.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing...';
+        button.disabled = true;
+    });
+});
+</script>
+{% endblock %}

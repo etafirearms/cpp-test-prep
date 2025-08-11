@@ -1,0 +1,139 @@
+{% extends "base.html" %}
+
+{% block title %}Dashboard - CPP Test Prep{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12 mb-4">
+        <div class="card">
+            <div class="card-body">
+                <div class="row align-items-center">
+                    <div class="col-md-6">
+                        <h3>Welcome back, {{ user.first_name }}! 👋</h3>
+                        <p class="text-muted mb-0">
+                            {% if user.subscription_status == 'trial' %}
+                                Free trial • {{ days_left }} days remaining
+                            {% elif user.subscription_status == 'active' %}
+                                Active subscription
+                            {% else %}
+                                Subscription expired
+                            {% endif %}
+                        </p>
+                    </div>
+                    <div class="col-md-6 text-md-end">
+                        {% if user.subscription_status != 'active' %}
+                            <a href="/subscribe" class="btn btn-warning">
+                                <i class="fas fa-crown me-2"></i>Upgrade Now
+                            </a>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-lg-3 col-md-6 mb-4">
+        <div class="card text-center">
+            <div class="card-body">
+                <i class="fas fa-clock fa-3x text-primary mb-3"></i>
+                <h4>{{ user.study_time or 0 }}</h4>
+                <p class="text-muted">Minutes Studied</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-3 col-md-6 mb-4">
+        <div class="card text-center">
+            <div class="card-body">
+                <i class="fas fa-quiz fa-3x text-success mb-3"></i>
+                <h4>{{ recent_quizzes|length }}</h4>
+                <p class="text-muted">Quizzes Taken</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-3 col-md-6 mb-4">
+        <div class="card text-center">
+            <div class="card-body">
+                <i class="fas fa-percentage fa-3x text-info mb-3"></i>
+                <h4>
+                    {% if recent_quizzes %}
+                        {{ "%.1f"|format(recent_quizzes|map(attribute='score')|sum / recent_quizzes|length) }}%
+                    {% else %}
+                        N/A
+                    {% endif %}
+                </h4>
+                <p class="text-muted">Avg Score</p>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-lg-3 col-md-6 mb-4">
+        <div class="card text-center">
+            <div class="card-body">
+                <i class="fas fa-fire fa-3x text-warning mb-3"></i>
+                <h4>{{ recent_activities|length }}</h4>
+                <p class="text-muted">Study Streak</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-8 mb-4">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-play me-2"></i>Quick Actions</h5>
+            </div>
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-6 mb-3">
+                        <a href="/study" class="btn btn-primary w-100 p-3">
+                            <i class="fas fa-comments fa-2x d-block mb-2"></i>
+                            Start AI Study Session
+                        </a>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <a href="/quiz/practice" class="btn btn-success w-100 p-3">
+                            <i class="fas fa-brain fa-2x d-block mb-2"></i>
+                            Take Practice Quiz
+                        </a>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <a href="/flashcards" class="btn btn-info w-100 p-3">
+                            <i class="fas fa-layer-group fa-2x d-block mb-2"></i>
+                            Study Flashcards
+                        </a>
+                    </div>
+                    <div class="col-md-6 mb-3">
+                        <a href="/quiz/mock-exam" class="btn btn-warning w-100 p-3">
+                            <i class="fas fa-certificate fa-2x d-block mb-2"></i>
+                            Mock Exam
+                        </a>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-4">
+        <div class="card">
+            <div class="card-header">
+                <h5><i class="fas fa-history me-2"></i>Recent Activity</h5>
+            </div>
+            <div class="card-body">
+                {% for activity in recent_activities[:5] %}
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <small>{{ activity.activity.replace('_', ' ').title() }}</small>
+                        <small class="text-muted">{{ activity.timestamp.strftime('%m/%d') }}</small>
+                    </div>
+                {% else %}
+                    <p class="text-muted">No recent activity</p>
+                {% endfor %}
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %} 
