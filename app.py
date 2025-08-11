@@ -6,6 +6,7 @@ import json
 import os
 import requests
 import stripe
+import time
 from functools import wraps
 
 app = Flask(__name__)
@@ -21,9 +22,12 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # API Configuration
-OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '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')
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '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')
 stripe.api_key = os.environ.get('STRIPE_SECRET_KEY', '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')
 STRIPE_PUBLISHABLE_KEY = os.environ.get('STRIPE_PUBLISHABLE_KEY', 'pk_live_51Ouik4P74bHmavbxxshp1STvn79vdgvCZkDIVRt0f9adlJqyTx81m9ONgVDuAsChzHBv3chfDHR4Cg2UBnm9iRln006sA0QteW')
+
+# Rate limiting for API calls
+last_api_call = None
 
 # Database Models
 class User(db.Model):
@@ -112,8 +116,16 @@ def log_activity(user_id, activity, details=None):
     db.session.commit()
 
 def chat_with_ai(messages, user_id=None):
-    """Enhanced CPP-specific AI chat"""
+    """Enhanced CPP-specific AI chat with better formatting"""
+    global last_api_call
+    
     try:
+        # Rate limiting: wait at least 2 seconds between API calls
+        if last_api_call:
+            time_since_last = datetime.utcnow() - last_api_call
+            if time_since_last.total_seconds() < 2:
+                time.sleep(2 - time_since_last.total_seconds())
+        
         headers = {
             'Authorization': f'Bearer {OPENAI_API_KEY}',
             'Content-Type': 'application/json'
@@ -139,6 +151,23 @@ def chat_with_ai(messages, user_id=None):
             4. Explaining complex regulations in simple terms
             5. Providing current information on payroll compliance
 
+            IMPORTANT FORMATTING RULES:
+            - When creating quiz questions, format them clearly with the question first, then answer choices on separate lines
+            - Use this format for multiple choice questions:
+
+            **1. [Question text]**
+
+            A. [Option A]
+            B. [Option B] 
+            C. [Option C]
+            D. [Option D]
+
+            - Always put questions in bold with **
+            - Put each answer choice on its own line
+            - Use A. B. C. D. format (not a) b) c) d))
+            - Leave blank lines between questions for readability
+            - When explaining concepts, use clear paragraphs and bullet points
+
             Always be encouraging, accurate, and focused on helping students pass their CPP exam."""
         }
         
@@ -146,11 +175,14 @@ def chat_with_ai(messages, user_id=None):
             messages.insert(0, system_message)
         
         data = {
-            'model': 'gpt-3.5-turbo',  
+            'model': 'gpt-3.5-turbo',
             'messages': messages,
-            'max_tokens': 1200,
+            'max_tokens': 1000,
             'temperature': 0.7
         }
+        
+        # Record the API call time
+        last_api_call = datetime.utcnow()
         
         response = requests.post(
             'https://api.openai.com/v1/chat/completions',
@@ -159,12 +191,25 @@ def chat_with_ai(messages, user_id=None):
             timeout=30
         )
         
+        print(f"OpenAI API Response Status: {response.status_code}")
+        
         if response.status_code == 200:
             result = response.json()
             return result['choices'][0]['message']['content']
+        elif response.status_code == 429:
+            return "I'm getting a lot of questions right now! Please wait 30 seconds and try again. This helps me give you better answers."
+        elif response.status_code == 404:
+            return "I'm having trouble with the AI service right now. Please try asking a simpler question."
+        elif response.status_code == 401:
+            return "There's an authentication issue. Please contact support."
         else:
-            return f"I'm having trouble connecting right now. Please try again. (Error: {response.status_code})"
+            print(f"API Error {response.status_code}: {response.text}")
+            return f"I'm experiencing technical difficulties. Please try again in a moment."
     
+    except requests.exceptions.Timeout:
+        return "The AI service is taking too long to respond. Please try again."
+    except requests.exceptions.ConnectionError:
+        return "I can't connect to the AI service right now. Please check your connection and try again."
     except Exception as e:
         print(f"AI Chat Error: {e}")
         return "Sorry, I'm experiencing technical difficulties. Please try again in a moment."
@@ -660,6 +705,12 @@ def stripe_webhook():
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
     
+@app.route('/webhook', methods=['POST'])
+def stripe_webhook():
+    """Handle Stripe webhooks"""
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature')
+    
     try:
         event = stripe.Webhook.construct_event(
             payload, sig_header, os.environ.get('STRIPE_WEBHOOK_SECRET')
@@ -720,5 +771,4 @@ def privacy():
 # For production
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-
     app.run(host='0.0.0.0', port=port, debug=False)
