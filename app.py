@@ -75,6 +75,14 @@ class StudySession(db.Model):
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
     ended_at = db.Column(db.DateTime)
 
+# Create database tables automatically
+with app.app_context():
+    try:
+        db.create_all()
+        print("Database tables created successfully!")
+    except Exception as e:
+        print(f"Database initialization error: {e}")
+
 # Helper Functions
 def login_required(f):
     @wraps(f)
@@ -161,10 +169,10 @@ def chat_with_ai(messages, user_id=None):
         print(f"AI Chat Error: {e}")
         return "Sorry, I'm experiencing technical difficulties. Please try again in a moment."
 
-# Database Initialization Route (IMPORTANT FIX!)
+# Database Initialization Route
 @app.route('/init-db')
 def init_database():
-    """Initialize database tables - run this once after deployment"""
+    """Initialize database tables - backup method"""
     try:
         with app.app_context():
             db.create_all()
@@ -709,26 +717,7 @@ def privacy():
     """Privacy Policy page"""
     return render_template('privacy.html')
 
-# Initialize database on first request
-@app.before_first_request
-def initialize_database():
-    """Initialize database tables automatically on first request"""
-    try:
-        db.create_all()
-        print("Database tables created successfully!")
-    except Exception as e:
-        print(f"Database initialization error: {e}")
-
-# Initialize database and sample data
-def create_tables():
-    """Create database tables"""
-    with app.app_context():
-        db.create_all()
-        print("Database tables created successfully!")
-
 # For production
 if __name__ == '__main__':
-    # Initialize database tables on startup
-    create_tables()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
