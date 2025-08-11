@@ -146,7 +146,7 @@ def chat_with_ai(messages, user_id=None):
             messages.insert(0, system_message)
         
         data = {
-            'model': 'gpt-4',  # Using GPT-4 for better accuracy
+            'model': 'gpt-3.5-turbo',  
             'messages': messages,
             'max_tokens': 1200,
             'temperature': 0.7
@@ -720,4 +720,5 @@ def privacy():
 # For production
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
+
     app.run(host='0.0.0.0', port=port, debug=False)
