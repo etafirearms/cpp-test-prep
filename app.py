@@ -521,7 +521,12 @@ def study():
     messages = json.loads(chat_history.messages)
     session['study_start_time'] = datetime.utcnow().timestamp()
     
-    return render_template('study.html', user=user, messages=messages)
+    # Add missing template variables
+    return render_template('study.html', 
+                         user=user, 
+                         messages=messages,
+                         moment=datetime,  # Add this
+                         cpp_domains=CPP_DOMAINS)  # Add this
 
 @app.route('/chat', methods=['POST'])
 @subscription_required
@@ -925,3 +930,4 @@ def diag_openai():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+
