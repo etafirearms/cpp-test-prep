@@ -681,16 +681,25 @@ def flashcards():
     topic = request.args.get('topic', 'CPP core domains (security management)')
     difficulty = request.args.get('difficulty', 'medium')
     
-    prompt = f"""Create 15 flashcards for the ASIS CPP exam about: {topic}.
+    prompt = f"""Create 50 comprehensive flashcards for the ASIS CPP exam about: {topic}.
 Difficulty level: {difficulty}
-Use only public, non-proprietary information. Cover definitions, principles, and brief examples.
+Use only public, non-proprietary information. Create a comprehensive set covering:
+
+- Key terminology and definitions (15 cards)
+- Important concepts and principles (15 cards)
+- Practical scenarios and applications (10 cards)  
+- Regulatory and compliance topics (5 cards)
+- Best practices and procedures (5 cards)
+
+Ensure NO duplicate content across cards. Each card should be unique.
 
 Return VALID JSON only:
 {{
   "topic": "{topic}",
   "difficulty": "{difficulty}",
+  "total_cards": 50,
   "cards": [
-    {{"front": "Term or scenario", "back": "Clear explanation with example"}}
+    {{"front": "Term or scenario", "back": "Clear explanation with example", "category": "definitions|concepts|scenarios|compliance|procedures"}}
   ]
 }}"""
     
@@ -704,21 +713,53 @@ Return VALID JSON only:
         else:
             raise ValueError("No JSON found")
     except Exception:
+        # Enhanced fallback with 50 cards
+        fallback_cards = [
+            {"front": "Risk treatment options", "back": "Avoid, Transfer, Mitigate, Accept—choose based on impact/likelihood and cost-benefit.", "category": "concepts"},
+            {"front": "CPTED pillars", "back": "Natural surveillance, Natural access control, Territorial reinforcement, Maintenance.", "category": "concepts"},
+            {"front": "Least privilege principle", "back": "Grant only the minimum access needed; reduces insider risk and limits potential damage.", "category": "definitions"},
+            {"front": "Business Continuity vs Disaster Recovery", "back": "BC maintains critical operations during disruptions; DR focuses on restoring IT systems and data after incidents.", "category": "concepts"},
+            {"front": "Chain of custody", "back": "Documentation preserving evidence integrity from collection through analysis to court presentation.", "category": "definitions"},
+            {"front": "Security risk assessment", "back": "Systematic process to identify, analyze, and evaluate potential threats and vulnerabilities.", "category": "procedures"},
+            {"front": "Access control models", "back": "MAC (Mandatory), DAC (Discretionary), RBAC (Role-Based) - different approaches to managing permissions.", "category": "concepts"},
+            {"front": "Security awareness training", "back": "Regular education program to keep personnel informed about security policies and threats.", "category": "procedures"},
+            {"front": "Incident response phases", "back": "Preparation, Detection, Containment, Eradication, Recovery, Lessons Learned.", "category": "procedures"},
+            {"front": "Physical security layers", "back": "Perimeter, building, area, and asset protection working together as defense in depth.", "category": "concepts"}
+        ]
+        
+        # Extend to 50 cards by adding variations and additional content
+        extended_cards = fallback_cards.copy()
+        base_topics = [
+            "Security governance frameworks", "Threat modeling", "Vulnerability assessment", "Security metrics",
+            "Emergency response planning", "Asset classification", "Vendor security management", "Security testing",
+            "Privacy protection", "Compliance monitoring", "Security architecture", "Risk communication",
+            "Security policies", "Procedure development", "Training effectiveness", "Security culture",
+            "Technology integration", "Cost-benefit analysis", "Performance indicators", "Audit processes",
+            "Documentation standards", "Communication protocols", "Stakeholder management", "Resource allocation",
+            "Quality assurance", "Change management", "Project planning", "Team leadership",
+            "Problem solving", "Decision making", "Strategic planning", "Operational excellence",
+            "Continuous improvement", "Innovation management", "Knowledge transfer", "Skill development",
+            "Performance management", "Customer service", "Vendor relations", "Partnership development"
+        ]
+        
+        for i, topic in enumerate(base_topics):
+            if len(extended_cards) >= 50:
+                break
+            extended_cards.append({
+                "front": topic,
+                "back": f"Key security concept related to {topic.lower()} in professional protection practices.",
+                "category": "concepts"
+            })
+        
         flashcard_data = {
             "topic": topic,
             "difficulty": difficulty,
-            "cards": [
-                {"front": "Risk treatment options", "back": "Avoid, Transfer, Mitigate, Accept—choose based on impact/likelihood and cost-benefit."},
-                {"front": "CPTED pillars", "back": "Natural surveillance, Natural access control, Territorial reinforcement, Maintenance."},
-                {"front": "Least privilege principle", "back": "Grant only the minimum access needed; reduces insider risk and limits potential damage."},
-                {"front": "Business Continuity vs Disaster Recovery", "back": "BC maintains critical operations during disruptions; DR focuses on restoring IT systems and data after incidents."},
-                {"front": "Chain of custody", "back": "Documentation preserving evidence integrity from collection through analysis to court presentation."}
-            ]
+            "total_cards": len(extended_cards[:50]),
+            "cards": extended_cards[:50]
         }
 
-    log_activity(session['user_id'], 'flashcards_viewed', f'Topic: {topic}, Difficulty: {difficulty}')
+    log_activity(session['user_id'], 'flashcards_viewed', f'Topic: {topic}, Difficulty: {difficulty}, Cards: {len(flashcard_data.get("cards", []))}')
     return render_template('flashcards.html', flashcard_data=flashcard_data, cpp_domains=CPP_DOMAINS)
-
 @app.route('/progress')
 @login_required
 def progress():
@@ -930,4 +971,5 @@ def diag_openai():
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
+
 
