@@ -7,6 +7,7 @@ import os
 import requests
 import stripe
 import time
+import hashlib
 from functools import wraps
 
 # -----------------------------------------------------------------------------
@@ -54,8 +55,8 @@ QUIZ_TYPES = {
     },
     'mock-exam': {
         'name': 'Mock Exam',
-        'description': 'Full-length practice exam (125 questions)',
-        'questions': 125
+        'description': 'Progressive exam: 50 questions initially, 125 when ready',
+        'questions': 50  # Will be dynamic based on user progress
     },
     'domain-specific': {
         'name': 'Domain-Specific Quiz',
@@ -116,7 +117,7 @@ CPP_DOMAINS = {
 }
 
 # -----------------------------------------------------------------------------
-# Database Models (keeping existing structure)
+# Database Models
 # -----------------------------------------------------------------------------
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -152,10 +153,12 @@ class QuizResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     quiz_type = db.Column(db.String(50), nullable=False)
+    domain = db.Column(db.String(50))
     questions = db.Column(db.Text, nullable=False)
     answers = db.Column(db.Text, nullable=False)
     score = db.Column(db.Float, nullable=False)
     total_questions = db.Column(db.Integer, nullable=False)
+    time_taken = db.Column(db.Integer)
     completed_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class StudySession(db.Model):
@@ -166,6 +169,26 @@ class StudySession(db.Model):
     session_type = db.Column(db.String(50))
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
     ended_at = db.Column(db.DateTime)
+
+class QuestionBank(db.Model):
+    """Track all generated questions to prevent duplicates"""
+    id = db.Column(db.Integer, primary_key=True)
+    question_hash = db.Column(db.String(64), unique=True, nullable=False)
+    question_text = db.Column(db.Text, nullable=False)
+    domain = db.Column(db.String(50))
+    difficulty = db.Column(db.String(20))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class UserProgress(db.Model):
+    """Track user progress by domain and difficulty"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    domain = db.Column(db.String(50), nullable=False)
+    mastery_level = db.Column(db.String(20), default='needs_practice')
+    average_score = db.Column(db.Float, default=0.0)
+    question_count = db.Column(db.Integer, default=0)
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+    consecutive_good_scores = db.Column(db.Integer, default=0)
 
 # Create tables once app starts
 with app.app_context():
@@ -204,12 +227,9 @@ def log_activity(user_id, activity, details=None):
     db.session.commit()
 
 def chat_with_ai(messages, user_id=None):
-    """
-    ASIS CPP (Certified Protection Professional) tutor with enhanced capabilities
-    """
+    """Enhanced AI chat function with better error handling"""
     global last_api_call
     try:
-        # simple rate limiting (2 seconds)
         if last_api_call:
             delta = datetime.utcnow() - last_api_call
             if delta.total_seconds() < 2:
@@ -270,59 +290,34 @@ def chat_with_ai(messages, user_id=None):
         print(f"[OpenAI] Unexpected error: {e}")
         return "Sorry, I'm experiencing technical difficulties. Please try again later."
 
-def generate_enhanced_quiz(quiz_type, domain=None, difficulty='medium'):
-    """Generate enhanced quiz questions with better variety and difficulty"""
-    
-    # Determine number of questions based on quiz type
-    num_questions = QUIZ_TYPES.get(quiz_type, {}).get('questions', 10)
+def generate_quiz_questions_with_uniqueness(quiz_type, domain, difficulty, num_questions, user_id):
+    """Generate unique questions and store hashes to prevent duplicates"""
     
     domain_focus = ""
     if domain and domain in CPP_DOMAINS:
         domain_info = CPP_DOMAINS[domain]
         domain_focus = f"Focus specifically on {domain_info['name']} including: {', '.join(domain_info['topics'])}."
     
-    difficulty_instruction = {
-        'easy': 'Use basic concepts and straightforward scenarios.',
-        'medium': 'Use intermediate concepts with some analysis required.',
-        'hard': 'Use advanced concepts requiring critical thinking and complex scenarios.'
-    }
-    
-    quiz_instructions = {
-        'practice': 'Create general practice questions covering multiple CPP domains.',
-        'mock-exam': 'Create comprehensive exam-style questions covering all CPP domains proportionally.',
-        'domain-specific': f'Create questions specifically for the selected domain. {domain_focus}',
-        'quick-review': 'Create quick review questions covering key concepts.',
-        'difficult': 'Create challenging questions that test deep understanding and application.',
-        'scenario-based': 'Create realistic security scenarios requiring practical application of CPP principles.',
-        'legal-compliance': 'Focus on legal requirements, regulations, and compliance aspects of security management.'
-    }
-    
-    prompt = f"""Create a {quiz_type} multiple-choice quiz for the ASIS Certified Protection Professional (CPP) exam.
-
-{quiz_instructions.get(quiz_type, 'Create practice questions for CPP exam preparation.')}
+    prompt = f"""Create {num_questions} UNIQUE multiple-choice questions for the ASIS CPP exam.
 {domain_focus}
-{difficulty_instruction.get(difficulty, 'Use appropriate difficulty level.')}
+Difficulty: {difficulty}
 
-Generate {num_questions} questions. Return VALID JSON only:
+CRITICAL: Each question must be completely unique. No duplicate concepts or similar wording.
+Cover different aspects, scenarios, and applications within the domain.
 
+Return VALID JSON only:
 {{
   "title": "CPP {quiz_type.title().replace('-', ' ')} Quiz",
-  "quiz_type": "{quiz_type}",
-  "domain": "{domain or 'general'}",
-  "difficulty": "{difficulty}",
   "questions": [
     {{
-      "question": "Question text",
+      "question": "Unique question text",
       "options": {{"A": "option", "B": "option", "C": "option", "D": "option"}},
       "correct": "A",
       "explanation": "Clear explanation",
-      "domain": "relevant_domain",
-      "difficulty": "{difficulty}"
+      "domain": "relevant_domain"
     }}
   ]
-}}
-
-Ensure questions span the CPP domains appropriately and use only public, non-proprietary information."""
+}}"""
 
     ai_response = chat_with_ai([{'role': 'user', 'content': prompt}])
     
@@ -330,51 +325,194 @@ Ensure questions span the CPP domains appropriately and use only public, non-pro
         import re
         json_match = re.search(r'\{.*\}\s*$', ai_response, re.DOTALL)
         if json_match:
-            return json.loads(json_match.group())
-        else:
-            raise ValueError("No JSON found")
+            quiz_data = json.loads(json_match.group())
+            
+            # Check for duplicates and store new questions
+            unique_questions = []
+            for question in quiz_data.get('questions', []):
+                question_text = question.get('question', '')
+                question_hash = hashlib.md5(question_text.encode()).hexdigest()
+                
+                # Check if question already exists
+                existing = QuestionBank.query.filter_by(question_hash=question_hash).first()
+                if not existing:
+                    # Store new question
+                    new_question = QuestionBank(
+                        question_hash=question_hash,
+                        question_text=question_text,
+                        domain=question.get('domain', domain),
+                        difficulty=difficulty
+                    )
+                    db.session.add(new_question)
+                    unique_questions.append(question)
+                else:
+                    print(f"Duplicate question detected and skipped: {question_text[:50]}...")
+            
+            if len(unique_questions) >= num_questions * 0.8:  # At least 80% unique
+                quiz_data['questions'] = unique_questions[:num_questions]
+                db.session.commit()
+                return quiz_data
+            else:
+                print(f"Too many duplicates detected. Only {len(unique_questions)} unique out of {num_questions}")
+                return None
+                
     except Exception as e:
         print(f"Quiz generation error: {e}")
-        # Enhanced fallback quiz with more variety
-        fallback_questions = [
-            {
-                "question": "Which is the primary goal of a comprehensive security risk assessment?",
-                "options": {
-                    "A": "Identify all possible threats",
-                    "B": "Determine cost-effective risk mitigation strategies",
-                    "C": "Eliminate all security risks",
-                    "D": "Satisfy insurance requirements"
-                },
-                "correct": "B",
-                "explanation": "Risk assessments identify risks to implement cost-effective mitigation strategies.",
-                "domain": "security-principles",
-                "difficulty": difficulty
+        return None
+
+def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
+    """Generate fallback quiz when AI generation fails"""
+    fallback_questions = [
+        {
+            "question": "Which is the primary goal of a comprehensive security risk assessment?",
+            "options": {
+                "A": "Identify all possible threats",
+                "B": "Determine cost-effective risk mitigation strategies",
+                "C": "Eliminate all security risks",
+                "D": "Satisfy insurance requirements"
             },
-            {
-                "question": "In CPTED, what does 'natural surveillance' primarily accomplish?",
-                "options": {
-                    "A": "Reduces the need for security guards",
-                    "B": "Increases the likelihood that criminal activity will be observed",
-                    "C": "Eliminates blind spots in camera coverage",
-                    "D": "Provides legal liability protection"
-                },
-                "correct": "B",
-                "explanation": "Natural surveillance increases visibility and the perception that criminal activity will be seen.",
-                "domain": "physical-security",
-                "difficulty": difficulty
-            }
-        ]
+            "correct": "B",
+            "explanation": "Risk assessments identify risks to implement cost-effective mitigation strategies.",
+            "domain": "security-principles"
+        },
+        {
+            "question": "In CPTED, what does 'natural surveillance' primarily accomplish?",
+            "options": {
+                "A": "Reduces the need for security guards",
+                "B": "Increases the likelihood that criminal activity will be observed",
+                "C": "Eliminates blind spots in camera coverage",
+                "D": "Provides legal liability protection"
+            },
+            "correct": "B",
+            "explanation": "Natural surveillance increases visibility and the perception that criminal activity will be seen.",
+            "domain": "physical-security"
+        }
+    ]
+    
+    # Extend fallback if needed
+    while len(fallback_questions) < num_questions:
+        fallback_questions.append(fallback_questions[0])
+    
+    return {
+        "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
+        "quiz_type": quiz_type,
+        "domain": domain or 'general',
+        "difficulty": difficulty,
+        "questions": fallback_questions[:num_questions]
+    }
+
+def generate_enhanced_quiz(quiz_type, domain=None, difficulty='medium'):
+    """Generate enhanced quiz questions with duplicate prevention and progressive difficulty"""
+    user_id = session.get('user_id')
+    
+    # Check if user is ready for full 125-question exam
+    if quiz_type == 'mock-exam' and user_id:
+        user_progress = UserProgress.query.filter_by(user_id=user_id).all()
+        ready_for_full_exam = True
         
-        # Add more questions if needed
-        while len(fallback_questions) < num_questions:
-            fallback_questions.append(fallback_questions[0])  # Duplicate if needed
+        for progress in user_progress:
+            if progress.consecutive_good_scores < 3:  # Need 3 consecutive 70%+ scores
+                ready_for_full_exam = False
+                break
         
+        # Start with 50 questions if not ready
+        if not ready_for_full_exam:
+            num_questions = 50
+            flash('Starting with 50-question practice exam. Score 70%+ consistently to unlock full 125-question exam.', 'info')
+        else:
+            num_questions = 125
+            flash('Full 125-question mock exam unlocked! Good luck!', 'success')
+    else:
+        num_questions = QUIZ_TYPES.get(quiz_type, {}).get('questions', 10)
+    
+    # Generate questions with uniqueness check
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        quiz_data = generate_quiz_questions_with_uniqueness(quiz_type, domain, difficulty, num_questions, user_id)
+        if quiz_data:
+            return quiz_data
+    
+    # Fallback if generation fails
+    return generate_fallback_quiz(quiz_type, domain, difficulty, num_questions)
+
+def update_user_progress(user_id, quiz_result):
+    """Update user progress based on quiz results"""
+    try:
+        questions = json.loads(quiz_result.questions)
+        answers = json.loads(quiz_result.answers)
+        
+        # Group questions by domain
+        domain_results = {}
+        for i, question in enumerate(questions):
+            q_domain = question.get('domain', 'general')
+            if q_domain not in domain_results:
+                domain_results[q_domain] = {'correct': 0, 'total': 0}
+            
+            domain_results[q_domain]['total'] += 1
+            user_answer = answers.get(str(i))
+            if user_answer == question['correct']:
+                domain_results[q_domain]['correct'] += 1
+        
+        # Update progress for each domain
+        for domain, results in domain_results.items():
+            if domain == 'general':
+                continue
+                
+            progress = UserProgress.query.filter_by(user_id=user_id, domain=domain).first()
+            if not progress:
+                progress = UserProgress(user_id=user_id, domain=domain)
+                db.session.add(progress)
+            
+            # Calculate domain score
+            domain_score = (results['correct'] / results['total']) * 100
+            
+            # Update running average
+            total_questions = progress.question_count + results['total']
+            progress.average_score = ((progress.average_score * progress.question_count) + 
+                                   (domain_score * results['total'])) / total_questions
+            progress.question_count = total_questions
+            progress.last_updated = datetime.utcnow()
+            
+            # Update consecutive good scores
+            if domain_score >= 70:
+                progress.consecutive_good_scores += 1
+            else:
+                progress.consecutive_good_scores = 0
+            
+            # Update mastery level
+            if progress.average_score >= 85 and progress.consecutive_good_scores >= 3:
+                progress.mastery_level = 'mastered'
+            elif progress.average_score >= 70 and progress.consecutive_good_scores >= 2:
+                progress.mastery_level = 'good'
+            else:
+                progress.mastery_level = 'needs_practice'
+        
+        db.session.commit()
+    except Exception as e:
+        print(f"Error updating user progress: {e}")
+
+def get_domain_recommendation(progress):
+    """Generate specific recommendations based on performance"""
+    if progress.average_score >= 85 and progress.consecutive_good_scores >= 3:
         return {
-            "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
-            "quiz_type": quiz_type,
-            "domain": domain or 'general',
-            "difficulty": difficulty,
-            "questions": fallback_questions[:num_questions]
+            'level': 'mastered',
+            'message': 'Excellent! You have mastered this domain.',
+            'action': 'Review occasionally to maintain knowledge.',
+            'color': 'success'
+        }
+    elif progress.average_score >= 70 and progress.consecutive_good_scores >= 2:
+        return {
+            'level': 'good',
+            'message': 'Good progress! You understand the core concepts.',
+            'action': 'Take advanced practice questions and focus on edge cases.',
+            'color': 'warning'
+        }
+    else:
+        return {
+            'level': 'needs_practice',
+            'message': 'This area needs more attention.',
+            'action': 'Study fundamental concepts and take more practice quizzes.',
+            'color': 'danger'
         }
 
 def set_user_subscription_by_customer(customer_id, status, subscription_id=None):
@@ -521,12 +659,12 @@ def study():
     messages = json.loads(chat_history.messages)
     session['study_start_time'] = datetime.utcnow().timestamp()
     
-    # Add missing template variables
+    # Fix template variables
     return render_template('study.html', 
                          user=user, 
                          messages=messages,
-                         moment=datetime,  # Add this
-                         cpp_domains=CPP_DOMAINS)  # Add this
+                         moment=datetime,
+                         cpp_domains=CPP_DOMAINS)
 
 @app.route('/chat', methods=['POST'])
 @subscription_required
@@ -585,6 +723,7 @@ def submit_quiz():
     quiz_type = data.get('quiz_type')
     answers = data.get('answers')
     questions = data.get('questions')
+    domain = data.get('domain', 'general')
 
     # Calculate time taken
     time_taken = 0
@@ -615,12 +754,17 @@ def submit_quiz():
     result = QuizResult(
         user_id=session['user_id'],
         quiz_type=quiz_type,
+        domain=domain,
         questions=json.dumps(questions),
         answers=json.dumps(answers),
         score=score,
-        total_questions=total_questions
+        total_questions=total_questions,
+        time_taken=time_taken
     )
     db.session.add(result)
+
+    # Update user progress
+    update_user_progress(session['user_id'], result)
 
     user = User.query.get(session['user_id'])
     scores = json.loads(user.quiz_scores) if user.quiz_scores else []
@@ -628,9 +772,10 @@ def submit_quiz():
         'score': score, 
         'date': datetime.utcnow().isoformat(), 
         'type': quiz_type,
+        'domain': domain,
         'time_taken': time_taken
     })
-    user.quiz_scores = json.dumps(scores[-50:])  # Keep last 50 scores
+    user.quiz_scores = json.dumps(scores[-50:])
     db.session.commit()
 
     # Generate performance insights
@@ -691,7 +836,7 @@ Use only public, non-proprietary information. Create a comprehensive set coverin
 - Regulatory and compliance topics (5 cards)
 - Best practices and procedures (5 cards)
 
-Ensure NO duplicate content across cards. Each card should be unique.
+Ensure NO duplicate content across cards. Each card should be unique and valuable.
 
 Return VALID JSON only:
 {{
@@ -713,8 +858,8 @@ Return VALID JSON only:
         else:
             raise ValueError("No JSON found")
     except Exception:
-        # Enhanced fallback with 50 cards
-        fallback_cards = [
+        # Enhanced fallback with 50 unique cards
+        base_cards = [
             {"front": "Risk treatment options", "back": "Avoid, Transfer, Mitigate, Accept—choose based on impact/likelihood and cost-benefit.", "category": "concepts"},
             {"front": "CPTED pillars", "back": "Natural surveillance, Natural access control, Territorial reinforcement, Maintenance.", "category": "concepts"},
             {"front": "Least privilege principle", "back": "Grant only the minimum access needed; reduces insider risk and limits potential damage.", "category": "definitions"},
@@ -727,39 +872,133 @@ Return VALID JSON only:
             {"front": "Physical security layers", "back": "Perimeter, building, area, and asset protection working together as defense in depth.", "category": "concepts"}
         ]
         
-        # Extend to 50 cards by adding variations and additional content
-        extended_cards = fallback_cards.copy()
-        base_topics = [
-            "Security governance frameworks", "Threat modeling", "Vulnerability assessment", "Security metrics",
-            "Emergency response planning", "Asset classification", "Vendor security management", "Security testing",
-            "Privacy protection", "Compliance monitoring", "Security architecture", "Risk communication",
-            "Security policies", "Procedure development", "Training effectiveness", "Security culture",
-            "Technology integration", "Cost-benefit analysis", "Performance indicators", "Audit processes",
-            "Documentation standards", "Communication protocols", "Stakeholder management", "Resource allocation",
-            "Quality assurance", "Change management", "Project planning", "Team leadership",
-            "Problem solving", "Decision making", "Strategic planning", "Operational excellence",
-            "Continuous improvement", "Innovation management", "Knowledge transfer", "Skill development",
-            "Performance management", "Customer service", "Vendor relations", "Partnership development"
+        # Generate 40 more unique cards
+        additional_topics = [
+            ("Security governance", "Framework for directing and controlling security activities across the organization."),
+            ("Threat modeling", "Systematic approach to identifying and ranking potential threats to a system."),
+            ("Vulnerability assessment", "Process of identifying, quantifying, and ranking vulnerabilities in a system."),
+            ("Security metrics", "Measurable indicators used to assess the effectiveness of security controls."),
+            ("Emergency response planning", "Predetermined procedures for responding to various emergency situations."),
+            ("Asset classification", "Process of categorizing assets based on their value and sensitivity."),
+            ("Vendor security management", "Ensuring third-party providers meet security requirements."),
+            ("Security testing", "Various methods to evaluate the effectiveness of security controls."),
+            ("Privacy protection", "Safeguarding personal information from unauthorized access or disclosure."),
+            ("Compliance monitoring", "Ongoing assessment to ensure adherence to regulations and standards."),
+            ("Security architecture", "Design principles and models for implementing security controls."),
+            ("Risk communication", "Effectively conveying risk information to stakeholders."),
+            ("Security policies", "High-level statements outlining organizational security objectives."),
+            ("Procedure development", "Creating detailed step-by-step instructions for security tasks."),
+            ("Training effectiveness", "Measuring the impact of security awareness programs."),
+            ("Security culture", "Shared values and behaviors regarding security within an organization."),
+            ("Technology integration", "Incorporating security considerations into technology implementations."),
+            ("Cost-benefit analysis", "Evaluating the economic value of security investments."),
+            ("Performance indicators", "Metrics used to measure security program effectiveness."),
+            ("Audit processes", "Systematic examination of security controls and procedures."),
+            ("Due diligence", "Investigation and assessment process before making security decisions."),
+            ("Background investigations", "Process of verifying an individual's personal and professional history."),
+            ("Workplace violence prevention", "Strategies to identify, prevent, and respond to workplace threats."),
+            ("Insider threat mitigation", "Measures to detect and prevent threats from authorized personnel."),
+            ("Access control systems", "Technology and procedures controlling who can access what resources."),
+            ("Surveillance systems", "Technology used for monitoring and recording activities."),
+            ("Perimeter security", "Physical barriers and controls at the boundary of protected areas."),
+            ("Lock and key management", "System for controlling and tracking physical access devices."),
+            ("Lighting design", "Strategic placement of illumination for security purposes."),
+            ("Alarm systems", "Detection devices that alert to unauthorized access or activities."),
+            ("Security guards", "Personnel responsible for protecting people and property."),
+            ("Patrol procedures", "Systematic inspection of areas to detect security issues."),
+            ("Visitor management", "Process for controlling and monitoring non-employee access."),
+            ("Package screening", "Inspection of items entering a facility for security threats."),
+            ("Data classification", "Categorizing information based on sensitivity and protection needs."),
+            ("Encryption standards", "Cryptographic methods for protecting data confidentiality."),
+            ("Network security", "Protection of computer networks from unauthorized access."),
+            ("Incident documentation", "Recording details of security events for analysis and response."),
+            ("Crisis communication", "Information sharing during emergency situations."),
+            ("Business impact analysis", "Assessment of potential effects from disruptive events.")
         ]
         
-        for i, topic in enumerate(base_topics):
-            if len(extended_cards) >= 50:
-                break
+        extended_cards = base_cards.copy()
+        for topic, definition in additional_topics:
             extended_cards.append({
                 "front": topic,
-                "back": f"Key security concept related to {topic.lower()} in professional protection practices.",
+                "back": definition,
                 "category": "concepts"
             })
         
         flashcard_data = {
             "topic": topic,
             "difficulty": difficulty,
-            "total_cards": len(extended_cards[:50]),
+            "total_cards": 50,
             "cards": extended_cards[:50]
         }
 
     log_activity(session['user_id'], 'flashcards_viewed', f'Topic: {topic}, Difficulty: {difficulty}, Cards: {len(flashcard_data.get("cards", []))}')
     return render_template('flashcards.html', flashcard_data=flashcard_data, cpp_domains=CPP_DOMAINS)
+
+@app.route('/performance-analysis')
+@login_required
+def performance_analysis():
+    """Detailed performance analysis by domain"""
+    user_id = session['user_id']
+    
+    # Calculate performance by domain
+    domain_analysis = {}
+    for domain_key, domain_info in CPP_DOMAINS.items():
+        progress = UserProgress.query.filter_by(user_id=user_id, domain=domain_key).first()
+        if not progress:
+            # Create new progress record
+            progress = UserProgress(user_id=user_id, domain=domain_key)
+            db.session.add(progress)
+        
+        domain_analysis[domain_key] = {
+            'name': domain_info['name'],
+            'mastery_level': progress.mastery_level,
+            'average_score': progress.average_score,
+            'question_count': progress.question_count,
+            'consecutive_good_scores': progress.consecutive_good_scores,
+            'recommendation': get_domain_recommendation(progress)
+        }
+    
+    db.session.commit()
+    
+    # Generate overall recommendations
+    needs_practice = [d for d in domain_analysis.values() if d['mastery_level'] == 'needs_practice']
+    good_progress = [d for d in domain_analysis.values() if d['mastery_level'] == 'good']
+    mastered = [d for d in domain_analysis.values() if d['mastery_level'] == 'mastered']
+    
+    overall_recommendations = []
+    
+    if needs_practice:
+        overall_recommendations.append({
+            'priority': 'high',
+            'title': 'Focus Areas (High Priority)',
+            'domains': [d['name'] for d in needs_practice[:3]],
+            'action': 'Spend 60% of study time on these domains',
+            'color': 'danger'
+        })
+    
+    if good_progress:
+        overall_recommendations.append({
+            'priority': 'medium',
+            'title': 'Reinforcement Areas',
+            'domains': [d['name'] for d in good_progress],
+            'action': 'Take advanced quizzes and practice scenarios',
+            'color': 'warning'
+        })
+    
+    if mastered:
+        overall_recommendations.append({
+            'priority': 'low',
+            'title': 'Mastered Areas',
+            'domains': [d['name'] for d in mastered],
+            'action': 'Light review to maintain knowledge',
+            'color': 'success'
+        })
+    
+    return render_template('performance_analysis.html',
+                         domain_analysis=domain_analysis,
+                         recommendations=overall_recommendations,
+                         cpp_domains=CPP_DOMAINS)
+
 @app.route('/progress')
 @login_required
 def progress():
@@ -791,10 +1030,9 @@ def subscribe():
 @app.route('/create-checkout-session', methods=['POST'])
 @login_required
 def create_checkout_session():
-    """Create Stripe Checkout Session with subscription plans and optional discount codes"""
     try:
         user = User.query.get(session['user_id'])
-        plan_type = request.form.get('plan_type')  # '3month' or '6month'
+        plan_type = request.form.get('plan_type')
         discount_code = request.form.get('discount_code', '').strip().upper()
 
         plans = {
@@ -848,7 +1086,6 @@ def create_checkout_session():
 @app.route('/subscription-success')
 @login_required
 def subscription_success():
-    """Handle successful subscription with plan tracking"""
     session_id = request.args.get('session_id')
     plan_type = request.args.get('plan', '3month')
 
@@ -873,7 +1110,6 @@ def subscription_success():
 
     return redirect(url_for('dashboard'))
 
-# --- Stripe Webhook (single definition; tolerant if secret missing) -----------
 @app.post("/webhook", endpoint="stripe_webhook_v1")
 def stripe_webhook():
     if not STRIPE_WEBHOOK_SECRET:
@@ -939,7 +1175,6 @@ def terms():
 def privacy():
     return render_template('privacy.html')
 
-# --- Diagnostics: quick OpenAI check -----------------------------------------
 @app.get("/diag/openai")
 def diag_openai():
     has_key = bool(os.environ.get("OPENAI_API_KEY"))
@@ -967,9 +1202,6 @@ def diag_openai():
     except Exception as e:
         return jsonify({"has_key": has_key, "model": model, "error": str(e)}), 500
 
-# Local dev only; Render uses Gunicorn entry point "app:app"
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=True)
-
-
