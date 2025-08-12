@@ -8,7 +8,11 @@
   <style>
     body{font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b1220;color:#e6e9ef;margin:0}
     header,footer{background:#0f1626;border-bottom:1px solid #1e2a44}
-    header{padding:1rem}
+    <style>
+header {
+  padding: 1rem;
+}
+</style>
     main{max-width:960px;margin:0 auto;padding:1.25rem}
     a{color:#80b3ff;text-decoration:none}
     .card{background:#111a2b;border:1px solid #1e2a44;border-radius:16px;padding:1rem;margin:1rem 0}
@@ -66,3 +70,4 @@
   </footer>
 </body>
 </html>
+
