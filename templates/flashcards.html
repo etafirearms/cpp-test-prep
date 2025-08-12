@@ -1,4 +1,3 @@
- 
 {% extends "base.html" %}
 
 {% block title %}Flashcards - {{ flashcard_data.topic }} - CPP Test Prep{% endblock %}
@@ -49,16 +48,21 @@
     </div>
 </div>
 
+<!-- Suggested CPP Topics -->
 <div class="row mt-4 justify-content-center">
     <div class="col-lg-6">
         <div class="card">
             <div class="card-body text-center">
                 <h6>Study Different Topics</h6>
                 <div class="btn-group-vertical w-100">
-                    <a href="/flashcards?topic=payroll fundamentals" class="btn btn-outline-primary">Payroll Fundamentals</a>
-                    <a href="/flashcards?topic=federal taxes" class="btn btn-outline-primary">Federal Taxes</a>
-                    <a href="/flashcards?topic=state taxes" class="btn btn-outline-primary">State Taxes</a>
-                    <a href="/flashcards?topic=FLSA regulations" class="btn btn-outline-primary">FLSA Regulations</a>
+                    <a href="{{ url_for('flashcards', topic='risk assessment') }}" class="btn btn-outline-primary">Risk Assessment</a>
+                    <a href="{{ url_for('flashcards', topic='CPTED (Crime Prevention Through Environmental Design)') }}" class="btn btn-outline-primary">CPTED</a>
+                    <a href="{{ url_for('flashcards', topic='access control and authentication') }}" class="btn btn-outline-primary">Access Control</a>
+                    <a href="{{ url_for('flashcards', topic='investigations: interview & evidence basics') }}" class="btn btn-outline-primary">Investigations</a>
+                    <a href="{{ url_for('flashcards', topic='incident response and crisis communication') }}" class="btn btn-outline-primary">Incident Response</a>
+                    <a href="{{ url_for('flashcards', topic='information security fundamentals') }}" class="btn btn-outline-primary">Information Security</a>
+                    <a href="{{ url_for('flashcards', topic='personnel security & insider threat') }}" class="btn btn-outline-primary">Personnel Security</a>
+                    <a href="{{ url_for('flashcards', topic='business principles: budgeting and contracts') }}" class="btn btn-outline-primary">Business Principles</a>
                 </div>
             </div>
         </div>
@@ -75,7 +79,6 @@ let isFlipped = false;
 function flipCard() {
     const front = document.getElementById('card-front');
     const back = document.getElementById('card-back');
-    
     if (isFlipped) {
         front.style.display = 'block';
         back.style.display = 'none';
@@ -103,41 +106,50 @@ function previousCard() {
 
 function updateCard() {
     document.getElementById('card-front').innerHTML = `
-        <h5>${cards[currentIndex].front}</h5>
+        <h5>${escapeHtml(cards[currentIndex].front)}</h5>
         <p class="text-muted mt-4">Click to reveal answer</p>
     `;
     document.getElementById('card-back').innerHTML = `
-        <h5>${cards[currentIndex].back}</h5>
+        <h5>${escapeHtml(cards[currentIndex].back)}</h5>
         <p class="text-muted mt-4">Click to see question</p>
     `;
-    
+
     // Reset to front
     document.getElementById('card-front').style.display = 'block';
     document.getElementById('card-back').style.display = 'none';
     isFlipped = false;
-    
+
     // Update counter
     document.getElementById('current-card').textContent = currentIndex + 1;
 }
 
 function markKnown() {
-    // Add visual feedback
     const card = document.querySelector('.flashcard');
     card.style.background = 'linear-gradient(45deg, #28a745, #20c997)';
     setTimeout(() => {
         card.style.background = '';
         nextCard();
-    }, 500);
+    }, 400);
 }
 
 function markUnsure() {
-    // Add visual feedback
     const card = document.querySelector('.flashcard');
     card.style.background = 'linear-gradient(45deg, #ffc107, #fd7e14)';
     setTimeout(() => {
         card.style.background = '';
         nextCard();
-    }, 500);
+    }, 400);
+}
+
+// simple HTML escape for safety
+function escapeHtml(str) {
+  if (str == null) return '';
+  return String(str)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#039;');
 }
 </script>
 {% endblock %}
