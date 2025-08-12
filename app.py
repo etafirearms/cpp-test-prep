@@ -20,27 +20,105 @@ def require_env(name: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return val
 
-# Required env vars (Render -> Environment)
+# Required env vars (set these in Render → Environment)
 app.config['SECRET_KEY'] = require_env('SECRET_KEY')
+
 app.config['SQLALCHEMY_DATABASE_URI'] = require_env('DATABASE_URL')
+# Render sometimes provides postgres://; SQLAlchemy expects postgresql://
 if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-
 db = SQLAlchemy(app)
 
-# External APIs
+# OpenAI config
 OPENAI_API_KEY = require_env('OPENAI_API_KEY')
-OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-3.5-turbo')
+OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini')  # safe modern default
 OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.openai.com/v1')
 
+# Custom AI Agent config (add these to your Render environment)
+CUSTOM_AI_API_KEY = os.environ.get('CUSTOM_AI_API_KEY')  # Your AI agent API key
+CUSTOM_AI_API_BASE = os.environ.get('CUSTOM_AI_API_BASE')  # Your AI agent endpoint
+CUSTOM_AI_MODEL = os.environ.get('CUSTOM_AI_MODEL', 'your-agent-model')
+
+# Stripe config
 stripe.api_key = require_env('STRIPE_SECRET_KEY')
 STRIPE_PUBLISHABLE_KEY = require_env('STRIPE_PUBLISHABLE_KEY')
-# Webhook secret optional at boot (so app still runs if not set yet)
-STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')  # optional at boot
 
 # Simple rate limiter for AI calls
 last_api_call = None
+
+# -----------------------------------------------------------------------------
+# Quiz Types and Topics Configuration
+# -----------------------------------------------------------------------------
+QUIZ_TYPES = {
+    'practice': {
+        'name': 'Practice Quiz',
+        'description': 'General practice questions across all CPP domains',
+        'questions': 10
+    },
+    'mock-exam': {
+        'name': 'Mock Exam',
+        'description': 'Full-length practice exam (125 questions)',
+        'questions': 125
+    },
+    'domain-specific': {
+        'name': 'Domain-Specific Quiz',
+        'description': 'Focus on specific CPP domains',
+        'questions': 15
+    },
+    'quick-review': {
+        'name': 'Quick Review',
+        'description': 'Short 5-question review',
+        'questions': 5
+    },
+    'difficult': {
+        'name': 'Advanced Challenge',
+        'description': 'Challenging questions for advanced preparation',
+        'questions': 20
+    },
+    'scenario-based': {
+        'name': 'Scenario-Based Quiz',
+        'description': 'Real-world security scenarios and case studies',
+        'questions': 12
+    },
+    'legal-compliance': {
+        'name': 'Legal & Compliance Quiz',
+        'description': 'Focus on legal aspects and compliance requirements',
+        'questions': 15
+    }
+}
+
+CPP_DOMAINS = {
+    'security-principles': {
+        'name': 'Security Principles & Practices',
+        'topics': ['Risk Management', 'Security Governance', 'Ethics', 'Standards & Regulations']
+    },
+    'business-principles': {
+        'name': 'Business Principles & Practices', 
+        'topics': ['Budgeting', 'Contracts', 'Project Management', 'ROI Analysis']
+    },
+    'investigations': {
+        'name': 'Investigations',
+        'topics': ['Investigation Planning', 'Interviews', 'Evidence Collection', 'Report Writing']
+    },
+    'personnel-security': {
+        'name': 'Personnel Security',
+        'topics': ['Background Screening', 'Insider Threat', 'Workplace Violence', 'Security Awareness']
+    },
+    'physical-security': {
+        'name': 'Physical Security',
+        'topics': ['CPTED', 'Access Control', 'Perimeter Security', 'Security Technology']
+    },
+    'information-security': {
+        'name': 'Information Security',
+        'topics': ['Data Protection', 'Cybersecurity', 'Information Classification', 'Incident Response']
+    },
+    'crisis-management': {
+        'name': 'Crisis Management',
+        'topics': ['Business Continuity', 'Disaster Recovery', 'Emergency Response', 'Communications']
+    }
+}
 
 # -----------------------------------------------------------------------------
 # Database Models
@@ -60,11 +138,13 @@ class User(db.Model):
     discount_code_used = db.Column(db.String(50))
     study_time = db.Column(db.Integer, default=0)
     quiz_scores = db.Column(db.Text, default='[]')
+    preferred_ai_agent = db.Column(db.String(20), default='openai')  # 'openai' or 'custom'
 
 class ChatHistory(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     messages = db.Column(db.Text, nullable=False)
+    ai_agent = db.Column(db.String(20), default='openai')  # Track which agent was used
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow)
 
@@ -79,10 +159,12 @@ class QuizResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     quiz_type = db.Column(db.String(50), nullable=False)
+    domain = db.Column(db.String(50))  # New field for domain-specific quizzes
     questions = db.Column(db.Text, nullable=False)
     answers = db.Column(db.Text, nullable=False)
     score = db.Column(db.Float, nullable=False)
     total_questions = db.Column(db.Integer, nullable=False)
+    time_taken = db.Column(db.Integer)  # Time in minutes
     completed_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class StudySession(db.Model):
@@ -91,10 +173,21 @@ class StudySession(db.Model):
     topic = db.Column(db.String(100))
     duration = db.Column(db.Integer)
     session_type = db.Column(db.String(50))
+    ai_agent_used = db.Column(db.String(20))  # Track which AI agent was used
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
     ended_at = db.Column(db.DateTime)
 
-# Create tables (idempotent)
+class QuizTemplate(db.Model):
+    """Store pre-generated quiz templates for faster loading"""
+    id = db.Column(db.Integer, primary_key=True)
+    quiz_type = db.Column(db.String(50), nullable=False)
+    domain = db.Column(db.String(50))
+    difficulty = db.Column(db.String(20), default='medium')
+    questions_json = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    usage_count = db.Column(db.Integer, default=0)
+
+# Create tables once app starts
 with app.app_context():
     try:
         db.create_all()
@@ -130,17 +223,58 @@ def log_activity(user_id, activity, details=None):
     db.session.add(ActivityLog(user_id=user_id, activity=activity, details=details))
     db.session.commit()
 
-def chat_with_ai(messages, user_id=None):
+def chat_with_custom_ai(messages, user_id=None):
     """
-    ASIS CPP (Certified Protection Professional) tutor:
-    - Seven domains: Security Principles & Practices; Business Principles & Practices; Investigations;
-      Personnel Security; Physical Security; Information Security; Crisis Management.
-    - Use only public, non-proprietary concepts; do NOT reproduce ASIS proprietary content.
-    - Provide explanations, original practice questions, study strategies, and scenario exercises.
+    Chat with your custom AI agent
     """
+    if not CUSTOM_AI_API_KEY or not CUSTOM_AI_API_BASE:
+        return "Custom AI agent not configured. Please check your environment variables."
+    
+    try:
+        headers = {
+            'Authorization': f'Bearer {CUSTOM_AI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        
+        # Adjust this payload based on your AI agent's API format
+        data = {
+            'model': CUSTOM_AI_MODEL,
+            'messages': messages,
+            'max_tokens': 1000,
+            'temperature': 0.7
+        }
+        
+        response = requests.post(
+            f'{CUSTOM_AI_API_BASE}/chat/completions',  # Adjust endpoint as needed
+            headers=headers,
+            json=data,
+            timeout=40
+        )
+        
+        print(f"[Custom AI] status={response.status_code}")
+        print(f"[Custom AI] response_preview={response.text[:300]}")
+        
+        if response.status_code == 200:
+            result = response.json()
+            # Adjust this based on your AI agent's response format
+            return result.get('choices', [{}])[0].get('message', {}).get('content', 'No response')
+        else:
+            return f"Custom AI agent error (status {response.status_code}). Please try again."
+            
+    except Exception as e:
+        print(f"[Custom AI] Error: {e}")
+        return "Error connecting to custom AI agent. Please try again."
+
+def chat_with_ai(messages, user_id=None, use_custom_agent=False):
+    """
+    Enhanced AI chat function that can use either OpenAI or custom agent
+    """
+    if use_custom_agent and CUSTOM_AI_API_KEY:
+        return chat_with_custom_ai(messages, user_id)
+    
+    # Original OpenAI implementation
     global last_api_call
     try:
-        # simple rate limiting (2 seconds)
         if last_api_call:
             delta = datetime.utcnow() - last_api_call
             if delta.total_seconds() < 2:
@@ -173,26 +307,118 @@ def chat_with_ai(messages, user_id=None):
             'max_tokens': 1000,
             'temperature': 0.7
         }
+
         last_api_call = datetime.utcnow()
         resp = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=40)
-        print(f"OpenAI API Response Status: {resp.status_code}")
+
+        print(f"[OpenAI] status={resp.status_code} model={OPENAI_CHAT_MODEL}")
+        print(f"[OpenAI] body_preview={resp.text[:600]}")
 
         if resp.status_code == 200:
             result = resp.json()
             return result['choices'][0]['message']['content']
-        if resp.status_code == 429:
-            return "I’m getting a lot of questions right now. Please wait a few seconds and try again."
+
         if resp.status_code in (401, 403):
-            return "Authentication issue with the AI service. Please contact support."
-        print(f"API Error {resp.status_code}: {resp.text}")
-        return "I’m experiencing technical difficulties. Please try again shortly."
+            return (
+                "Authentication issue with the AI service. Please verify that your OPENAI_API_KEY is set correctly "
+                "and that the chosen model is allowed for your account."
+            )
+        if resp.status_code == 429:
+            return "I'm getting a lot of questions right now. Please wait a few seconds and try again."
+
+        return "I'm experiencing technical difficulties. Please try again shortly."
     except requests.exceptions.Timeout:
         return "The AI service timed out. Please try again."
     except requests.exceptions.ConnectionError:
-        return "I can’t connect to the AI service right now. Please try again."
+        return "I can't connect to the AI service right now. Please try again."
     except Exception as e:
-        print(f"AI Chat Error: {e}")
-        return "Sorry, I’m experiencing technical difficulties. Please try again later."
+        print(f"[OpenAI] Unexpected error: {e}")
+        return "Sorry, I'm experiencing technical difficulties. Please try again later."
+
+def generate_quiz_questions(quiz_type, domain=None, difficulty='medium', num_questions=10):
+    """Generate quiz questions based on type, domain, and difficulty"""
+    
+    domain_focus = ""
+    if domain and domain in CPP_DOMAINS:
+        domain_info = CPP_DOMAINS[domain]
+        domain_focus = f"Focus specifically on {domain_info['name']} including: {', '.join(domain_info['topics'])}."
+    
+    difficulty_instruction = {
+        'easy': 'Use basic concepts and straightforward scenarios.',
+        'medium': 'Use intermediate concepts with some analysis required.',
+        'hard': 'Use advanced concepts requiring critical thinking and complex scenarios.'
+    }
+    
+    quiz_instructions = {
+        'practice': 'Create general practice questions covering multiple CPP domains.',
+        'mock-exam': 'Create comprehensive exam-style questions covering all CPP domains proportionally.',
+        'domain-specific': f'Create questions specifically for the selected domain. {domain_focus}',
+        'quick-review': 'Create quick review questions covering key concepts.',
+        'difficult': 'Create challenging questions that test deep understanding and application.',
+        'scenario-based': 'Create realistic security scenarios requiring practical application of CPP principles.',
+        'legal-compliance': 'Focus on legal requirements, regulations, and compliance aspects of security management.'
+    }
+    
+    prompt = f"""Create a {quiz_type} multiple-choice quiz for the ASIS Certified Protection Professional (CPP) exam.
+
+{quiz_instructions.get(quiz_type, 'Create practice questions for CPP exam preparation.')}
+{domain_focus}
+{difficulty_instruction.get(difficulty, 'Use appropriate difficulty level.')}
+
+Generate {num_questions} questions. Return VALID JSON only:
+
+{{
+  "title": "CPP {quiz_type.title().replace('-', ' ')} Quiz",
+  "quiz_type": "{quiz_type}",
+  "domain": "{domain or 'general'}",
+  "difficulty": "{difficulty}",
+  "questions": [
+    {{
+      "question": "Question text",
+      "options": {{"A": "option", "B": "option", "C": "option", "D": "option"}},
+      "correct": "A",
+      "explanation": "Clear explanation",
+      "domain": "relevant_domain",
+      "difficulty": "{difficulty}"
+    }}
+  ]
+}}
+
+Ensure questions span the CPP domains appropriately and use only public, non-proprietary information."""
+
+    ai_response = chat_with_ai([{'role': 'user', 'content': prompt}])
+    
+    try:
+        import re
+        json_match = re.search(r'\{.*\}\s*$', ai_response, re.DOTALL)
+        if json_match:
+            return json.loads(json_match.group())
+        else:
+            raise ValueError("No JSON found")
+    except Exception as e:
+        print(f"Quiz generation error: {e}")
+        # Fallback quiz
+        return {
+            "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
+            "quiz_type": quiz_type,
+            "domain": domain or 'general',
+            "difficulty": difficulty,
+            "questions": [
+                {
+                    "question": "Which is the primary goal of a comprehensive security risk assessment?",
+                    "options": {
+                        "A": "Identify all possible threats",
+                        "B": "Determine cost-effective risk mitigation strategies",
+                        "C": "Eliminate all security risks",
+                        "D": "Satisfy insurance requirements"
+                    },
+                    "correct": "B",
+                    "explanation": "Risk assessments identify risks to implement cost-effective mitigation strategies.",
+                    "domain": "security-principles",
+                    "difficulty": difficulty
+                }
+            ]
+        }
 
 def set_user_subscription_by_customer(customer_id: str, status: str, subscription_id: str | None = None):
     """Find user by Stripe customer and update subscription status."""
@@ -302,11 +528,28 @@ def dashboard():
     if user.subscription_end_date:
         days_left = max(0, (user.subscription_end_date - datetime.utcnow()).days)
 
+    # Quiz statistics
+    quiz_stats = {
+        'total_quizzes': QuizResult.query.filter_by(user_id=user.id).count(),
+        'avg_score': 0,
+        'best_score': 0,
+        'quiz_types_completed': []
+    }
+    
+    if recent_quizzes:
+        all_scores = [q.score for q in QuizResult.query.filter_by(user_id=user.id).all()]
+        quiz_stats['avg_score'] = sum(all_scores) / len(all_scores)
+        quiz_stats['best_score'] = max(all_scores)
+        quiz_stats['quiz_types_completed'] = list(set([q.quiz_type for q in QuizResult.query.filter_by(user_id=user.id).all()]))
+
     return render_template('dashboard.html',
                            user=user,
                            recent_activities=recent_activities,
                            recent_quizzes=recent_quizzes,
-                           days_left=days_left)
+                           days_left=days_left,
+                           quiz_stats=quiz_stats,
+                           quiz_types=QUIZ_TYPES,
+                           cpp_domains=CPP_DOMAINS)
 
 @app.route('/study')
 @subscription_required
@@ -314,115 +557,121 @@ def study():
     user = User.query.get(session['user_id'])
     chat_history = ChatHistory.query.filter_by(user_id=user.id).first()
     if not chat_history:
-        chat_history = ChatHistory(user_id=user.id, messages='[]')
+        chat_history = ChatHistory(user_id=user.id, messages='[]', ai_agent=user.preferred_ai_agent)
         db.session.add(chat_history)
         db.session.commit()
 
     messages = json.loads(chat_history.messages)
     session['study_start_time'] = datetime.utcnow().timestamp()
-    return render_template('study.html', user=user, messages=messages)
+    
+    # Check if custom AI is available
+    custom_ai_available = bool(CUSTOM_AI_API_KEY and CUSTOM_AI_API_BASE)
+    
+    return render_template('study.html', 
+                           user=user, 
+                           messages=messages,
+                           custom_ai_available=custom_ai_available)
 
 @app.route('/chat', methods=['POST'])
 @subscription_required
 def chat():
     user_message = request.json.get('message', '').strip()
+    ai_agent = request.json.get('ai_agent', 'openai')  # 'openai' or 'custom'
+    
     if not user_message:
         return jsonify({'error': 'Empty message'}), 400
 
     user_id = session['user_id']
+    user = User.query.get(user_id)
+    
+    # Update user preference if different
+    if ai_agent != user.preferred_ai_agent:
+        user.preferred_ai_agent = ai_agent
+        db.session.commit()
+    
     chat_history = ChatHistory.query.filter_by(user_id=user_id).first()
     messages = json.loads(chat_history.messages) if chat_history.messages else []
 
     messages.append({
-        'role': 'user',
-        'content': user_message,
-        'timestamp': datetime.utcnow().isoformat()
+        'role': 'user', 
+        'content': user_message, 
+        'timestamp': datetime.utcnow().isoformat(),
+        'ai_agent': ai_agent
     })
-
+    
     openai_messages = [{'role': m['role'], 'content': m['content']} for m in messages]
-    ai_response = chat_with_ai(openai_messages, user_id)
-
+    use_custom = ai_agent == 'custom'
+    ai_response = chat_with_ai(openai_messages, user_id, use_custom_agent=use_custom)
+    
     messages.append({
-        'role': 'assistant',
-        'content': ai_response,
-        'timestamp': datetime.utcnow().isoformat()
+        'role': 'assistant', 
+        'content': ai_response, 
+        'timestamp': datetime.utcnow().isoformat(),
+        'ai_agent': ai_agent
     })
 
     chat_history.messages = json.dumps(messages)
+    chat_history.ai_agent = ai_agent
     chat_history.updated_at = datetime.utcnow()
     db.session.commit()
 
-    log_activity(user_id, 'chat_message', f'Asked: {user_message[:50]}...')
-
+    log_activity(user_id, 'chat_message', f'Agent: {ai_agent}, Asked: {user_message[:50]}...')
     return jsonify({
-        'response': ai_response,
-        'timestamp': datetime.utcnow().isoformat()
+        'response': ai_response, 
+        'timestamp': datetime.utcnow().isoformat(),
+        'ai_agent': ai_agent
     })
+
+@app.route('/quiz-selector')
+@subscription_required
+def quiz_selector():
+    """New route for quiz selection interface"""
+    return render_template('quiz_selector.html', 
+                           quiz_types=QUIZ_TYPES, 
+                           cpp_domains=CPP_DOMAINS)
 
 @app.route('/quiz/<quiz_type>')
 @subscription_required
 def quiz(quiz_type):
-    # CPP (Protection) quiz generator
-    quiz_prompt = f"""Create a {quiz_type} multiple-choice quiz for the ASIS Certified Protection Professional (CPP) exam.
-Return VALID JSON only with 10 challenging questions spanning relevant CPP security domains:
-- Security Principles & Practices (risk mgmt, governance, ethics)
-- Business Principles & Practices (budgeting, contracts, project mgmt)
-- Investigations (planning, interviews, evidence, reporting)
-- Personnel Security (screening, insider threat, workplace violence)
-- Physical Security (CPTED, access control, locks, lighting, alarms)
-- Information Security (policies, data protection, incident response)
-- Crisis Management (BCP, DR, emergency response, comms)
-
-JSON schema:
-{{
-  "title": "CPP {quiz_type.title()} Quiz",
-  "questions": [
-    {{
-      "question": "Question text",
-      "options": {{"A": "opt", "B": "opt", "C": "opt", "D": "opt"}},
-      "correct": "A",
-      "explanation": "Short, public, non-proprietary rationale"
-    }}
-  ]
-}}"""
-    ai_response = chat_with_ai([{'role': 'user', 'content': quiz_prompt}])
-
-    try:
-        import re
-        json_match = re.search(r'\{.*\}\s*$', ai_response, re.DOTALL)
-        if json_match:
-            quiz_data = json.loads(json_match.group())
-        else:
-            raise ValueError("No JSON found")
-    except Exception:
-        quiz_data = {
-            "title": f"CPP {quiz_type.title()} Practice Quiz",
-            "questions": [
-                {
-                    "question": "Which step best follows a completed threat assessment in a risk management cycle?",
-                    "options": {
-                        "A": "Initiate random inspections only",
-                        "B": "Select and implement appropriate risk treatments",
-                        "C": "Archive the assessment for audit",
-                        "D": "Defer to legal for approval only"
-                    },
-                    "correct": "B",
-                    "explanation": "After assessing risks, select proportionate controls and implement treatment plans."
-                },
-                {
-                    "question": "Which CPTED principle focuses on increasing the likelihood improper behavior will be observed?",
-                    "options": {
-                        "A": "Territorial reinforcement",
-                        "B": "Natural surveillance",
-                        "C": "Access control",
-                        "D": "Maintenance"
-                    },
-                    "correct": "B",
-                    "explanation": "Natural surveillance increases visibility to deter misconduct."
-                }
-            ]
-        }
-
+    domain = request.args.get('domain')
+    difficulty = request.args.get('difficulty', 'medium')
+    
+    if quiz_type not in QUIZ_TYPES:
+        flash('Invalid quiz type selected.', 'danger')
+        return redirect(url_for('quiz_selector'))
+    
+    quiz_config = QUIZ_TYPES[quiz_type]
+    num_questions = quiz_config['questions']
+    
+    # Store quiz start time
+    session['quiz_start_time'] = datetime.utcnow().timestamp()
+    
+    # Check for existing template (for faster loading)
+    template = QuizTemplate.query.filter_by(
+        quiz_type=quiz_type,
+        domain=domain,
+        difficulty=difficulty
+    ).order_by(QuizTemplate.created_at.desc()).first()
+    
+    if template and template.usage_count < 3:  # Reuse template up to 3 times
+        quiz_data = json.loads(template.questions_json)
+        template.usage_count += 1
+        db.session.commit()
+    else:
+        # Generate new quiz
+        quiz_data = generate_quiz_questions(quiz_type, domain, difficulty, num_questions)
+        
+        # Save as template for future use
+        new_template = QuizTemplate(
+            quiz_type=quiz_type,
+            domain=domain,
+            difficulty=difficulty,
+            questions_json=json.dumps(quiz_data)
+        )
+        db.session.add(new_template)
+        db.session.commit()
+    
+    log_activity(session['user_id'], 'quiz_started', f'Type: {quiz_type}, Domain: {domain}, Difficulty: {difficulty}')
     return render_template('quiz.html', quiz_data=quiz_data, quiz_type=quiz_type)
 
 @app.route('/submit-quiz', methods=['POST'])
@@ -432,61 +681,181 @@ def submit_quiz():
     quiz_type = data.get('quiz_type')
     answers = data.get('answers')
     questions = data.get('questions')
+    domain = data.get('domain', 'general')
+
+    # Calculate time taken
+    time_taken = 0
+    if 'quiz_start_time' in session:
+        start_time = datetime.fromtimestamp(session['quiz_start_time'])
+        time_taken = int((datetime.utcnow() - start_time).total_seconds() / 60)
+        del session['quiz_start_time']
 
     correct_count = 0
     total_questions = len(questions) if questions else 0
+    domain_scores = {}
+    
     for i, question in enumerate(questions or []):
         user_answer = answers.get(str(i))
         if user_answer == question['correct']:
             correct_count += 1
+        
+        # Track domain-specific performance
+        q_domain = question.get('domain', 'general')
+        if q_domain not in domain_scores:
+            domain_scores[q_domain] = {'correct': 0, 'total': 0}
+        domain_scores[q_domain]['total'] += 1
+        if user_answer == question['correct']:
+            domain_scores[q_domain]['correct'] += 1
 
     score = (correct_count / total_questions) * 100 if total_questions else 0.0
 
     result = QuizResult(
         user_id=session['user_id'],
         quiz_type=quiz_type,
+        domain=domain,
         questions=json.dumps(questions),
         answers=json.dumps(answers),
         score=score,
-        total_questions=total_questions
+        total_questions=total_questions,
+        time_taken=time_taken
     )
     db.session.add(result)
 
     user = User.query.get(session['user_id'])
     scores = json.loads(user.quiz_scores) if user.quiz_scores else []
-    scores.append({'score': score, 'date': datetime.utcnow().isoformat(), 'type': quiz_type})
-    user.quiz_scores = json.dumps(scores[-20:])
+    scores.append({
+        'score': score, 
+        'date': datetime.utcnow().isoformat(), 
+        'type': quiz_type,
+        'domain': domain,
+        'time_taken': time_taken
+    })
+    user.quiz_scores = json.dumps(scores[-50:])  # Keep last 50 scores
     db.session.commit()
 
-    log_activity(session['user_id'], 'quiz_completed', f'{quiz_type} quiz: {correct_count}/{total_questions} ({score:.1f}%)')
+    # Generate performance insights
+    performance_insights = []
+    if score >= 90:
+        performance_insights.append("Excellent performance! You're well-prepared for this topic.")
+    elif score >= 80:
+        performance_insights.append("Good job! Review the missed questions to strengthen weak areas.")
+    elif score >= 70:
+        performance_insights.append("Fair performance. Focus on studying the areas you missed.")
+    else:
+        performance_insights.append("Consider additional study time in this area before the exam.")
 
+    # Domain-specific feedback
+    for domain_key, domain_score in domain_scores.items():
+        if domain_score['total'] > 0:
+            domain_pct = (domain_score['correct'] / domain_score['total']) * 100
+            if domain_pct < 70:
+                domain_name = CPP_DOMAINS.get(domain_key, {}).get('name', domain_key)
+                performance_insights.append(f"Focus more study time on {domain_name}")
+
+    log_activity(session['user_id'], 'quiz_completed', 
+                 f'{quiz_type} quiz: {correct_count}/{total_questions} ({score:.1f}%) in {time_taken}min')
+    
     return jsonify({
         'score': score,
         'correct': correct_count,
         'total': total_questions,
+        'time_taken': time_taken,
+        'domain_scores': domain_scores,
+        'performance_insights': performance_insights,
         'results': [
             {
                 'question': q['question'],
                 'user_answer': answers.get(str(i), 'Not answered'),
                 'correct_answer': q['correct'],
                 'explanation': q.get('explanation', ''),
-                'is_correct': answers.get(str(i)) == q['correct']
+                'is_correct': answers.get(str(i)) == q['correct'],
+                'domain': q.get('domain', 'general')
             }
             for i, q in enumerate(questions or [])
         ]
     })
 
+@app.route('/quiz-history')
+@login_required
+def quiz_history():
+    """View detailed quiz history and analytics"""
+    user_id = session['user_id']
+    page = request.args.get('page', 1, type=int)
+    
+    quiz_results = QuizResult.query.filter_by(user_id=user_id)\
+        .order_by(QuizResult.completed_at.desc())\
+        .paginate(page=page, per_page=20, error_out=False)
+    
+    # Calculate statistics
+    all_results = QuizResult.query.filter_by(user_id=user_id).all()
+    stats = {
+        'total_quizzes': len(all_results),
+        'avg_score': sum(r.score for r in all_results) / len(all_results) if all_results else 0,
+        'best_score': max((r.score for r in all_results), default=0),
+        'total_time': sum(r.time_taken or 0 for r in all_results),
+        'by_type': {},
+        'by_domain': {},
+        'recent_trend': []
+    }
+    
+    # Group by quiz type and domain
+    for result in all_results:
+        # By type
+        if result.quiz_type not in stats['by_type']:
+            stats['by_type'][result.quiz_type] = {'count': 0, 'avg_score': 0, 'scores': []}
+        stats['by_type'][result.quiz_type]['count'] += 1
+        stats['by_type'][result.quiz_type]['scores'].append(result.score)
+        
+        # By domain
+        domain = result.domain or 'general'
+        if domain not in stats['by_domain']:
+            stats['by_domain'][domain] = {'count': 0, 'avg_score': 0, 'scores': []}
+        stats['by_domain'][domain]['count'] += 1
+        stats['by_domain'][domain]['scores'].append(result.score)
+    
+    # Calculate averages
+    for quiz_type in stats['by_type']:
+        scores = stats['by_type'][quiz_type]['scores']
+        stats['by_type'][quiz_type]['avg_score'] = sum(scores) / len(scores)
+    
+    for domain in stats['by_domain']:
+        scores = stats['by_domain'][domain]['scores']
+        stats['by_domain'][domain]['avg_score'] = sum(scores) / len(scores)
+    
+    # Recent trend (last 10 quizzes)
+    recent_results = sorted(all_results, key=lambda x: x.completed_at)[-10:]
+    stats['recent_trend'] = [r.score for r in recent_results]
+    
+    return render_template('quiz_history.html', 
+                           quiz_results=quiz_results, 
+                           stats=stats,
+                           quiz_types=QUIZ_TYPES,
+                           cpp_domains=CPP_DOMAINS)
+
 @app.route('/flashcards')
 @subscription_required
 def flashcards():
     topic = request.args.get('topic', 'CPP core domains (security management)')
-    prompt = f"""Create 10 flashcards for the ASIS CPP exam about: {topic}.
+    difficulty = request.args.get('difficulty', 'medium')
+    
+    prompt = f"""Create 15 flashcards for the ASIS CPP exam about: {topic}.
+Difficulty level: {difficulty}
 Use only public, non-proprietary information. Cover definitions, principles, and brief examples.
+Include a mix of:
+- Key terminology and definitions
+- Important concepts and principles  
+- Practical scenarios and applications
+- Regulatory and compliance topics
+
 Return VALID JSON only:
 {{
   "topic": "{topic}",
-  "cards": [{{"front": "Term or scenario", "back": "Clear explanation with example"}}]
+  "difficulty": "{difficulty}",
+  "cards": [
+    {{"front": "Term or scenario", "back": "Clear explanation with example", "category": "definitions|concepts|scenarios|compliance"}}
+  ]
 }}"""
+    
     ai_response = chat_with_ai([{'role': 'user', 'content': prompt}])
 
     try:
@@ -499,23 +868,113 @@ Return VALID JSON only:
     except Exception:
         flashcard_data = {
             "topic": topic,
+            "difficulty": difficulty,
             "cards": [
-                {"front": "Risk treatment options", "back": "Avoid, Transfer, Mitigate, Accept—choose based on impact/likelihood and cost-benefit."},
-                {"front": "CPTED pillars", "back": "Natural surveillance, Natural access control, Territorial reinforcement, Maintenance."},
-                {"front": "Least privilege", "back": "Grant only the minimum access needed; reduces insider risk."},
-                {"front": "BC vs. DR", "back": "Business Continuity maintains operations; Disaster Recovery restores tech/services."},
-                {"front": "Chain of custody", "back": "Documentation preserving evidence integrity from collection to presentation."}
+                {"front": "Risk treatment options", "back": "Avoid, Transfer, Mitigate, Accept—choose based on impact/likelihood and cost-benefit.", "category": "concepts"},
+                {"front": "CPTED pillars", "back": "Natural surveillance, Natural access control, Territorial reinforcement, Maintenance.", "category": "concepts"},
+                {"front": "Least privilege principle", "back": "Grant only the minimum access needed; reduces insider risk and limits potential damage.", "category": "definitions"},
+                {"front": "Business Continuity vs Disaster Recovery", "back": "BC maintains critical operations during disruptions; DR focuses on restoring IT systems and data after incidents.", "category": "concepts"},
+                {"front": "Chain of custody", "back": "Documentation preserving evidence integrity from collection through analysis to court presentation.", "category": "definitions"},
+                {"front": "Physical security assessment scenario", "back": "A facility has multiple entry points but inconsistent access control. What's the priority? Implement layered security starting with perimeter control.", "category": "scenarios"}
             ]
         }
 
-    log_activity(session['user_id'], 'flashcards_viewed', f'Topic: {topic}')
-    return render_template('flashcards.html', flashcard_data=flashcard_data)
+    log_activity(session['user_id'], 'flashcards_viewed', f'Topic: {topic}, Difficulty: {difficulty}')
+    return render_template('flashcards.html', flashcard_data=flashcard_data, cpp_domains=CPP_DOMAINS)
+
+@app.route('/study-plan')
+@subscription_required  
+def study_plan():
+    """Generate personalized study plan based on quiz performance"""
+    user_id = session['user_id']
+    user = User.query.get(user_id)
+    
+    # Analyze quiz performance to identify weak areas
+    quiz_results = QuizResult.query.filter_by(user_id=user_id).all()
+    
+    domain_performance = {}
+    for domain_key, domain_info in CPP_DOMAINS.items():
+        domain_performance[domain_key] = {
+            'name': domain_info['name'],
+            'scores': [],
+            'avg_score': 0,
+            'quiz_count': 0,
+            'priority': 'medium'
+        }
+    
+    # Calculate domain-specific performance
+    for result in quiz_results:
+        try:
+            questions = json.loads(result.questions)
+            answers = json.loads(result.answers)
+            
+            for i, question in enumerate(questions):
+                q_domain = question.get('domain', 'general')
+                if q_domain in domain_performance:
+                    user_answer = answers.get(str(i))
+                    is_correct = user_answer == question['correct']
+                    domain_performance[q_domain]['scores'].append(100 if is_correct else 0)
+        except:
+            continue
+    
+    # Calculate averages and priorities
+    for domain_key in domain_performance:
+        scores = domain_performance[domain_key]['scores']
+        if scores:
+            avg = sum(scores) / len(scores)
+            domain_performance[domain_key]['avg_score'] = avg
+            domain_performance[domain_key]['quiz_count'] = len(scores)
+            
+            # Set priority based on performance
+            if avg < 60:
+                domain_performance[domain_key]['priority'] = 'high'
+            elif avg < 75:
+                domain_performance[domain_key]['priority'] = 'medium'
+            else:
+                domain_performance[domain_key]['priority'] = 'low'
+        else:
+            domain_performance[domain_key]['priority'] = 'medium'  # No data yet
+    
+    # Generate study recommendations
+    recommendations = []
+    weak_domains = [d for d in domain_performance.values() if d['priority'] == 'high']
+    medium_domains = [d for d in domain_performance.values() if d['priority'] == 'medium']
+    
+    if weak_domains:
+        recommendations.append({
+            'type': 'focus',
+            'title': 'Priority Study Areas',
+            'description': f"Focus on {', '.join([d['name'] for d in weak_domains[:3]])}",
+            'action': 'Take domain-specific quizzes and review flashcards'
+        })
+    
+    if medium_domains:
+        recommendations.append({
+            'type': 'practice',
+            'title': 'Regular Practice',
+            'description': f"Continue practicing {', '.join([d['name'] for d in medium_domains[:3]])}",
+            'action': 'Take practice quizzes 2-3 times per week'
+        })
+    
+    total_quizzes = len(quiz_results)
+    if total_quizzes < 10:
+        recommendations.append({
+            'type': 'assessment',
+            'title': 'Take More Assessments', 
+            'description': 'Complete more quizzes to better identify knowledge gaps',
+            'action': 'Aim for at least 2-3 quizzes per week'
+        })
+    
+    return render_template('study_plan.html', 
+                           domain_performance=domain_performance,
+                           recommendations=recommendations,
+                           user=user)
 
 @app.route('/progress')
 @login_required
 def progress():
     user = User.query.get(session['user_id'])
-    activities = ActivityLog.query.filter_by(user_id=user.id).order_by(ActivityLog.timestamp.desc()).all()
+    activities = ActivityLog.query.filter_by(user_id=user.id).order_by(ActivityLog.timestamp.desc()).limit(50).all()
     quiz_results = QuizResult.query.filter_by(user_id=user.id).order_by(QuizResult.completed_at.desc()).all()
 
     total_sessions = len([a for a in activities if 'study' in a.activity.lower()])
@@ -524,6 +983,17 @@ def progress():
     study_sessions = StudySession.query.filter_by(user_id=user.id).all()
     total_study_time = sum(s.duration or 0 for s in study_sessions)
 
+    # Progress over time
+    progress_data = []
+    if quiz_results:
+        sorted_results = sorted(quiz_results, key=lambda x: x.completed_at)
+        for result in sorted_results[-20:]:  # Last 20 results
+            progress_data.append({
+                'date': result.completed_at.strftime('%Y-%m-%d'),
+                'score': result.score,
+                'type': result.quiz_type
+            })
+
     return render_template('progress.html',
                            user=user,
                            activities=activities,
@@ -531,7 +1001,77 @@ def progress():
                            total_sessions=total_sessions,
                            total_quizzes=total_quizzes,
                            avg_score=avg_score,
-                           total_study_time=total_study_time)
+                           total_study_time=total_study_time,
+                           progress_data=progress_data)
+
+@app.route('/settings')
+@login_required
+def settings():
+    """User settings page"""
+    user = User.query.get(session['user_id'])
+    custom_ai_available = bool(CUSTOM_AI_API_KEY and CUSTOM_AI_API_BASE)
+    
+    return render_template('settings.html', 
+                           user=user, 
+                           custom_ai_available=custom_ai_available)
+
+@app.route('/update-settings', methods=['POST'])
+@login_required
+def update_settings():
+    """Update user settings"""
+    user = User.query.get(session['user_id'])
+    
+    # Update AI agent preference
+    preferred_ai = request.form.get('preferred_ai_agent', 'openai')
+    if preferred_ai in ['openai', 'custom']:
+        user.preferred_ai_agent = preferred_ai
+        
+    # Update other preferences as needed
+    # Add more settings here as you expand the app
+    
+    db.session.commit()
+    log_activity(user.id, 'settings_updated', f'AI agent: {preferred_ai}')
+    flash('Settings updated successfully!', 'success')
+    return redirect(url_for('settings'))
+
+@app.route('/api/quiz-stats')
+@login_required
+def api_quiz_stats():
+    """API endpoint for quiz statistics (for charts/dashboards)"""
+    user_id = session['user_id']
+    quiz_results = QuizResult.query.filter_by(user_id=user_id).all()
+    
+    # Performance by domain
+    domain_stats = {}
+    for result in quiz_results:
+        domain = result.domain or 'general'
+        if domain not in domain_stats:
+            domain_stats[domain] = []
+        domain_stats[domain].append(result.score)
+    
+    # Average by domain
+    domain_averages = {
+        domain: sum(scores)/len(scores) if scores else 0 
+        for domain, scores in domain_stats.items()
+    }
+    
+    # Performance over time
+    sorted_results = sorted(quiz_results, key=lambda x: x.completed_at)
+    time_series = [
+        {
+            'date': r.completed_at.isoformat(),
+            'score': r.score,
+            'type': r.quiz_type
+        }
+        for r in sorted_results[-30:]  # Last 30 results
+    ]
+    
+    return jsonify({
+        'domain_averages': domain_averages,
+        'time_series': time_series,
+        'total_quizzes': len(quiz_results),
+        'avg_score': sum(r.score for r in quiz_results) / len(quiz_results) if quiz_results else 0
+    })
 
 @app.route('/subscribe')
 @login_required
@@ -589,9 +1129,7 @@ def create_checkout_session():
             }
         )
 
-        log_activity(user.id, 'subscription_attempt',
-                     f'Plan: {plan_type}, Discount: {discount_code}, Amount: ${final_amount/100:.2f}')
-
+        log_activity(user.id, 'subscription_attempt', f'Plan: {plan_type}, Discount: {discount_code}, Amount: ${final_amount/100:.2f}')
         return redirect(checkout_session.url, code=303)
     except Exception as e:
         print(f"Stripe checkout error: {e}")
@@ -616,8 +1154,7 @@ def subscription_success():
                 db.session.commit()
 
                 metadata = checkout_session.metadata or {}
-                log_activity(user.id, 'subscription_activated',
-                             f'Plan: {plan_type}, Amount: ${metadata.get("final_amount", "0")}')
+                log_activity(user.id, 'subscription_activated', f'Plan: {plan_type}, Amount: ${metadata.get("final_amount", "0")}')
                 flash(f'Subscription activated! Welcome to CPP Test Prep ({plan_type.upper()})!', 'success')
             else:
                 flash('Payment verification failed. Please contact support.', 'danger')
@@ -631,7 +1168,6 @@ def subscription_success():
 @app.post("/webhook", endpoint="stripe_webhook_v1")
 def stripe_webhook():
     if not STRIPE_WEBHOOK_SECRET:
-        # Allows the app to run even if you haven't configured a webhook yet.
         return 'Webhook not configured', 200
 
     payload = request.get_data(as_text=True)
@@ -669,20 +1205,23 @@ def end_study_session():
     if 'study_start_time' in session:
         start_time = datetime.fromtimestamp(session['study_start_time'])
         duration = int((datetime.utcnow() - start_time).total_seconds() / 60)
+        
+        user = User.query.get(session['user_id'])
+        ai_agent = user.preferred_ai_agent
 
         db.session.add(StudySession(
             user_id=session['user_id'],
             duration=duration,
             session_type='chat',
+            ai_agent_used=ai_agent,
             started_at=start_time,
             ended_at=datetime.utcnow()
         ))
-        user = User.query.get(session['user_id'])
         user.study_time += duration
         db.session.commit()
 
         del session['study_start_time']
-        log_activity(session['user_id'], 'study_session_completed', f'Duration: {duration} minutes')
+        log_activity(session['user_id'], 'study_session_completed', f'Duration: {duration} min, Agent: {ai_agent}')
 
     return jsonify({'success': True})
 
@@ -693,6 +1232,78 @@ def terms():
 @app.route('/privacy')
 def privacy():
     return render_template('privacy.html')
+
+# --- Diagnostics: quick OpenAI check -----------------------------------------
+@app.get("/diag/openai")
+def diag_openai():
+    has_key = bool(os.environ.get("OPENAI_API_KEY"))
+    model = os.environ.get("OPENAI_CHAT_MODEL", OPENAI_CHAT_MODEL)
+    try:
+        headers = {
+            'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY","")}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': model,
+            'messages': [{"role":"user","content":"Say 'pong'."}],
+            'max_tokens': 5,
+            'temperature': 0
+        }
+        r = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=20)
+        ok = (r.status_code == 200)
+        return jsonify({
+            "has_key": has_key,
+            "model": model,
+            "status_code": r.status_code,
+            "ok": ok,
+            "body_preview": r.text[:300]
+        }), (200 if ok else 500)
+    except Exception as e:
+        return jsonify({"has_key": has_key, "model": model, "error": str(e)}), 500
+
+@app.get("/diag/custom-ai")
+def diag_custom_ai():
+    """Diagnostic endpoint for custom AI agent"""
+    has_key = bool(CUSTOM_AI_API_KEY)
+    has_base = bool(CUSTOM_AI_API_BASE)
+    
+    if not has_key or not has_base:
+        return jsonify({
+            "configured": False,
+            "has_key": has_key,
+            "has_base": has_base,
+            "message": "Custom AI agent not fully configured"
+        })
+    
+    try:
+        headers = {
+            'Authorization': f'Bearer {CUSTOM_AI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': CUSTOM_AI_MODEL,
+            'messages': [{"role":"user","content":"Say 'hello'."}],
+            'max_tokens': 5,
+            'temperature': 0
+        }
+        r = requests.post(f'{CUSTOM_AI_API_BASE}/chat/completions', headers=headers, json=data, timeout=20)
+        ok = (r.status_code == 200)
+        return jsonify({
+            "configured": True,
+            "has_key": has_key,
+            "has_base": has_base,
+            "model": CUSTOM_AI_MODEL,
+            "status_code": r.status_code,
+            "ok": ok,
+            "body_preview": r.text[:300]
+        }), (200 if ok else 500)
+    except Exception as e:
+        return jsonify({
+            "configured": True,
+            "has_key": has_key,
+            "has_base": has_base,
+            "error": str(e)
+        }), 500
 
 # Local dev only; Render uses Gunicorn entry point "app:app"
 if __name__ == '__main__':
