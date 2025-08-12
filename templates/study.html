@@ -1,128 +1,458 @@
-{% extends "base.html" %}
-
-{% block title %}AI Study Session - CPP Test Prep{% endblock %}
-
-{% block content %}
-<div class="row">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                <h4><i class="fas fa-robot me-2"></i>AI CPP Tutor</h4>
-                <p class="mb-0 text-muted">
-                    Ask questions about CPP (Certified Protection Professional) domains—risk management, investigations, personnel security, physical security, information security, business principles, and crisis management.
-                </p>
-                <small class="text-warning">
-                    <i class="fas fa-exclamation-triangle me-1"></i>
-                    <strong>Note:</strong> This AI tutor is not affiliated with ASIS International and does not guarantee exam success.
-                </small>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Study Session - CPP Test Prep</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        .chat-container {
+            height: 500px;
+            overflow-y: auto;
+            border: 1px solid #dee2e6;
+            border-radius: 8px;
+            padding: 1rem;
+            background: #f8f9fa;
+        }
+        .message {
+            margin-bottom: 1.5rem;
+            padding: 1rem;
+            border-radius: 12px;
+            max-width: 85%;
+            animation: fadeIn 0.3s ease-in;
+        }
+        .user-message {
+            background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+            color: white;
+            margin-left: auto;
+            text-align: right;
+            box-shadow: 0 2px 8px rgba(0,123,255,0.3);
+        }
+        .ai-message {
+            background: white;
+            border: 1px solid #e9ecef;
+            margin-right: auto;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+            border-left: 4px solid #007bff;
+        }
+        .ai-message.custom-ai {
+            border-left: 4px solid #28a745;
+        }
+        
+        /* Enhanced AI Message Formatting */
+        .formatted-content {
+            line-height: 1.7;
+            color: #2c3e50;
+        }
+        .formatted-content h1,
+        .formatted-content h2,
+        .formatted-content h3 {
+            color: #007bff;
+            margin-top: 1.5rem;
+            margin-bottom: 0.8rem;
+            font-weight: 600;
+        }
+        .formatted-content h3 {
+            font-size: 1.1rem;
+            border-bottom: 2px solid #e9ecef;
+            padding-bottom: 0.3rem;
+        }
+        .formatted-content strong {
+            color: #495057;
+            font-weight: 600;
+        }
+        .formatted-content p {
+            margin-bottom: 1rem;
+        }
+        .formatted-content ul,
+        .formatted-content ol {
+            margin-bottom: 1rem;
+            padding-left: 1.5rem;
+        }
+        .formatted-content li {
+            margin-bottom: 0.4rem;
+            line-height: 1.6;
+        }
+        .formatted-content code {
+            background: #f8f9fa;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            color: #e83e8c;
+        }
+        .formatted-content blockquote {
+            border-left: 4px solid #007bff;
+            margin: 1rem 0;
+            padding-left: 1rem;
+            color: #6c757d;
+            font-style: italic;
+        }
+        
+        .typing-indicator {
+            padding: 1rem;
+            text-align: center;
+            color: #6c757d;
+            font-style: italic;
+        }
+        .study-tools {
+            background: linear-gradient(135deg, #f8f9fa 0%, #e9ecef 100%);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+            border: 1px solid #dee2e6;
+        }
+        .quick-topic {
+            cursor: pointer;
+            transition: all 0.2s ease;
+            padding: 0.4rem 0.8rem;
+            margin: 0.2rem;
+            border-radius: 20px;
+            border: 1px solid #dee2e6;
+            background: white;
+            display: inline-block;
+        }
+        .quick-topic:hover {
+            background: #007bff;
+            color: white;
+            transform: translateY(-1px);
+            box-shadow: 0 2px 8px rgba(0,123,255,0.3);
+        }
+        .session-stats {
+            background: white;
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            border: 1px solid #dee2e6;
+        }
+        .btn-send {
+            background: linear-gradient(135deg, #007bff 0%, #0056b3 100%);
+            border: none;
+            padding: 0.75rem 1.5rem;
+            border-radius: 8px;
+            color: white;
+            font-weight: 500;
+            transition: all 0.2s ease;
+        }
+        .btn-send:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0,123,255,0.4);
+            color: white;
+        }
+        .btn-send:disabled {
+            opacity: 0.6;
+            transform: none;
+            box-shadow: none;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message-input {
+            border: 2px solid #e9ecef;
+            border-radius: 8px;
+            transition: border-color 0.2s ease;
+        }
+        .message-input:focus {
+            border-color: #007bff;
+            box-shadow: 0 0 0 0.2rem rgba(0,123,255,0.25);
+        }
+    </style>
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard') }}">
+                <i class="fas fa-shield-alt"></i> CPP Test Prep
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                <a class="nav-link" href="{{ url_for('quiz_selector') }}">Quizzes</a>
+                <a class="nav-link" href="{{ url_for('logout') }}">Logout</a>
             </div>
-            <div class="card-body">
-                <div id="chat-container" class="chat-container border rounded p-3 mb-3" style="background: #f8f9fa;">
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <div class="row">
+            <div class="col-12">
+                <h2><i class="fas fa-robot text-primary"></i> AI Study Session</h2>
+                <p class="text-muted">Get personalized help from your AI tutor specialized in CPP exam preparation</p>
+            </div>
+        </div>
+
+        <!-- Study Tools -->
+        <div class="study-tools">
+            <h5><i class="fas fa-tools text-primary"></i> Quick Study Tools</h5>
+            <div class="row">
+                <div class="col-md-4">
+                    <h6 class="text-primary">Practice Questions</h6>
+                    <div class="quick-topic" onclick="askQuestion('Create 3 practice questions about risk assessment')">Risk Assessment</div>
+                    <div class="quick-topic" onclick="askQuestion('Give me practice questions on CPTED principles')">CPTED</div>
+                    <div class="quick-topic" onclick="askQuestion('Test my knowledge of crisis management')">Crisis Management</div>
+                    <div class="quick-topic" onclick="askQuestion('Create questions about investigations')">Investigations</div>
+                </div>
+                <div class="col-md-4">
+                    <h6 class="text-primary">Explanations</h6>
+                    <div class="quick-topic" onclick="askQuestion('Explain the difference between security and safety')">Security vs Safety</div>
+                    <div class="quick-topic" onclick="askQuestion('What are the key elements of an effective security program?')">Security Programs</div>
+                    <div class="quick-topic" onclick="askQuestion('Explain business continuity planning')">BCP Planning</div>
+                    <div class="quick-topic" onclick="askQuestion('Describe personnel security best practices')">Personnel Security</div>
+                </div>
+                <div class="col-md-4">
+                    <h6 class="text-primary">Scenarios</h6>
+                    <div class="quick-topic" onclick="askQuestion('Give me a workplace violence scenario to analyze')">Workplace Violence</div>
+                    <div class="quick-topic" onclick="askQuestion('Create a physical security assessment scenario')">Physical Security</div>
+                    <div class="quick-topic" onclick="askQuestion('Present an investigation case study')">Investigation Case</div>
+                    <div class="quick-topic" onclick="askQuestion('Create an information security incident scenario')">InfoSec Incident</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="row">
+            <div class="col-12">
+                <!-- Chat Interface -->
+                <div class="chat-container" id="chatContainer">
                     {% for message in messages %}
-                        <div class="message {{ 'user-message' if message.role == 'user' else 'ai-message' }}">
-                            <div class="message-bubble">
-                                {{ message.content }}
-                            </div>
+                    <div class="message {% if message.role == 'user' %}user-message{% else %}ai-message{% endif %}">
+                        {% if message.role == 'assistant' %}
+                        <div class="d-flex justify-content-between align-items-start mb-2">
+                            <small class="text-muted">
+                                <i class="fas fa-robot"></i> AI Tutor
+                            </small>
+                            <small class="text-muted">{{ message.get('timestamp', '')[:16] }}</small>
                         </div>
+                        <div class="formatted-content"></div>
+                        {% else %}
+                        <div>{{ message.content }}</div>
+                        <div class="mt-1">
+                            <small class="text-light opacity-75">{{ message.get('timestamp', '')[:16] }}</small>
+                        </div>
+                        {% endif %}
+                    </div>
                     {% endfor %}
-                    
-                    {% if not messages %}
-                        <div class="text-center text-muted">
-                            <i class="fas fa-comments fa-3x mb-3"></i>
-                            <p>Start a conversation with your AI tutor!</p>
-                            <p class="small">
-                                Try asking: “Outline the steps of a risk assessment,” or “Give me a practice question on access control,” or “Create a 4‑week CPP study plan focusing on Investigations.”
-                            </p>
+                </div>
+
+                <!-- Message Input -->
+                <form id="chatForm" class="mt-3">
+                    <div class="row">
+                        <div class="col-md-10">
+                            <textarea class="form-control message-input" id="messageInput" rows="3" 
+                                    placeholder="Ask me about CPP concepts, request practice questions, or get help with study topics..." 
+                                    required></textarea>
                         </div>
-                    {% endif %}
+                        <div class="col-md-2 d-flex align-items-end">
+                            <button class="btn btn-send w-100" type="submit" id="sendButton">
+                                <i class="fas fa-paper-plane"></i><br>
+                                <small>Send</small>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="mt-2">
+                        <small class="text-muted">
+                            <i class="fas fa-lightbulb text-warning"></i>
+                            <strong>Tip:</strong> <span id="studyTip">Ask specific questions to get the most detailed explanations.</span>
+                        </small>
+                    </div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Study Session Stats -->
+        <div class="row mt-4">
+            <div class="col-md-6">
+                <div class="session-stats">
+                    <h6><i class="fas fa-clock text-primary"></i> Session Info</h6>
+                    <p class="mb-1">Session started: <span id="sessionStart">{{ moment().format('HH:mm') }}</span></p>
+                    <p class="mb-0">Messages sent: <span id="messageCount">{{ messages|length }}</span></p>
                 </div>
-                
-                <div class="input-group">
-                    <input type="text" id="message-input" class="form-control" placeholder="Ask your CPP (Protection) question..." style="border-radius: 25px 0 0 25px;">
-                    <button class="btn btn-primary" id="send-btn" onclick="sendMessage()" style="border-radius: 0 25px 25px 0;">
-                        <i class="fas fa-paper-plane"></i>
-                    </button>
-                </div>
-                
-                <div class="mt-3">
-                    <small class="text-muted">
-                        💡 Quick topics: 
-                        <a href="#" onclick="sendQuickMessage('Explain the risk assessment process and provide an example.')" class="text-decoration-none">Risk Assessment</a> • 
-                        <a href="#" onclick="sendQuickMessage('Create one CPTED scenario question with four options and an explanation.')" class="text-decoration-none">CPTED</a> • 
-                        <a href="#" onclick="sendQuickMessage('What are best practices for incident response and crisis communication?')" class="text-decoration-none">Incident Response</a> •
-                        <a href="#" onclick="sendQuickMessage('Give me a practice question on interview planning for investigations.')" class="text-decoration-none">Investigations</a> •
-                        <a href="#" onclick="sendQuickMessage('Build a 4-week CPP study plan emphasizing Information Security and Physical Security.')" class="text-decoration-none">4‑Week Plan</a>
-                    </small>
+            </div>
+            <div class="col-md-6">
+                <div class="session-stats">
+                    <h6><i class="fas fa-graduation-cap text-primary"></i> Quick Actions</h6>
+                    <div class="d-flex gap-2">
+                        <a href="{{ url_for('quiz_selector') }}" class="btn btn-outline-primary btn-sm">
+                            <i class="fas fa-clipboard-list"></i> Take Quiz
+                        </a>
+                        <a href="{{ url_for('flashcards') }}" class="btn btn-outline-info btn-sm">
+                            <i class="fas fa-clone"></i> Flashcards
+                        </a>
+                        <a href="{{ url_for('progress') }}" class="btn btn-outline-success btn-sm">
+                            <i class="fas fa-chart-line"></i> Progress
+                        </a>
+                    </div>
                 </div>
             </div>
         </div>
     </div>
-</div>
-{% endblock %}
 
-{% block scripts %}
-<script>
-let isLoading = false;
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let messageCount = {{ messages|length }};
+        
+        // Study tips rotation
+        const studyTips = [
+            "Ask specific questions to get the most detailed explanations.",
+            "Request practice scenarios to test your application skills.",
+            "Use follow-up questions to dive deeper into complex topics.",
+            "Ask for mnemonics or memory aids for important concepts.",
+            "Request comparisons between similar security concepts.",
+            "Try asking for real-world examples of security principles.",
+            "Request step-by-step explanations for complex procedures."
+        ];
+        
+        // Rotate study tips every 30 seconds
+        setInterval(() => {
+            const tip = studyTips[Math.floor(Math.random() * studyTips.length)];
+            document.getElementById('studyTip').textContent = tip;
+        }, 30000);
 
-function sendMessage() {
-    if (isLoading) return;
-    
-    const input = document.getElementById('message-input');
-    const btn = document.getElementById('send-btn');
-    const message = input.value.trim();
-    if (!message) return;
-    
-    // Add user message to chat
-    addMessageToChat(message, 'user');
-    input.value = '';
-    
-    // Show loading
-    isLoading = true;
-    btn.disabled = true;
-    btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i>';
-    
-    // Send to server
-    fetch('{{ url_for("chat") }}', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({message})
-    })
-    .then(response => response.json())
-    .then(data => {
-        addMessageToChat(data.response, 'ai');
-    })
-    .catch(() => {
-        addMessageToChat('Sorry, there was an error. Please try again.', 'ai');
-    })
-    .finally(() => {
-        isLoading = false;
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-paper-plane"></i>';
-        document.getElementById('message-input').focus();
-    });
-}
+        function askQuestion(question) {
+            document.getElementById('messageInput').value = question;
+            document.getElementById('messageInput').focus();
+        }
 
-function sendQuickMessage(message) {
-    const input = document.getElementById('message-input');
-    input.value = message;
-    sendMessage();
-}
+        function scrollToBottom() {
+            const container = document.getElementById('chatContainer');
+            container.scrollTop = container.scrollHeight;
+        }
 
-function addMessageToChat(message, type) {
-    const container = document.getElementById('chat-container');
-    const messageDiv = document.createElement('div');
-    messageDiv.className = `message ${type}-message`;
-    messageDiv.innerHTML = `<div class="message-bubble">${message}</div>`;
-    container.appendChild(messageDiv);
-    container.scrollTop = container.scrollHeight;
-}
+        function addMessage(content, isUser) {
+            const container = document.getElementById('chatContainer');
+            const messageDiv = document.createElement('div');
+            const timestamp = new Date().toLocaleString();
+            
+            if (isUser) {
+                messageDiv.className = 'message user-message';
+                messageDiv.innerHTML = `
+                    <div>${content}</div>
+                    <div class="mt-1">
+                        <small class="text-light opacity-75">${timestamp}</small>
+                    </div>
+                `;
+            } else {
+                messageDiv.className = 'message ai-message';
+                
+                // Convert markdown to HTML for better formatting
+                const formattedContent = marked.parse(content);
+                
+                messageDiv.innerHTML = `
+                    <div class="d-flex justify-content-between align-items-start mb-2">
+                        <small class="text-muted"><i class="fas fa-robot"></i> AI Tutor</small>
+                        <small class="text-muted">${timestamp}</small>
+                    </div>
+                    <div class="formatted-content">${formattedContent}</div>
+                `;
+            }
+            
+            container.appendChild(messageDiv);
+            scrollToBottom();
+        }
 
-// Send message on Enter
-document.getElementById('message-input').addEventListener('keypress', function(e) {
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        sendMessage();
-    }
-});
-</script>
-{% endblock %}
+        function showTyping() {
+            const container = document.getElementById('chatContainer');
+            const typingDiv = document.createElement('div');
+            typingDiv.id = 'typingIndicator';
+            typingDiv.className = 'typing-indicator';
+            typingDiv.innerHTML = '<i class="fas fa-circle-notch fa-spin text-primary"></i> AI is thinking...';
+            container.appendChild(typingDiv);
+            scrollToBottom();
+        }
+
+        function hideTyping() {
+            const typing = document.getElementById('typingIndicator');
+            if (typing) typing.remove();
+        }
+
+        document.getElementById('chatForm').addEventListener('submit', async function(e) {
+            e.preventDefault();
+            
+            const messageInput = document.getElementById('messageInput');
+            const sendButton = document.getElementById('sendButton');
+            const message = messageInput.value.trim();
+            
+            if (!message) return;
+            
+            // Disable send button and show loading
+            sendButton.disabled = true;
+            sendButton.innerHTML = '<i class="fas fa-spinner fa-spin"></i><br><small>Sending...</small>';
+            
+            // Add user message
+            addMessage(message, true);
+            messageCount++;
+            document.getElementById('messageCount').textContent = messageCount;
+            
+            // Clear input and show typing
+            messageInput.value = '';
+            showTyping();
+            
+            // Send to server
+            try {
+                const response = await fetch('/chat', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        message: message
+                    })
+                });
+                
+                const data = await response.json();
+                hideTyping();
+                
+                if (data.response) {
+                    addMessage(data.response, false);
+                    messageCount++;
+                    document.getElementById('messageCount').textContent = messageCount;
+                } else {
+                    addMessage('Sorry, I encountered an error. Please try again.', false);
+                }
+            } catch (error) {
+                hideTyping();
+                addMessage('Connection error. Please check your internet and try again.', false);
+                console.error('Chat error:', error);
+            } finally {
+                // Re-enable send button
+                sendButton.disabled = false;
+                sendButton.innerHTML = '<i class="fas fa-paper-plane"></i><br><small>Send</small>';
+                messageInput.focus();
+            }
+        });
+
+        // Auto-focus message input
+        document.getElementById('messageInput').focus();
+        
+        // Auto-scroll to bottom on load
+        scrollToBottom();
+
+        // Handle Enter key in textarea (Ctrl+Enter to send)
+        document.getElementById('messageInput').addEventListener('keydown', function(e) {
+            if (e.key === 'Enter' && e.ctrlKey) {
+                e.preventDefault();
+                document.getElementById('chatForm').dispatchEvent(new Event('submit'));
+            }
+        });
+
+        // End session tracking when user leaves
+        window.addEventListener('beforeunload', function() {
+            fetch('/end-study-session', { method: 'POST' });
+        });
+
+        // Initialize existing messages with proper formatting
+        document.addEventListener('DOMContentLoaded', function() {
+            const existingMessages = document.querySelectorAll('.ai-message .formatted-content');
+            existingMessages.forEach(function(messageDiv) {
+                const content = messageDiv.textContent || messageDiv.innerText;
+                if (content) {
+                    messageDiv.innerHTML = marked.parse(content);
+                }
+            });
+            scrollToBottom();
+        });
+    </script>
+</body>
+</html>
