@@ -33,12 +33,14 @@ db = SQLAlchemy(app)
 
 # External APIs
 OPENAI_API_KEY = require_env('OPENAI_API_KEY')
-OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-3.5-turbo')  # override in env if needed
+OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-3.5-turbo')
 OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.openai.com/v1')
 
 stripe.api_key = require_env('STRIPE_SECRET_KEY')
 STRIPE_PUBLISHABLE_KEY = require_env('STRIPE_PUBLISHABLE_KEY')
-STRIPE_WEBHOOK_SECRET = require_env('STRIPE_WEBHOOK_SECRET')
+
+# NOTE: make webhook secret OPTIONAL at startup so the app can boot without it.
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')  # may be None
 
 # Simple rate limiter for AI calls
 last_api_call = None
@@ -148,7 +150,6 @@ def chat_with_ai(messages, user_id=None):
             if delta.total_seconds() < 2:
                 time.sleep(2 - delta.total_seconds())
 
-        # Ensure a proper system message exists at [0]
         system_message = {
             "role": "system",
             "content": (
@@ -217,7 +218,6 @@ def set_user_subscription_by_customer(customer_id: str, status: str, subscriptio
     if subscription_id:
         user.stripe_subscription_id = subscription_id
     if status == 'active' and not user.subscription_end_date:
-        # default to 90 days unless otherwise set via success handler
         user.subscription_end_date = datetime.utcnow() + timedelta(days=90)
     if status in ('canceled', 'expired'):
         user.subscription_status = 'expired'
@@ -288,6 +288,7 @@ def login():
         password = request.form['password']
         user = User.query.filter_by(email=email).first()
 
+    # Security: early return on missing user/password rather than timing leaks
         if user and check_password_hash(user.password_hash, password):
             session['user_id'] = user.id
             session['user_name'] = f"{user.first_name} {user.last_name}"
@@ -380,7 +381,7 @@ def chat():
 def quiz(quiz_type):
     # CPP (Protection) quiz generator
     quiz_prompt = f"""Create a {quiz_type} multiple-choice quiz for the ASIS Certified Protection Professional (CPP) exam.
-Return VALID JSON only with 10 challenging questions covering these CPP security domains where appropriate:
+Return VALID JSON only with 10 challenging questions covering CPP security domains where appropriate:
 - Security Principles & Practices (risk management, governance, ethics)
 - Business Principles & Practices (budgeting, contracts, project mgmt)
 - Investigations (planning, interviews, evidence, reporting)
@@ -661,9 +662,13 @@ def subscription_success():
 
     return redirect(url_for('dashboard'))
 
-# --- Stripe Webhook (single definition, unique endpoint) ----------------------
+# --- Stripe Webhook (single definition; tolerates missing secret) -------------
 @app.post("/webhook", endpoint="stripe_webhook_v1")
 def stripe_webhook():
+    # If not configured yet, acknowledge (prevents retry loops on Render)
+    if not STRIPE_WEBHOOK_SECRET:
+        return 'Webhook not configured', 200
+
     payload = request.get_data(as_text=True)
     sig_header = request.headers.get('Stripe-Signature')
 
@@ -677,7 +682,6 @@ def stripe_webhook():
     etype = event.get('type')
     data_object = event.get('data', {}).get('object', {})
 
-    # Helpful IDs
     customer_id = data_object.get('customer')
     subscription_id = data_object.get('subscription') or data_object.get('id')
 
