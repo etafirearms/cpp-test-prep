@@ -1,12 +1,14 @@
- 
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}CPP Test Prep{% endblock %}</title>
+
+    <!-- CSS -->
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+
     <style>
         body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
         .card { border: none; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
@@ -19,43 +21,45 @@
         .user-message .message-bubble { background: #007bff; color: white; }
         .ai-message .message-bubble { background: #f8f9fa; border: 1px solid #dee2e6; }
         .navbar { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); }
+        footer a { text-decoration: none; }
     </style>
 </head>
 <body>
+    <!-- Navbar -->
     <nav class="navbar navbar-expand-lg navbar-dark">
         <div class="container">
-            <a class="navbar-brand fw-bold" href="/">
+            <a class="navbar-brand fw-bold" href="{{ url_for('home') }}">
                 <i class="fas fa-graduation-cap me-2"></i>CPP Test Prep
             </a>
-            
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-label="Toggle navigation">
                 <span class="navbar-toggler-icon"></span>
             </button>
-            
+
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
-                    {% if session.user_id %}
+                    {% if session.get('user_id') %}
                         <li class="nav-item">
-                            <a class="nav-link" href="/dashboard"><i class="fas fa-tachometer-alt me-1"></i>Dashboard</a>
+                            <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fas fa-tachometer-alt me-1"></i>Dashboard</a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="/study"><i class="fas fa-book me-1"></i>Study</a>
+                            <a class="nav-link" href="{{ url_for('study') }}"><i class="fas fa-book me-1"></i>Study</a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="/progress"><i class="fas fa-chart-line me-1"></i>Progress</a>
+                            <a class="nav-link" href="{{ url_for('progress') }}"><i class="fas fa-chart-line me-1"></i>Progress</a>
                         </li>
                         <li class="nav-item">
-                            <span class="nav-link">Welcome, {{ session.user_name }}!</span>
+                            <span class="nav-link">Welcome, {{ session.get('user_name') }}!</span>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="/logout"><i class="fas fa-sign-out-alt me-1"></i>Logout</a>
+                            <a class="nav-link" href="{{ url_for('logout') }}"><i class="fas fa-sign-out-alt me-1"></i>Logout</a>
                         </li>
                     {% else %}
                         <li class="nav-item">
-                            <a class="nav-link" href="/login">Login</a>
+                            <a class="nav-link" href="{{ url_for('login') }}">Login</a>
                         </li>
                         <li class="nav-item">
-                            <a class="nav-link" href="/register">Register</a>
+                            <a class="nav-link" href="{{ url_for('register') }}">Register</a>
                         </li>
                     {% endif %}
                 </ul>
@@ -63,13 +67,14 @@
         </div>
     </nav>
 
+    <!-- Flash messages + page content -->
     <div class="container mt-4">
         {% with messages = get_flashed_messages(with_categories=true) %}
             {% if messages %}
                 {% for category, message in messages %}
-                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show">
+                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
                         {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
                     </div>
                 {% endfor %}
             {% endif %}
@@ -81,28 +86,33 @@
     <!-- Global Footer Disclaimer -->
     <footer class="bg-dark text-light py-3 mt-5">
         <div class="container">
-            <div class="row">
+            <div class="row gy-2 align-items-center">
                 <div class="col-md-8">
                     <p class="small mb-1">
-                        <strong>Important:</strong> This course is not affiliated with, endorsed by, or approved by ASIS International. 
-                        CPP® is a registered trademark of ASIS International.
+                        <strong>Important Notice</strong><br>
+                        This service is NOT affiliated with, endorsed by, or approved by ASIS International.
+                    </p>
+                    <p class="small mb-1">
+                        CPP® (Certified Protection Professional) is a registered certification mark of ASIS International, Inc.
+                        This course is an independent study aid created to help candidates prepare for the CPP exam.
                     </p>
                     <p class="small mb-0">
-                        This is an independent study aid. We do not guarantee that using this course will result in passing the CPP exam.
-                        Exam success depends on individual preparation and performance.
+                        We do not guarantee that using this course will result in passing the CPP exam.
+                        Exam success depends on individual study habits, prior knowledge, exam performance, and other factors beyond our control.
                     </p>
                 </div>
                 <div class="col-md-4 text-md-end">
                     <p class="small mb-0">
-                        <a href="mailto:support@cpptestprep.com" class="text-light">Support</a> • 
-                        <a href="/terms" class="text-light">Terms</a> • 
-                        <a href="/privacy" class="text-light">Privacy</a>
+                        <a href="mailto:support@cpptestprep.com" class="text-light">Support</a> •
+                        <a href="{{ url_for('terms') }}" class="text-light">Terms</a> •
+                        <a href="{{ url_for('privacy') }}" class="text-light">Privacy</a>
                     </p>
                 </div>
             </div>
         </div>
     </footer>
 
+    <!-- JS -->
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
     {% block scripts %}{% endblock %}
 </body>
