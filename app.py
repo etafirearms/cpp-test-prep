@@ -2,7 +2,6 @@ if User.query.filter_by(email=email).first():
             flash('Email already registered. Please log in.', 'warning')
             return redirect(url_for('login'))
 
-        try:
             stripe_customer = stripe.Customer.create(
                 email=email, 
                 name=f"{first_name} {last_name}",
@@ -1116,7 +1115,7 @@ if __name__ == '__main__':
     
     app.run(host='0.0.0.0', port=port, debug=debug)from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
-from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash,
 from datetime import datetime, timedelta
 import json
 import os
@@ -1821,3 +1820,4 @@ def register():
 
         if User.query.filter_by(email=email).first():
             flash('Email
+
