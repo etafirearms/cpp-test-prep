@@ -535,7 +535,13 @@ def get_domain_recommendation(progress):
             'color': 'danger'
         }
 
-def set_user_subscription_by_customer(customer_id, status, subscription_id=None):
+        user.subscription_status = status
+        if subscription_id:
+            user.stripe_subscription_id = subscription_id
+        if status == 'active' and not user.subscription_end_date:
+            user.subscription_end_date = datetime.utcnow() + timedelta(days=90)
+        elif status in ('canceled', 'expired'):
+            user.subscription_status = 'expired'
     if not customer_id:
         return
     try:
@@ -1744,6 +1750,7 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
