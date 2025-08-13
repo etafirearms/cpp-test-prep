@@ -1,183 +1,98 @@
- {% extends "base.html" %}
+{% extends "base.html" %}
 
-{% block title %}Progress Report - CPP Test Prep{% endblock %}
+{% block title %}Progress - CPP Test Prep{% endblock %}
 
 {% block content %}
-<div class="row">
-    <div class="col-12 mb-4">
-        <div class="card">
-            <div class="card-header">
-                <h4><i class="fas fa-chart-line me-2"></i>Your Learning Progress</h4>
-            </div>
-            <div class="card-body">
-                <div class="row text-center">
-                    <div class="col-md-3 mb-3">
-                        <div class="card border-primary">
-                            <div class="card-body">
-                                <i class="fas fa-clock fa-3x text-primary mb-2"></i>
-                                <h4>{{ total_study_time }}</h4>
-                                <p class="text-muted">Minutes Studied</p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="col-md-3 mb-3">
-                        <div class="card border-success">
-                            <div class="card-body">
-                                <i class="fas fa-quiz fa-3x text-success mb-2"></i>
-                                <h4>{{ total_quizzes }}</h4>
-                                <p class="text-muted">Quizzes Completed</p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="col-md-3 mb-3">
-                        <div class="card border-info">
-                            <div class="card-body">
-                                <i class="fas fa-percentage fa-3x text-info mb-2"></i>
-                                <h4>{{ "%.1f"|format(avg_score) }}%</h4>
-                                <p class="text-muted">Average Score</p>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <div class="col-md-3 mb-3">
-                        <div class="card border-warning">
-                            <div class="card-body">
-                                <i class="fas fa-fire fa-3x text-warning mb-2"></i>
-                                <h4>{{ total_sessions }}</h4>
-                                <p class="text-muted">Study Sessions</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        </div>
+<div class="row g-3">
+  <div class="col-12">
+    <div class="card p-4">
+      <h2 class="mb-1">Your Progress</h2>
+      <p class="text-muted mb-0">
+        Joined {{ moment(user.created_at).format('LL') }} • Total study time: <strong>{{ total_study_time }}</strong> minutes
+      </p>
     </div>
-</div>
+  </div>
 
-<div class="row">
-    <div class="col-lg-8">
-        <div class="card">
-            <div class="card-header">
-                <h5><i class="fas fa-history me-2"></i>Recent Quiz Results</h5>
-            </div>
-            <div class="card-body">
-                {% if quiz_results %}
-                    <div class="table-responsive">
-                        <table class="table table-striped">
-                            <thead>
-                                <tr>
-                                    <th>Date</th>
-                                    <th>Quiz Type</th>
-                                    <th>Score</th>
-                                    <th>Questions</th>
-                                    <th>Performance</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {% for quiz in quiz_results[:10] %}
-                                <tr>
-                                    <td>{{ quiz.completed_at.strftime('%m/%d/%Y') }}</td>
-                                    <td>{{ quiz.quiz_type.title() }}</td>
-                                    <td>
-                                        <span class="badge {% if quiz.score >= 80 %}bg-success{% elif quiz.score >= 70 %}bg-warning{% else %}bg-danger{% endif %}">
-                                            {{ "%.1f"|format(quiz.score) }}%
-                                        </span>
-                                    </td>
-                                    <td>{{ quiz.total_questions }}</td>
-                                    <td>
-                                        <div class="progress" style="height: 8px;">
-                                            <div class="progress-bar {% if quiz.score >= 80 %}bg-success{% elif quiz.score >= 70 %}bg-warning{% else %}bg-danger{% endif %}" 
-                                                 style="width: {{ quiz.score }}%"></div>
-                                        </div>
-                                    </td>
-                                </tr>
-                                {% endfor %}
-                            </tbody>
-                        </table>
-                    </div>
-                {% else %}
-                    <div class="text-center text-muted">
-                        <i class="fas fa-quiz fa-3x mb-3"></i>
-                        <p>No quiz results yet. <a href="/quiz/practice">Take your first quiz!</a></p>
-                    </div>
-                {% endif %}
-            </div>
-        </div>
+  <div class="col-md-4">
+    <div class="card p-4">
+      <h5 class="mb-3"><i class="fas fa-gauge-high text-primary me-2"></i>Overview</h5>
+      <ul class="list-unstyled mb-0">
+        <li class="mb-2"><strong>{{ total_sessions }}</strong> study sessions</li>
+        <li class="mb-2"><strong>{{ total_quizzes }}</strong> quizzes taken</li>
+        <li class="mb-2">Average score: <strong>{{ avg_score }}%</strong></li>
+        <li class="mb-2">Trend:
+          {% if score_trend == 'improving' %}
+            <span class="badge bg-success">Improving</span>
+          {% elif score_trend == 'declining' %}
+            <span class="badge bg-danger">Declining</span>
+          {% else %}
+            <span class="badge bg-secondary">Stable</span>
+          {% endif %}
+        </li>
+      </ul>
     </div>
-    
-    <div class="col-lg-4">
-        <div class="card">
-            <div class="card-header">
-                <h5><i class="fas fa-activity me-2"></i>Study Activity</h5>
-            </div>
-            <div class="card-body" style="max-height: 400px; overflow-y: auto;">
-                {% for activity in activities[:20] %}
-                    <div class="d-flex justify-content-between align-items-center mb-2 p-2 bg-light rounded">
-                        <div>
-                            <small class="fw-bold">{{ activity.activity.replace('_', ' ').title() }}</small>
-                            {% if activity.details %}
-                                <br><small class="text-muted">{{ activity.details }}</small>
-                            {% endif %}
-                        </div>
-                        <small class="text-muted">{{ activity.timestamp.strftime('%m/%d %H:%M') }}</small>
-                    </div>
-                {% else %}
-                    <div class="text-center text-muted">
-                        <i class="fas fa-chart-line fa-2x mb-2"></i>
-                        <p>Start studying to see your activity here!</p>
-                    </div>
-                {% endfor %}
-            </div>
-        </div>
-    </div>
-</div>
+  </div>
 
-<div class="row mt-4">
-    <div class="col-12">
-        <div class="card">
-            <div class="card-header">
-                <h5><i class="fas fa-target me-2"></i>Study Recommendations</h5>
-            </div>
-            <div class="card-body">
-                <div class="row">
-                    {% if avg_score < 70 %}
-                        <div class="col-md-6 mb-3">
-                            <div class="alert alert-warning">
-                                <h6><i class="fas fa-exclamation-triangle me-2"></i>Focus on Fundamentals</h6>
-                                <p class="mb-0">Your average score is below 70%. Consider reviewing basic concepts and taking more practice quizzes.</p>
-                                <a href="/study" class="btn btn-sm btn-warning mt-2">Start Study Session</a>
-                            </div>
-                        </div>
-                    {% elif avg_score < 85 %}
-                        <div class="col-md-6 mb-3">
-                            <div class="alert alert-info">
-                                <h6><i class="fas fa-thumbs-up me-2"></i>Good Progress!</h6>
-                                <p class="mb-0">You're doing well! Focus on advanced topics and take mock exams to reach mastery.</p>
-                                <a href="/quiz/mock-exam" class="btn btn-sm btn-info mt-2">Take Mock Exam</a>
-                            </div>
-                        </div>
-                    {% else %}
-                        <div class="col-md-6 mb-3">
-                            <div class="alert alert-success">
-                                <h6><i class="fas fa-star me-2"></i>Excellent Work!</h6>
-                                <p class="mb-0">You're ready for the exam! Keep practicing to maintain your high performance.</p>
-                                <a href="/quiz/final-review" class="btn btn-sm btn-success mt-2">Final Review</a>
-                            </div>
-                        </div>
-                    {% endif %}
-                    
-                    <div class="col-md-6 mb-3">
-                        <div class="alert alert-primary">
-                            <h6><i class="fas fa-calendar me-2"></i>Study Schedule</h6>
-                            <p class="mb-0">Maintain consistent study habits. Aim for at least 30 minutes of study time daily.</p>
-                            <a href="/flashcards" class="btn btn-sm btn-primary mt-2">Quick Flashcard Review</a>
-                        </div>
-                    </div>
-                </div>
-            </div>
+  <div class="col-md-8">
+    <div class="card p-4">
+      <h5 class="mb-3"><i class="fas fa-clipboard-list text-primary me-2"></i>All Quiz Results</h5>
+      {% if quiz_results %}
+        <div class="table-responsive">
+          <table class="table align-middle">
+            <thead>
+              <tr>
+                <th>Completed</th>
+                <th>Type</th>
+                <th>Domain</th>
+                <th>Score</th>
+                <th>Questions</th>
+                <th>Time</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for q in quiz_results %}
+              <tr>
+                <td>
+                  <div>{{ moment(q.completed_at).format('LLL') }}</div>
+                  <small class="text-muted">{{ moment(q.completed_at).fromNow() }}</small>
+                </td>
+                <td>{{ q.quiz_type }}</td>
+                <td>{{ q.domain or 'general' }}</td>
+                <td>{{ q.score|round(1) }}%</td>
+                <td>{{ q.total_questions }}</td>
+                <td>{{ (q.time_taken or 0) }} min</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
+      {% else %}
+        <p class="text-muted mb-0">No quiz results yet.</p>
+      {% endif %}
     </div>
+  </div>
+
+  <div class="col-12">
+    <div class="card p-4">
+      <h5 class="mb-3"><i class="fas fa-bell text-primary me-2"></i>Recent Activity</h5>
+      {% if activities %}
+        <ul class="list-group list-group-flush">
+          {% for a in activities %}
+          <li class="list-group-item d-flex justify-content-between align-items-start">
+            <div>
+              <div class="fw-semibold">{{ a.activity|replace('_',' ')|title }}</div>
+              {% if a.details %}
+                <small class="text-muted">{{ a.details }}</small>
+              {% endif %}
+            </div>
+            <small class="text-muted">{{ moment(a.timestamp).fromNow() }}</small>
+          </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-muted mb-0">No recent activity.</p>
+      {% endif %}
+    </div>
+  </div>
 </div>
 {% endblock %}
