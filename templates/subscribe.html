@@ -1,110 +1,227 @@
 {% extends "base.html" %}
-{% block title %}Subscribe · CPP Test Prep{% endblock %}
+
+{% block title %}Subscribe - CPP Test Prep{% endblock %}
 
 {% block content %}
 <div class="row justify-content-center">
   <div class="col-lg-10">
-    <div class="card p-4">
-      <div class="text-center mb-3">
-        <h3 class="mb-1"><i class="fas fa-crown text-warning me-2"></i>Choose Your CPP Prep Plan</h3>
-        <p class="text-muted mb-0">Unlock full access to quizzes, mock exams, AI tutor, flashcards, and analytics.</p>
+    <div class="card">
+      <div class="card-header text-center">
+        <h3><i class="fas fa-crown me-2 text-warning"></i>Choose Your CPP Prep Plan</h3>
+        <p class="mb-0 text-muted">Unlock full access to all CPP preparation materials</p>
       </div>
 
-      <div class="row g-4">
-        <!-- Monthly Plan (Subscription) -->
-        <div class="col-lg-6">
-          <div class="card h-100 border-primary">
-            <div class="card-body d-flex flex-column">
-              <div class="badge bg-primary align-self-start mb-2">Flexible</div>
-              <h4 class="text-primary">Monthly Plan</h4>
-              <div class="my-2">
-                <div class="display-5 fw-bold">$39.99</div>
-                <div class="text-muted">per month • cancel anytime</div>
+      <div class="card-body">
+        <!-- Optional Launch Offer -->
+        <div class="alert alert-success text-center mb-4">
+          <h5><i class="fas fa-fire me-2"></i>🎉 LAUNCH SPECIAL - 50% OFF! 🎉</h5>
+          <p class="mb-2">Use discount code: <strong class="badge bg-success fs-6">LAUNCH50</strong></p>
+          <p class="mb-0 small">Limited time offer for early adopters!</p>
+        </div>
+
+        <div class="row">
+          <!-- Monthly Plan -->
+          <div class="col-lg-6 mb-4">
+            <div class="card border-primary h-100">
+              <div class="card-body text-center">
+                <div class="badge bg-primary mb-3">FLEXIBLE</div>
+                <h4 class="text-primary">Monthly Plan</h4>
+                <div class="pricing mb-3">
+                  <h2 class="display-5 text-primary">$39.99</h2>
+                  <p class="text-muted mb-1">Billed monthly • Cancel anytime</p>
+                  <p class="text-muted">
+                    <s>$39.99</s> <span class="text-success fw-bold">$19.99 with LAUNCH50</span>
+                  </p>
+                </div>
+
+                <ul class="list-unstyled text-start mb-4">
+                  <li><i class="fas fa-check text-success me-2"></i>Unlimited AI CPP Tutor</li>
+                  <li><i class="fas fa-check text-success me-2"></i>Practice Quizzes & Mock Exams</li>
+                  <li><i class="fas fa-check text-success me-2"></i>Interactive Flashcards</li>
+                  <li><i class="fas fa-check text-success me-2"></i>Progress Tracking & Analytics</li>
+                  <li><i class="fas fa-check text-success me-2"></i>Mobile & Desktop Access</li>
+                </ul>
+
+                <form action="/create-checkout-session" method="POST" class="subscription-form">
+                  <input type="hidden" name="plan_type" value="monthly">
+                  <div class="mb-3">
+                    <input type="text" name="discount_code" class="form-control"
+                           placeholder="Enter discount code (optional)" value="LAUNCH50">
+                  </div>
+                  <button type="submit" class="btn btn-primary btn-lg w-100">
+                    <i class="fas fa-credit-card me-2"></i>Start Monthly
+                  </button>
+                </form>
+
+                <p class="mt-3 text-muted small">
+                  <i class="fas fa-calendar-alt me-1"></i>Great if you want to try it for a month or two
+                </p>
               </div>
+            </div>
+          </div>
 
-              <ul class="mt-3 mb-4">
-                <li><i class="fas fa-check text-success me-2"></i>Unlimited quizzes & mock exams</li>
-                <li><i class="fas fa-check text-success me-2"></i>AI CPP tutor chat</li>
-                <li><i class="fas fa-check text-success me-2"></i>Flashcards with spaced repetition</li>
-                <li><i class="fas fa-check text-success me-2"></i>Progress tracking & domain mastery</li>
-                <li><i class="fas fa-check text-success me-2"></i>Mobile & desktop access</li>
-              </ul>
+          <!-- 6-Month Plan -->
+          <div class="col-lg-6 mb-4">
+            <div class="card border-success h-100">
+              <div class="card-body text-center">
+                <div class="badge bg-success mb-3">BEST VALUE</div>
+                <h4 class="text-success">6-Month Plan</h4>
+                <div class="pricing mb-3">
+                  <h2 class="display-5 text-success">$99.00</h2>
+                  <p class="text-muted mb-1">One-time payment • 180 days access</p>
+                  <p class="text-muted">
+                    <s>$99.00</s> <span class="text-success fw-bold">$49.50 with LAUNCH50</span>
+                  </p>
+                </div>
 
-              <div id="monthly-error" class="alert alert-danger py-2 px-3 d-none" role="alert"></div>
+                <ul class="list-unstyled text-start mb-4">
+                  <li><i class="fas fa-check text-success me-2"></i>Everything in Monthly Plan</li>
+                  <li><i class="fas fa-star text-warning me-2"></i>Extended study time</li>
+                  <li><i class="fas fa-star text-warning me-2"></i>Retake exam if needed</li>
+                  <li><i class="fas fa-star text-warning me-2"></i>More practice opportunities</li>
+                  <li><i class="fas fa-trophy text-warning me-2"></i>Highest success rate</li>
+                </ul>
 
-              <form id="monthly-form" class="mt-auto">
-                <input type="hidden" name="plan_type" value="monthly">
-                <button id="monthly-btn" type="submit" class="btn btn-primary w-100">
-                  <i class="fas fa-arrow-right-to-bracket me-1"></i> Continue to Checkout
-                </button>
-              </form>
+                <form action="/create-checkout-session" method="POST" class="subscription-form">
+                  <input type="hidden" name="plan_type" value="6month">
+                  <div class="mb-3">
+                    <input type="text" name="discount_code" class="form-control"
+                           placeholder="Enter discount code (optional)" value="LAUNCH50">
+                  </div>
+                  <button type="submit" class="btn btn-success btn-lg w-100">
+                    <i class="fas fa-credit-card me-2"></i>Get 6-Month Access
+                  </button>
+                </form>
 
-              <small class="text-muted d-block text-center mt-2">
-                <i class="fas fa-lock me-1"></i> Secured by Stripe
-              </small>
+                <p class="mt-3 text-muted small">
+                  <i class="fas fa-trophy me-1"></i>Best for thorough preparation
+                </p>
+              </div>
             </div>
           </div>
         </div>
 
-        <!-- 6-Month Plan (One-time) -->
-        <div class="col-lg-6">
-          <div class="card h-100 border-success">
-            <div class="card-body d-flex flex-column">
-              <div class="badge bg-success align-self-start mb-2">Best Value</div>
-              <h4 class="text-success">6-Month Plan</h4>
-              <div class="my-2">
-                <div class="display-5 fw-bold">$99.00</div>
-                <div class="text-muted">one-time • 180 days access</div>
-              </div>
-
-              <ul class="mt-3 mb-4">
-                <li><i class="fas fa-check text-success me-2"></i>Everything in Monthly plan</li>
-                <li><i class="fas fa-check text-success me-2"></i>Perfect for full exam prep window</li>
-                <li><i class="fas fa-check text-success me-2"></i>No recurring charges</li>
-              </ul>
-
-              <form action="{{ url_for('create_checkout_session') }}" method="POST" class="mt-auto">
-                <input type="hidden" name="plan_type" value="6month">
-                <button type="submit" class="btn btn-success w-100">
-                  <i class="fas fa-credit-card me-1"></i> Get 6-Month Access
-                </button>
-              </form>
-
-              <small class="text-muted d-block text-center mt-2">
-                <i class="fas fa-lock me-1"></i> Secured by Stripe
-              </small>
+        <!-- Comparison -->
+        <div class="row mt-5">
+          <div class="col-12">
+            <h5 class="text-center mb-4">Plan Comparison</h5>
+            <div class="table-responsive">
+              <table class="table table-striped">
+                <thead>
+                  <tr>
+                    <th>Feature</th>
+                    <th class="text-center">Monthly</th>
+                    <th class="text-center">6-Month</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>AI CPP Tutor Access</td>
+                    <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                    <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                  </tr>
+                  <tr>
+                    <td>Practice Quizzes & Mock Exams</td>
+                    <td class="text-center">Unlimited</td>
+                    <td class="text-center">Unlimited</td>
+                  </tr>
+                  <tr>
+                    <td>Progress Analytics</td>
+                    <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                    <td class="text-center"><i class="fas fa-check text-success"></i></td>
+                  </tr>
+                  <tr>
+                    <td>Access Duration</td>
+                    <td class="text-center">30 Days (renews)</td>
+                    <td class="text-center">180 Days (one-time)</td>
+                  </tr>
+                  <tr>
+                    <td>Price</td>
+                    <td class="text-center">$39.99/mo</td>
+                    <td class="text-center">$99.00</td>
+                  </tr>
+                  <tr class="table-success">
+                    <td><strong>Launch Special (LAUNCH50)</strong></td>
+                    <td class="text-center"><strong>$19.99 first month</strong></td>
+                    <td class="text-center"><strong>$49.50</strong></td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>
-      </div>
 
-      <hr class="my-4">
+        <!-- FAQ -->
+        <div class="row mt-5">
+          <div class="col-12">
+            <h5 class="text-center mb-4">Frequently Asked Questions</h5>
+            <div class="accordion" id="faqAccordion">
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq1">
+                    How long is the LAUNCH50 discount valid?
+                  </button>
+                </h2>
+                <div id="faq1" class="accordion-collapse collapse" data-bs-parent="#faqAccordion">
+                  <div class="accordion-body">
+                    The LAUNCH50 discount code is available for a limited time during our testing phase.
+                  </div>
+                </div>
+              </div>
 
-      <div class="row g-2">
-        <div class="col-md-6">
-          <a class="btn btn-outline-light w-100" href="{{ url_for('dashboard') }}">
-            <i class="fas fa-chevron-left me-1"></i> Back to Dashboard
-          </a>
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq2">
+                    What happens after my subscription expires?
+                  </button>
+                </h2>
+                <div id="faq2" class="accordion-collapse collapse" data-bs-parent="#faqAccordion">
+                  <div class="accordion-body">
+                    Monthly renews automatically unless canceled. The 6-Month plan ends after 180 days; you can purchase again anytime. Your progress and chat history are saved.
+                  </div>
+                </div>
+              </div>
+
+              <div class="accordion-item">
+                <h2 class="accordion-header">
+                  <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#faq3">
+                    Can I switch plans later?
+                  </button>
+                </h2>
+                <div id="faq3" class="accordion-collapse collapse" data-bs-parent="#faqAccordion">
+                  <div class="accordion-body">
+                    Yes. Contact support and we’ll help you switch; we’ll prorate when possible.
+                  </div>
+                </div>
+              </div>
+
+            </div>
+          </div>
         </div>
-        <div class="col-md-6">
-          {% if session.get('user_id') %}
-          <form action="{{ url_for('billing_portal') }}" method="post">
-            <button class="btn btn-outline-info w-100" type="submit">
-              <i class="fas fa-receipt me-1"></i> Manage Billing
-            </button>
-          </form>
-          {% else %}
-          <a class="btn btn-outline-info w-100" href="{{ url_for('login') }}">
-            <i class="fas fa-right-to-bracket me-1"></i> Log in to Manage Billing
-          </a>
-          {% endif %}
-        </div>
-      </div>
 
-      <div class="alert alert-warning mt-4 mb-0">
-        <h6 class="mb-1"><i class="fas fa-exclamation-triangle me-2"></i>Important Notice</h6>
-        <p class="mb-2"><strong>This course is NOT affiliated with, endorsed by, or approved by ASIS International.</strong></p>
-        <p class="mb-0">We do not guarantee that using this course will result in passing the CPP exam. Exam success depends on individual study habits, prior knowledge, exam performance, and other factors beyond our control.</p>
+        <!-- Disclaimers -->
+        <div class="alert alert-warning mt-4">
+          <h6><i class="fas fa-exclamation-triangle me-2"></i>Important Notice</h6>
+          <p class="mb-2"><strong>This course is NOT affiliated with, endorsed by, or approved by ASIS International.</strong></p>
+          <p class="mb-2">This is an independent study aid to help students prepare for the CPP exam.</p>
+          <p class="mb-0"><strong>We do not guarantee that using this course will result in passing the CPP exam.</strong></p>
+        </div>
+
+        <div class="text-center mt-4">
+          <p class="text-muted">
+            <i class="fas fa-lock me-1"></i>Secure payment with Stripe •
+            <i class="fas fa-envelope me-1"></i>Questions? <a href="mailto:support@cpptestprep.com">Contact Support</a>
+          </p>
+          <p class="text-muted">
+            Current trial status:
+            {% if user and user.subscription_status == 'trial' and trial_days_left is not none %}
+              <span class="badge bg-info">{{ trial_days_left }} days left</span>
+            {% else %}
+              <span class="badge bg-warning">Trial expired</span>
+            {% endif %}
+          </p>
+        </div>
+
       </div>
     </div>
   </div>
@@ -113,39 +230,29 @@
 
 {% block scripts %}
 <script>
-  // Monthly plan submit -> POST to /create-checkout-session with plan_type=monthly
-  (function () {
-    const form = document.getElementById('monthly-form');
-    const btn = document.getElementById('monthly-btn');
-    const err = document.getElementById('monthly-error');
+// Discount UI polish
+document.querySelectorAll('.subscription-form').forEach(form => {
+  const discountInput = form.querySelector('input[name="discount_code"]');
+  const button = form.querySelector('button[type="submit"]');
 
-    form.addEventListener('submit', async function (e) {
-      e.preventDefault();
-      err.classList.add('d-none');
-      btn.disabled = true;
-      btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i> Redirecting…';
-
-      try {
-        const res = await fetch('{{ url_for("create_checkout_session") }}', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
-          body: new URLSearchParams([['plan_type', 'monthly']]).toString()
-        });
-
-        const data = await res.json();
-        if (data && data.url) {
-          window.location.href = data.url;
-        } else {
-          throw new Error(data && data.error ? data.error : 'Checkout error');
-        }
-      } catch (e) {
-        console.error(e);
-        err.textContent = e.message || 'Unable to start checkout. Please try again.';
-        err.classList.remove('d-none');
-        btn.disabled = false;
-        btn.innerHTML = '<i class="fas fa-arrow-right-to-bracket me-1"></i> Continue to Checkout';
+  discountInput.addEventListener('input', function() {
+    if (this.value.trim().toUpperCase() === 'LAUNCH50') {
+      button.classList.add('btn-success');
+      button.classList.remove('btn-primary', 'btn-warning');
+    } else {
+      // restore original color class depending on plan
+      if (form.querySelector('input[name="plan_type"]').value === '6month') {
+        button.classList.add('btn-success');
+      } else {
+        button.classList.add('btn-primary');
       }
-    });
-  })();
+    }
+  });
+
+  form.addEventListener('submit', function(e) {
+    button.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Processing...';
+    button.disabled = true;
+  });
+});
 </script>
 {% endblock %}
