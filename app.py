@@ -63,6 +63,33 @@ def set_user_subscription_by_customer(customer_id, status, subscription_id=None)
         print(f"Error updating subscription: {e}")
         db.session.rollback()
 
+def generate_fallback_flashcards(topic, difficulty):
+    """Generate fallback flashcards when AI generation fails"""
+    base_cards = [
+        {"front": "Risk Assessment", "back": "Systematic process to identify, analyze, and evaluate potential threats and vulnerabilities to determine appropriate safeguards.", "category": "definitions"},
+        {"front": "CPTED", "back": "Crime Prevention Through Environmental Design - uses physical environment design to reduce crime opportunities through natural surveillance, access control, and territoriality.", "category": "concepts"},
+        {"front": "Defense in Depth", "back": "Security strategy using multiple layers of controls so if one fails, others continue to provide protection.", "category": "concepts"},
+        {"front": "Least Privilege", "back": "Security principle of granting users only the minimum access rights needed to perform their job functions.", "category": "definitions"},
+        {"front": "Business Continuity", "back": "Organization's ability to maintain essential functions during and after a disaster or disruption.", "category": "definitions"},
+        {"front": "Chain of Custody", "back": "Documentation process that tracks evidence from collection through analysis to court presentation, maintaining its integrity.", "category": "procedures"},
+        {"front": "Vulnerability", "back": "Weakness in a system, process, or control that could be exploited by a threat.", "category": "definitions"},
+        {"front": "Threat", "back": "Potential danger or adverse event that could harm an organization's assets or operations.", "category": "definitions"},
+        {"front": "Access Control", "back": "Security measures that regulate who can view or use resources in a computing environment.", "category": "concepts"},
+        {"front": "Incident Response", "back": "Structured approach to addressing security breaches including preparation, detection, containment, eradication, recovery, and lessons learned.", "category": "procedures"},
+        {"front": "Physical Security", "back": "Protection of personnel, hardware, software, networks and data from physical circumstances that could cause losses or damage.", "category": "definitions"},
+        {"front": "Information Security", "back": "Practice of protecting information by mitigating information risks through confidentiality, integrity, and availability controls.", "category": "definitions"},
+        {"front": "Security Governance", "back": "Framework for managing and directing security activities to align with business objectives.", "category": "concepts"},
+        {"front": "Due Diligence", "back": "Investigation and assessment process undertaken before making security decisions or entering agreements.", "category": "procedures"},
+        {"front": "Insider Threat", "back": "Security risk posed by people who have authorized access to an organization's assets.", "category": "concepts"},
+        {"front": "Perimeter Security", "back": "Physical barriers and controls at the boundary of protected areas to prevent unauthorized access.", "category": "concepts"},
+        {"front": "Security Awareness", "back": "Education program to keep personnel informed about security policies, procedures, and current threats.", "category": "procedures"},
+        {"front": "Crisis Management", "back": "Process of preparing for, responding to, and recovering from emergency situations that threaten an organization.", "category": "concepts"},
+        {"front": "Background Investigation", "back": "Process of verifying an individual's personal and professional history before granting access or employment.", "category": "procedures"},
+        {"front": "Security Metrics", "back": "Measurable indicators used to assess the effectiveness and efficiency of security controls and programs.", "category": "definitions"}
+    ]
+    
+    return base_cards
+
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
@@ -677,33 +704,6 @@ Return ONLY valid JSON:
         print(f"Flashcards error: {e}")
         flash('Error loading flashcards. Please try again.', 'danger')
         return redirect(url_for('dashboard'))
-
-def generate_fallback_flashcards(topic, difficulty):
-    """Generate fallback flashcards when AI generation fails"""
-    base_cards = [
-        {"front": "Risk Assessment", "back": "Systematic process to identify, analyze, and evaluate potential threats and vulnerabilities to determine appropriate safeguards.", "category": "definitions"},
-        {"front": "CPTED", "back": "Crime Prevention Through Environmental Design - uses physical environment design to reduce crime opportunities through natural surveillance, access control, and territoriality.", "category": "concepts"},
-        {"front": "Defense in Depth", "back": "Security strategy using multiple layers of controls so if one fails, others continue to provide protection.", "category": "concepts"},
-        {"front": "Least Privilege", "back": "Security principle of granting users only the minimum access rights needed to perform their job functions.", "category": "definitions"},
-        {"front": "Business Continuity", "back": "Organization's ability to maintain essential functions during and after a disaster or disruption.", "category": "definitions"},
-        {"front": "Chain of Custody", "back": "Documentation process that tracks evidence from collection through analysis to court presentation, maintaining its integrity.", "category": "procedures"},
-        {"front": "Vulnerability", "back": "Weakness in a system, process, or control that could be exploited by a threat.", "category": "definitions"},
-        {"front": "Threat", "back": "Potential danger or adverse event that could harm an organization's assets or operations.", "category": "definitions"},
-        {"front": "Access Control", "back": "Security measures that regulate who can view or use resources in a computing environment.", "category": "concepts"},
-        {"front": "Incident Response", "back": "Structured approach to addressing security breaches including preparation, detection, containment, eradication, recovery, and lessons learned.", "category": "procedures"},
-        {"front": "Physical Security", "back": "Protection of personnel, hardware, software, networks and data from physical circumstances that could cause losses or damage.", "category": "definitions"},
-        {"front": "Information Security", "back": "Practice of protecting information by mitigating information risks through confidentiality, integrity, and availability controls.", "category": "definitions"},
-        {"front": "Security Governance", "back": "Framework for managing and directing security activities to align with business objectives.", "category": "concepts"},
-        {"front": "Due Diligence", "back": "Investigation and assessment process undertaken before making security decisions or entering agreements.", "category": "procedures"},
-        {"front": "Insider Threat", "back": "Security risk posed by people who have authorized access to an organization's assets.", "category": "concepts"},
-        {"front": "Perimeter Security", "back": "Physical barriers and controls at the boundary of protected areas to prevent unauthorized access.", "category": "concepts"},
-        {"front": "Security Awareness", "back": "Education program to keep personnel informed about security policies, procedures, and current threats.", "category": "procedures"},
-        {"front": "Crisis Management", "back": "Process of preparing for, responding to, and recovering from emergency situations that threaten an organization.", "category": "concepts"},
-        {"front": "Background Investigation", "back": "Process of verifying an individual's personal and professional history before granting access or employment.", "category": "procedures"},
-        {"front": "Security Metrics", "back": "Measurable indicators used to assess the effectiveness and efficiency of security controls and programs.", "category": "definitions"}
-    ]
-    
-    return base_cards
 
 @app.route('/performance-analysis')
 @login_required
@@ -1489,12 +1489,12 @@ class QuizResult(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
     quiz_type = db.Column(db.String(50), nullable=False)
-    domain = db.Column(db.String(50))  # Fixed: Add missing column
+    domain = db.Column(db.String(50))
     questions = db.Column(db.Text, nullable=False)
     answers = db.Column(db.Text, nullable=False)
     score = db.Column(db.Float, nullable=False)
     total_questions = db.Column(db.Integer, nullable=False)
-    time_taken = db.Column(db.Integer)  # Fixed: Add missing column
+    time_taken = db.Column(db.Integer)
     completed_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class StudySession(db.Model):
@@ -2071,4 +2071,5 @@ def update_user_progress(user_id, quiz_result):
             # Update mastery level
             if progress.average_score >= 90 and progress.consecutive_good_scores >= 3:
                 progress.mastery_level = 'mastered'
-            elif progress.average_score
+            elif progress.average_score >= 75 and progress.consecutive_good_scores >= 2:
+                progress.mastery_level = 'goo
