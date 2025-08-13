@@ -5,10 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}CPP Test Prep{% endblock %}</title>
 
-    <!-- Moment.js via Flask-Moment: enables {{ moment(...) }} in all templates -->
-    {{ moment.include_moment() }}
-    {# Optional locale setting:
-    {{ moment.lang("en") }}
+    {# Load Moment.js via Flask-Moment (safe if the extension is present) #}
+    {% if moment %}{{ moment.include_moment() }}{% endif %}
+    {# Optional: set locale
+    {% if moment %}{{ moment.lang("en") }}{% endif %}
     #}
 
     <!-- CSS -->
