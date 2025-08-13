@@ -1,5 +1,6 @@
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
+from flask_moment import Moment
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 from functools import wraps
@@ -16,6 +17,7 @@ from flask_moment import Moment
 # App & Config
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
+moment = Moment(app)
 
 # Initialize Flask-Moment (enables {{ moment(...) }} in templates)
 moment = Moment(app)
@@ -1712,3 +1714,4 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
