@@ -50,8 +50,25 @@
             class="list-group-item list-group-item-action"
             data-domain="{{ dkey }}"
           >
-            <div class="fw-bold">{{ dinfo.name }}</div>
-            <small class="text-muted">{{ ', '.join(dinfo.topics[:3]) }}{% if dinfo.topics|length > 3 %}, …{% endif %}</small>
+            <!-- === PROGRESS-AWARE HEADER + STATS (your requested block) === -->
+            <div class="d-flex justify-content-between align-items-center">
+              <div class="fw-bold">{{ dinfo.name }}</div>
+              {% set prog = user_progress.get(dkey) %}
+              {% if prog %}
+                {% if prog.mastery_level == 'mastered' %}
+                  <span class="badge bg-success">Mastered</span>
+                {% elif prog.mastery_level == 'good' %}
+                  <span class="badge bg-warning text-dark">Good</span>
+                {% else %}
+                  <span class="badge bg-secondary">Practice</span>
+                {% endif %}
+              {% endif %}
+            </div>
+            <small class="text-muted">
+              {{ ', '.join(dinfo.topics[:3]) }}{% if dinfo.topics|length > 3 %}, …{% endif %}
+              {% if prog %} • Avg: {{ '%.0f'|format(prog.average_score) }}% • Streak: {{ prog.consecutive_good_scores }}{% endif %}
+            </small>
+            <!-- === END PROGRESS-AWARE BLOCK === -->
           </button>
         {% endfor %}
       </div>
@@ -121,7 +138,8 @@
       btn.classList.add('active');
 
       selectedDomainKey = btn.getAttribute('data-domain') || '';
-      selectedDomainName = btn.querySelector('.fw-bold').textContent.trim();
+      const titleEl = btn.querySelector('.fw-bold');
+      selectedDomainName = titleEl ? titleEl.textContent.trim() : 'General';
       document.getElementById('selDomain').textContent = selectedDomainName;
     });
   });
@@ -140,7 +158,6 @@
     if (selectedDomainKey) params.set('domain', selectedDomainKey);
     if (selectedDifficulty) params.set('difficulty', selectedDifficulty);
 
-    // Your route validates quiz_type against QUIZ_TYPES
     window.location.href = `/quiz/${encodeURIComponent(selectedQuizKey)}?${params.toString()}`;
   });
 </script>
