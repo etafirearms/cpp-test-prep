@@ -1,19 +1,17 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>{% block title %}CPP Test Prep{% endblock %}</title>
 
-    {# Load Moment.js via Flask-Moment (safe if the extension is present) #}
+    {# Load Moment.js via Flask-Moment if available #}
     {% if moment %}{{ moment.include_moment() }}{% endif %}
-    {# Optional: set locale
     {% if moment %}{{ moment.lang("en") }}{% endif %}
-    #}
 
     <!-- CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
 
     <style>
         body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
@@ -24,7 +22,7 @@
         .user-message { text-align: right; }
         .ai-message { text-align: left; }
         .message-bubble { display: inline-block; padding: 10px 15px; border-radius: 15px; max-width: 80%; }
-        .user-message .message-bubble { background: #007bff; color: white; }
+        .user-message .message-bubble { background: #007bff; color: #fff; }
         .ai-message .message-bubble { background: #f8f9fa; border: 1px solid #dee2e6; }
         .navbar { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); }
         footer a { text-decoration: none; }
@@ -45,28 +43,14 @@
             <div class="collapse navbar-collapse" id="navbarNav">
                 <ul class="navbar-nav ms-auto">
                     {% if session.get('user_id') %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fas fa-tachometer-alt me-1"></i>Dashboard</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('study') }}"><i class="fas fa-book me-1"></i>Study</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('progress') }}"><i class="fas fa-chart-line me-1"></i>Progress</a>
-                        </li>
-                        <li class="nav-item">
-                            <span class="nav-link">Welcome, {{ session.get('user_name') }}!</span>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('logout') }}"><i class="fas fa-sign-out-alt me-1"></i>Logout</a>
-                        </li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fas fa-tachometer-alt me-1"></i>Dashboard</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('study') }}"><i class="fas fa-book me-1"></i>Study</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('progress') }}"><i class="fas fa-chart-line me-1"></i>Progress</a></li>
+                        <li class="nav-item"><span class="nav-link">Welcome, {{ session.get('user_name') }}!</span></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}"><i class="fas fa-sign-out-alt me-1"></i>Logout</a></li>
                     {% else %}
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('login') }}">Login</a>
-                        </li>
-                        <li class="nav-item">
-                            <a class="nav-link" href="{{ url_for('register') }}">Register</a>
-                        </li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
+                        <li class="nav-item"><a class="nav-link" href="{{ url_for('register') }}">Register</a></li>
                     {% endif %}
                 </ul>
             </div>
@@ -94,18 +78,9 @@
         <div class="container">
             <div class="row gy-2 align-items-center">
                 <div class="col-md-8">
-                    <p class="small mb-1">
-                        <strong>Important Notice</strong><br>
-                        This service is NOT affiliated with, endorsed by, or approved by ASIS International.
-                    </p>
-                    <p class="small mb-1">
-                        CPP® (Certified Protection Professional) is a registered certification mark of ASIS International, Inc.
-                        This course is an independent study aid created to help candidates prepare for the CPP exam.
-                    </p>
-                    <p class="small mb-0">
-                        We do not guarantee that using this course will result in passing the CPP exam.
-                        Exam success depends on individual study habits, prior knowledge, exam performance, and other factors beyond our control.
-                    </p>
+                    <p class="small mb-1"><strong>Important Notice</strong><br />This service is NOT affiliated with, endorsed by, or approved by ASIS International.</p>
+                    <p class="small mb-1">CPP® (Certified Protection Professional) is a registered certification mark of ASIS International, Inc. This course is an independent study aid created to help candidates prepare for the CPP exam.</p>
+                    <p class="small mb-0">We do not guarantee that using this course will result in passing the CPP exam. Exam success depends on individual study habits, prior knowledge, exam performance, and other factors beyond our control.</p>
                 </div>
                 <div class="col-md-4 text-md-end">
                     <p class="small mb-0">
