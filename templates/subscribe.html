@@ -3,48 +3,77 @@
 
 {% block content %}
 <div class="row justify-content-center">
-  <div class="col-lg-8">
+  <div class="col-lg-10">
     <div class="card p-4">
-      <div class="d-flex align-items-center mb-2">
-        <i class="fas fa-crown text-warning me-2"></i>
-        <h3 class="mb-0">Unlock Full Access</h3>
+      <div class="text-center mb-3">
+        <h3 class="mb-1"><i class="fas fa-crown text-warning me-2"></i>Choose Your CPP Prep Plan</h3>
+        <p class="text-muted mb-0">Unlock full access to quizzes, mock exams, AI tutor, flashcards, and analytics.</p>
       </div>
-      <p class="text-muted mb-4">
-        Get unlimited quizzes, AI study sessions, flashcards, and progress analytics. Billed monthly. Cancel anytime.
-      </p>
 
-      <div class="row g-3 align-items-stretch">
-        <div class="col-md-7">
-          <div class="h-100">
-            <ul class="mb-0">
-              <li><i class="fas fa-check text-success me-2"></i>Unlimited practice quizzes & mock exams</li>
-              <li><i class="fas fa-check text-success me-2"></i>Personalized AI CPP tutor</li>
-              <li><i class="fas fa-check text-success me-2"></i>Flashcards with spaced repetition</li>
-              <li><i class="fas fa-check text-success me-2"></i>Progress tracking & domain mastery</li>
-              <li><i class="fas fa-check text-success me-2"></i>Mobile & desktop access</li>
-              <li><i class="fas fa-check text-success me-2"></i>Cancel anytime</li>
-            </ul>
+      <div class="row g-4">
+        <!-- Monthly Plan (Subscription) -->
+        <div class="col-lg-6">
+          <div class="card h-100 border-primary">
+            <div class="card-body d-flex flex-column">
+              <div class="badge bg-primary align-self-start mb-2">Flexible</div>
+              <h4 class="text-primary">Monthly Plan</h4>
+              <div class="my-2">
+                <div class="display-5 fw-bold">$39.99</div>
+                <div class="text-muted">per month • cancel anytime</div>
+              </div>
+
+              <ul class="mt-3 mb-4">
+                <li><i class="fas fa-check text-success me-2"></i>Unlimited quizzes & mock exams</li>
+                <li><i class="fas fa-check text-success me-2"></i>AI CPP tutor chat</li>
+                <li><i class="fas fa-check text-success me-2"></i>Flashcards with spaced repetition</li>
+                <li><i class="fas fa-check text-success me-2"></i>Progress tracking & domain mastery</li>
+                <li><i class="fas fa-check text-success me-2"></i>Mobile & desktop access</li>
+              </ul>
+
+              <div id="monthly-error" class="alert alert-danger py-2 px-3 d-none" role="alert"></div>
+
+              <form id="monthly-form" class="mt-auto">
+                <input type="hidden" name="plan_type" value="monthly">
+                <button id="monthly-btn" type="submit" class="btn btn-primary w-100">
+                  <i class="fas fa-arrow-right-to-bracket me-1"></i> Continue to Checkout
+                </button>
+              </form>
+
+              <small class="text-muted d-block text-center mt-2">
+                <i class="fas fa-lock me-1"></i> Secured by Stripe
+              </small>
+            </div>
           </div>
         </div>
 
-        <div class="col-md-5">
-          <div class="border rounded p-3 text-center h-100 d-flex flex-column justify-content-between">
-            <div>
-              <div class="display-6 fw-bold">$39.99</div>
-              <div class="text-muted">per month</div>
+        <!-- 6-Month Plan (One-time) -->
+        <div class="col-lg-6">
+          <div class="card h-100 border-success">
+            <div class="card-body d-flex flex-column">
+              <div class="badge bg-success align-self-start mb-2">Best Value</div>
+              <h4 class="text-success">6-Month Plan</h4>
+              <div class="my-2">
+                <div class="display-5 fw-bold">$99.00</div>
+                <div class="text-muted">one-time • 180 days access</div>
+              </div>
+
+              <ul class="mt-3 mb-4">
+                <li><i class="fas fa-check text-success me-2"></i>Everything in Monthly plan</li>
+                <li><i class="fas fa-check text-success me-2"></i>Perfect for full exam prep window</li>
+                <li><i class="fas fa-check text-success me-2"></i>No recurring charges</li>
+              </ul>
+
+              <form action="{{ url_for('create_checkout_session') }}" method="POST" class="mt-auto">
+                <input type="hidden" name="plan_type" value="6month">
+                <button type="submit" class="btn btn-success w-100">
+                  <i class="fas fa-credit-card me-1"></i> Get 6-Month Access
+                </button>
+              </form>
+
+              <small class="text-muted d-block text-center mt-2">
+                <i class="fas fa-lock me-1"></i> Secured by Stripe
+              </small>
             </div>
-
-            <div id="subscribe-error" class="alert alert-danger py-2 px-3 mt-3 d-none" role="alert"></div>
-
-            <form id="subscribe-form" class="mt-3">
-              <button id="subscribe-btn" type="submit" class="btn btn-primary w-100">
-                <i class="fas fa-arrow-right-to-bracket me-1"></i> Continue to Checkout
-              </button>
-            </form>
-
-            <small class="text-muted d-block mt-2">
-              <i class="fas fa-lock me-1"></i> Secured by Stripe
-            </small>
           </div>
         </div>
       </div>
@@ -84,29 +113,35 @@
 
 {% block scripts %}
 <script>
+  // Monthly plan submit -> POST to /create-checkout-session with plan_type=monthly
   (function () {
-    const form = document.getElementById('subscribe-form');
-    const btn = document.getElementById('subscribe-btn');
-    const errBox = document.getElementById('subscribe-error');
+    const form = document.getElementById('monthly-form');
+    const btn = document.getElementById('monthly-btn');
+    const err = document.getElementById('monthly-error');
 
     form.addEventListener('submit', async function (e) {
       e.preventDefault();
-      errBox.classList.add('d-none');
+      err.classList.add('d-none');
       btn.disabled = true;
       btn.innerHTML = '<i class="fas fa-spinner fa-spin me-1"></i> Redirecting…';
 
       try {
-        const res = await fetch('{{ url_for("create_checkout_session") }}', { method: 'POST' });
+        const res = await fetch('{{ url_for("create_checkout_session") }}', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded;charset=UTF-8' },
+          body: new URLSearchParams([['plan_type', 'monthly']]).toString()
+        });
+
         const data = await res.json();
         if (data && data.url) {
           window.location.href = data.url;
         } else {
           throw new Error(data && data.error ? data.error : 'Checkout error');
         }
-      } catch (err) {
-        console.error(err);
-        errBox.textContent = err.message || 'Unable to start checkout. Please try again.';
-        errBox.classList.remove('d-none');
+      } catch (e) {
+        console.error(e);
+        err.textContent = e.message || 'Unable to start checkout. Please try again.';
+        err.classList.remove('d-none');
         btn.disabled = false;
         btn.innerHTML = '<i class="fas fa-arrow-right-to-bracket me-1"></i> Continue to Checkout';
       }
