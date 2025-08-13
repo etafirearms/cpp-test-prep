@@ -1313,9 +1313,23 @@ def subscribe():
         return redirect(url_for('dashboard'))
 
 
-@app.route('/create-checkout-session', methods=['POST'])
-@login_required
-def create_checkout_session():
+        plans = {
+            # New monthly plan: $39.99, billed every 1 month
+            'monthly': {
+                'amount': 3999,  # cents
+                'name': 'CPP Test Prep - Monthly Plan',
+                'interval': 'month',
+                'interval_count': 1
+            },
+            # Keep 6-month plan: $99, billed every 6 months
+            '6month': {
+                'amount': 9900,  # cents
+                'name': 'CPP Test Prep - 6 Month Plan',
+                'interval': 'month',
+                'interval_count': 6
+            }
+        }
+
     try:
         user = User.query.get(session['user_id'])
         if not user:
@@ -1727,5 +1741,6 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
