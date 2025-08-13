@@ -1285,15 +1285,22 @@ def progress():
 @app.route('/subscribe')
 def subscribe():
     try:
+        # Require login to subscribe
         if 'user_id' not in session:
             flash('Please log in to subscribe.', 'warning')
             return redirect(url_for('login'))
 
         user = User.query.get(session['user_id'])
         trial_days_left = None
+
+        # Compute days left safely (avoid any datetime shadowing in templates)
+        now = datetime.utcnow()
         if user and user.subscription_status == 'trial' and user.subscription_end_date:
-            delta = (user.subscription_end_date - datetime.utcnow())
-            trial_days_left = max(delta.days, 0)
+            try:
+                delta = user.subscription_end_date - now
+                trial_days_left = max(delta.days, 0)
+            except Exception:
+                trial_days_left = None  # fallback if stored value is odd
 
         return render_template(
             'subscribe.html',
@@ -1724,3 +1731,4 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
