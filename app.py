@@ -1,746 +1,4 @@
-from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify
-from flask_sqlalchemy import SQLAlchemy
-from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, timedelta
-import json
-import os
-import requests
-import stripe
-import time
-import hashlib
-from functools import wraps
-
-# -----------------------------------------------------------------------------
-# App & Config
-# -----------------------------------------------------------------------------
-app = Flask(__name__)
-
-def require_env(name: str) -> str:
-    val = os.environ.get(name)
-    if not val:
-        raise RuntimeError(f"Missing required environment variable: {name}")
-    return val
-
-# Required env vars (set these in Render → Environment)
-app.config['SECRET_KEY'] = require_env('SECRET_KEY')
-
-app.config['SQLALCHEMY_DATABASE_URI'] = require_env('DATABASE_URL')
-# Render sometimes provides postgres://; SQLAlchemy expects postgresql://
-if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
-    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
-app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
-    'pool_pre_ping': True,
-    'pool_recycle': 300,
-    'connect_args': {
-        'sslmode': 'require',
-        'connect_timeout': 10
-    }
-}
-db = SQLAlchemy(app)
-
-# OpenAI config
-OPENAI_API_KEY = require_env('OPENAI_API_KEY')
-OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini')
-OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.openai.com/v1')
-
-# Stripe config
-stripe.api_key = require_env('STRIPE_SECRET_KEY')
-STRIPE_PUBLISHABLE_KEY = require_env('STRIPE_PUBLISHABLE_KEY')
-STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
-
-# Simple rate limiter for AI calls
-last_api_call = None
-
-# -----------------------------------------------------------------------------
-# Quiz Types Configuration (Enhanced)
-# -----------------------------------------------------------------------------
-QUIZ_TYPES = {
-    'practice': {
-        'name': 'Practice Quiz',
-        'description': 'General practice questions across all CPP domains',
-        'questions': 10
-    },
-    'mock-exam': {
-        'name': 'Mock Exam',
-        'description': 'Progressive exam: 50 questions initially, 125 when ready',
-        'questions': 50  # Will be dynamic based on user progress
-    },
-    'domain-specific': {
-        'name': 'Domain-Specific Quiz',
-        'description': 'Focus on specific CPP domains',
-        'questions': 15
-    },
-    'quick-review': {
-        'name': 'Quick Review',
-        'description': 'Short 5-question review',
-        'questions': 5
-    },
-    'difficult': {
-        'name': 'Advanced Challenge',
-        'description': 'Challenging questions for advanced preparation',
-        'questions': 20
-    },
-    'scenario-based': {
-        'name': 'Scenario-Based Quiz',
-        'description': 'Real-world security scenarios and case studies',
-        'questions': 12
-    },
-    'legal-compliance': {
-        'name': 'Legal & Compliance Quiz',
-        'description': 'Focus on legal aspects and compliance requirements',
-        'questions': 15
-    }
-}
-
-CPP_DOMAINS = {
-    'security-principles': {
-        'name': 'Security Principles & Practices',
-        'topics': ['Risk Management', 'Security Governance', 'Ethics', 'Standards & Regulations']
-    },
-    'business-principles': {
-        'name': 'Business Principles & Practices', 
-        'topics': ['Budgeting', 'Contracts', 'Project Management', 'ROI Analysis']
-    },
-    'investigations': {
-        'name': 'Investigations',
-        'topics': ['Investigation Planning', 'Interviews', 'Evidence Collection', 'Report Writing']
-    },
-    'personnel-security': {
-        'name': 'Personnel Security',
-        'topics': ['Background Screening', 'Insider Threat', 'Workplace Violence', 'Security Awareness']
-    },
-    'physical-security': {
-        'name': 'Physical Security',
-        'topics': ['CPTED', 'Access Control', 'Perimeter Security', 'Security Technology']
-    },
-    'information-security': {
-        'name': 'Information Security',
-        'topics': ['Data Protection', 'Cybersecurity', 'Information Classification', 'Incident Response']
-    },
-    'crisis-management': {
-        'name': 'Crisis Management',
-        'topics': ['Business Continuity', 'Disaster Recovery', 'Emergency Response', 'Communications']
-    }
-}
-
-# -----------------------------------------------------------------------------
-# Database Models
-# -----------------------------------------------------------------------------
-class User(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    email = db.Column(db.String(120), unique=True, nullable=False)
-    password_hash = db.Column(db.String(128))
-    first_name = db.Column(db.String(50), nullable=False)
-    last_name = db.Column(db.String(50), nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    subscription_status = db.Column(db.String(20), default='trial')
-    subscription_plan = db.Column(db.String(20), default='trial')
-    subscription_end_date = db.Column(db.DateTime)
-    stripe_customer_id = db.Column(db.String(100))
-    stripe_subscription_id = db.Column(db.String(100))
-    discount_code_used = db.Column(db.String(50))
-    study_time = db.Column(db.Integer, default=0)
-    quiz_scores = db.Column(db.Text, default='[]')
-
-class ChatHistory(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    messages = db.Column(db.Text, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class ActivityLog(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    activity = db.Column(db.String(100), nullable=False)
-    details = db.Column(db.Text)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-
-class QuizResult(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    quiz_type = db.Column(db.String(50), nullable=False)
-    domain = db.Column(db.String(50))  # Fixed: Add missing column
-    questions = db.Column(db.Text, nullable=False)
-    answers = db.Column(db.Text, nullable=False)
-    score = db.Column(db.Float, nullable=False)
-    total_questions = db.Column(db.Integer, nullable=False)
-    time_taken = db.Column(db.Integer)  # Fixed: Add missing column
-    completed_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class StudySession(db.Model):
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    topic = db.Column(db.String(100))
-    duration = db.Column(db.Integer)
-    session_type = db.Column(db.String(50))
-    started_at = db.Column(db.DateTime, default=datetime.utcnow)
-    ended_at = db.Column(db.DateTime)
-
-class QuestionBank(db.Model):
-    """Track all generated questions to prevent duplicates"""
-    id = db.Column(db.Integer, primary_key=True)
-    question_hash = db.Column(db.String(64), unique=True, nullable=False)
-    question_text = db.Column(db.Text, nullable=False)
-    domain = db.Column(db.String(50))
-    difficulty = db.Column(db.String(20))
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-class UserProgress(db.Model):
-    """Track user progress by domain and difficulty"""
-    id = db.Column(db.Integer, primary_key=True)
-    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
-    domain = db.Column(db.String(50), nullable=False)
-    mastery_level = db.Column(db.String(20), default='needs_practice')
-    average_score = db.Column(db.Float, default=0.0)
-    question_count = db.Column(db.Integer, default=0)
-    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
-    consecutive_good_scores = db.Column(db.Integer, default=0)
-
-# Fixed: Database initialization with proper error handling
-def migrate_database_safe():
-    """Safely add missing columns to existing tables"""
-    try:
-        with app.app_context():
-            # Check if tables exist and create them if they don't
-            inspector = db.inspect(db.engine)
-            
-            if 'quiz_result' in inspector.get_table_names():
-                columns = [column['name'] for column in inspector.get_columns('quiz_result')]
-                
-                # Add missing columns with raw SQL
-                with db.engine.connect() as conn:
-                    if 'domain' not in columns:
-                        try:
-                            conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN domain VARCHAR(50)"))
-                            print("Added domain column to quiz_result")
-                        except Exception as e:
-                            print(f"Domain column might already exist: {e}")
-                    
-                    if 'time_taken' not in columns:
-                        try:
-                            conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN time_taken INTEGER"))
-                            print("Added time_taken column to quiz_result")
-                        except Exception as e:
-                            print(f"Time_taken column might already exist: {e}")
-                    
-                    conn.commit()
-            
-            # Create all tables
-            db.create_all()
-            print("Database tables created/updated successfully!")
-            
-    except Exception as e:
-        print(f"Database migration error: {e}")
-        # Try to create tables anyway
-        try:
-            db.create_all()
-            print("Fallback: Created tables without migration")
-        except Exception as e2:
-            print(f"Fallback creation failed: {e2}")
-
-# Initialize database with migration
-with app.app_context():
-    migrate_database_safe()
-
-# -----------------------------------------------------------------------------
-# Helpers & Decorators
-# -----------------------------------------------------------------------------
-def login_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            flash('Please log in to access this feature.', 'warning')
-            return redirect(url_for('login'))
-        return f(*args, **kwargs)
-    return decorated_function
-
-def subscription_required(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        
-        try:
-            user = User.query.get(session['user_id'])
-            if not user:
-                session.clear()
-                return redirect(url_for('login'))
-                
-            # Check subscription status
-            if user.subscription_status == 'expired':
-                flash('Your subscription has expired. Please renew to continue.', 'danger')
-                return redirect(url_for('subscribe'))
-            
-            # Check trial expiry
-            if user.subscription_status == 'trial' and user.subscription_end_date:
-                if datetime.utcnow() > user.subscription_end_date:
-                    user.subscription_status = 'expired'
-                    db.session.commit()
-                    flash('Your trial has expired. Please subscribe to continue.', 'warning')
-                    return redirect(url_for('subscribe'))
-                    
-        except Exception as e:
-            print(f"Subscription check error: {e}")
-            flash('Authentication error. Please log in again.', 'danger')
-            return redirect(url_for('login'))
-            
-        return f(*args, **kwargs)
-    return decorated_function
-
-def log_activity(user_id, activity, details=None):
-    """Enhanced activity logging with error handling"""
-    try:
-        activity_log = ActivityLog(user_id=user_id, activity=activity, details=details)
-        db.session.add(activity_log)
-        db.session.commit()
-    except Exception as e:
-        print(f"Activity logging error: {e}")
-        # Don't fail the main operation due to logging issues
-
-def safe_db_operation(operation_func):
-    """Decorator for safe database operations with retry"""
-    @wraps(operation_func)
-    def wrapper(*args, **kwargs):
-        max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                return operation_func(*args, **kwargs)
-            except Exception as e:
-                print(f"Database operation failed (attempt {attempt + 1}): {e}")
-                if attempt == max_retries - 1:
-                    db.session.rollback()
-                    raise e
-                time.sleep(0.5)  # Brief delay before retry
-    return wrapper
-
-def chat_with_ai(messages, user_id=None):
-    """Enhanced AI chat function with better error handling"""
-    global last_api_call
-    try:
-        # Rate limiting
-        if last_api_call:
-            delta = datetime.utcnow() - last_api_call
-            if delta.total_seconds() < 2:
-                time.sleep(2 - delta.total_seconds())
-
-        # Enhanced system message
-        system_message = {
-            "role": "system",
-            "content": (
-                "You are an expert tutor for the ASIS Certified Protection Professional (CPP) exam.\n\n"
-                "FOCUS AREAS:\n"
-                "1. Security Principles & Practices - Risk management, governance, ethics\n"
-                "2. Business Principles & Practices - Budgeting, contracts, project management\n"
-                "3. Investigations - Planning, interviews, evidence, reporting\n"
-                "4. Personnel Security - Background screening, insider threats, workplace violence\n"
-                "5. Physical Security - CPTED, access control, perimeter security\n"
-                "6. Information Security - Data protection, cybersecurity, incident response\n"
-                "7. Crisis Management - Business continuity, disaster recovery, emergency response\n\n"
-                "GUIDELINES:\n"
-                "- Use only public, non-proprietary knowledge\n"
-                "- Provide practical, real-world examples\n"
-                "- Format multiple-choice questions clearly\n"
-                "- Give detailed explanations for answers\n"
-                "- Be encouraging and supportive\n"
-                "- Never guarantee exam success\n\n"
-                "QUESTION FORMAT:\n"
-                "**Question #. [Question text]**\n\n"
-                "A. [Option A]\nB. [Option B]\nC. [Option C]\nD. [Option D]\n\n"
-                "**Answer: [Letter]**\n"
-                "**Explanation:** [Clear explanation]\n"
-            )
-        }
-        
-        # Ensure system message is first
-        if not messages or messages[0].get('role') != 'system':
-            messages.insert(0, system_message)
-        else:
-            messages[0] = system_message  # Update existing system message
-
-        headers = {
-            'Authorization': f'Bearer {OPENAI_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        
-        data = {
-            'model': OPENAI_CHAT_MODEL,
-            'messages': messages,
-            'max_tokens': 1500,  # Increased for better responses
-            'temperature': 0.7,
-            'presence_penalty': 0.1,  # Encourage variety
-            'frequency_penalty': 0.1   # Reduce repetition
-        }
-
-        last_api_call = datetime.utcnow()
-        resp = requests.post(
-            f'{OPENAI_API_BASE}/chat/completions', 
-            headers=headers, 
-            json=data, 
-            timeout=45
-        )
-
-        print(f"[OpenAI] status={resp.status_code} model={OPENAI_CHAT_MODEL}")
-
-        if resp.status_code == 200:
-            result = resp.json()
-            content = result['choices'][0]['message']['content']
-            
-            # Log usage for debugging
-            if 'usage' in result:
-                print(f"[OpenAI] tokens used: {result['usage'].get('total_tokens', 'unknown')}")
-            
-            return content
-
-        # Enhanced error messages
-        if resp.status_code in (401, 403):
-            return (
-                "I'm having trouble connecting to my knowledge base. This might be due to "
-                "API authentication issues. Please try again in a moment, or contact support "
-                "if the problem persists."
-            )
-        elif resp.status_code == 429:
-            return (
-                "I'm receiving a lot of questions right now and need a moment to catch up. "
-                "Please wait 30 seconds and try your question again."
-            )
-        elif resp.status_code >= 500:
-            return (
-                "The AI service is temporarily experiencing technical difficulties. "
-                "Please try again in a few minutes."
-            )
-        else:
-            print(f"[OpenAI] Unexpected status: {resp.status_code}, body: {resp.text[:200]}")
-            return "I encountered an unexpected issue. Please try rephrasing your question."
-
-    except requests.exceptions.Timeout:
-        return (
-            "My response is taking longer than usual. Please try again with a shorter "
-            "or more specific question."
-        )
-    except requests.exceptions.ConnectionError:
-        return (
-            "I'm having trouble connecting to my knowledge base. Please check your "
-            "internet connection and try again."
-        )
-    except Exception as e:
-        print(f"[OpenAI] Unexpected error: {e}")
-        return (
-            "I encountered a technical issue while processing your question. "
-            "Please try again, or contact support if this continues."
-        )
-
-def generate_quiz_questions_with_uniqueness(quiz_type, domain, difficulty, num_questions, user_id):
-    """Generate unique questions and store hashes to prevent duplicates"""
-    
-    domain_focus = ""
-    if domain and domain in CPP_DOMAINS:
-        domain_info = CPP_DOMAINS[domain]
-        domain_focus = f"\nFocus specifically on {domain_info['name']} including: {', '.join(domain_info['topics'])}."
-    
-    # Enhanced prompt for better question generation
-    prompt = f"""Create {num_questions} UNIQUE multiple-choice questions for the ASIS CPP exam.
-{domain_focus}
-
-REQUIREMENTS:
-- Difficulty: {difficulty}
-- Each question must be completely unique (no duplicates)
-- Cover different aspects, scenarios, and applications
-- Include practical, real-world scenarios
-- Questions should test understanding, not just memorization
-- Ensure answers are clearly distinguishable
-
-QUESTION TYPES TO INCLUDE:
-- Conceptual understanding (40%)
-- Scenario-based applications (30%)
-- Best practices and procedures (20%)
-- Regulatory and compliance (10%)
-
-Return ONLY valid JSON in this exact format:
-{{
-  "title": "CPP {quiz_type.title().replace('-', ' ')} Quiz",
-  "questions": [
-    {{
-      "question": "Clear, specific question text",
-      "options": {{"A": "option", "B": "option", "C": "option", "D": "option"}},
-      "correct": "A",
-      "explanation": "Detailed explanation with reasoning",
-      "domain": "{domain or 'general'}"
-    }}
-  ]
-}}
-
-Ensure all {num_questions} questions are included in the response."""
-
-    ai_response = chat_with_ai([{'role': 'user', 'content': prompt}])
-    
-    try:
-        import re
-        # Try to extract JSON from response
-        json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
-        if json_match:
-            quiz_data = json.loads(json_match.group())
-            
-            # Validate structure
-            if 'questions' not in quiz_data or not isinstance(quiz_data['questions'], list):
-                raise ValueError("Invalid quiz structure")
-            
-            # Check for duplicates and store new questions
-            unique_questions = []
-            for question in quiz_data.get('questions', []):
-                question_text = question.get('question', '')
-                if not question_text:
-                    continue
-                    
-                question_hash = hashlib.md5(question_text.encode()).hexdigest()
-                
-                # Check if question already exists
-                try:
-                    existing = QuestionBank.query.filter_by(question_hash=question_hash).first()
-                    if not existing:
-                        # Store new question
-                        new_question = QuestionBank(
-                            question_hash=question_hash,
-                            question_text=question_text,
-                            domain=question.get('domain', domain or 'general'),
-                            difficulty=difficulty
-                        )
-                        db.session.add(new_question)
-                        unique_questions.append(question)
-                    else:
-                        print(f"Duplicate question detected: {question_text[:50]}...")
-                except Exception as e:
-                    print(f"Database error checking duplicates: {e}")
-                    # Include question anyway if DB check fails
-                    unique_questions.append(question)
-            
-            # Accept if we have at least 70% unique questions
-            if len(unique_questions) >= max(1, num_questions * 0.7):
-                quiz_data['questions'] = unique_questions[:num_questions]
-                try:
-                    db.session.commit()
-                except Exception as e:
-                    print(f"Error saving questions to database: {e}")
-                    db.session.rollback()
-                return quiz_data
-            else:
-                print(f"Too many duplicates: {len(unique_questions)} unique out of {num_questions}")
-                db.session.rollback()
-                return None
-                
-    except json.JSONDecodeError as e:
-        print(f"JSON parsing error: {e}")
-        print(f"AI response preview: {ai_response[:500]}")
-        return None
-    except Exception as e:
-        print(f"Quiz generation error: {e}")
-        db.session.rollback()
-        return None
-
-def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
-    """Generate fallback quiz when AI generation fails"""
-    
-    # Domain-specific fallback questions
-    domain_questions = {
-        'security-principles': [
-            {
-                "question": "What is the primary purpose of a comprehensive security risk assessment?",
-                "options": {
-                    "A": "To identify all possible security threats",
-                    "B": "To determine cost-effective risk mitigation strategies",
-                    "C": "To eliminate all security risks completely",
-                    "D": "To satisfy insurance and regulatory requirements"
-                },
-                "correct": "B",
-                "explanation": "Risk assessments help organizations identify risks and determine the most cost-effective strategies to mitigate them, balancing security needs with business requirements.",
-                "domain": "security-principles"
-            },
-            {
-                "question": "Which principle is fundamental to effective security governance?",
-                "options": {
-                    "A": "Maximum security at minimum cost",
-                    "B": "Security decisions made by IT department",
-                    "C": "Alignment with business objectives",
-                    "D": "Standardization across all departments"
-                },
-                "correct": "C",
-                "explanation": "Security governance must align with business objectives to be effective and sustainable, ensuring security supports rather than hinders business goals.",
-                "domain": "security-principles"
-            }
-        ],
-        'physical-security': [
-            {
-                "question": "In CPTED principles, what does 'natural surveillance' primarily accomplish?",
-                "options": {
-                    "A": "Reduces the need for security guards",
-                    "B": "Increases the likelihood that criminal activity will be observed",
-                    "C": "Eliminates blind spots in camera coverage",
-                    "D": "Provides legal liability protection"
-                },
-                "correct": "B",
-                "explanation": "Natural surveillance increases visibility and the perception that criminal activity will be observed, which serves as a deterrent to potential offenders.",
-                "domain": "physical-security"
-            }
-        ],
-        'information-security': [
-            {
-                "question": "What is the most critical first step in incident response?",
-                "options": {
-                    "A": "Notify law enforcement",
-                    "B": "Document everything immediately",
-                    "C": "Contain the incident to prevent further damage",
-                    "D": "Identify the root cause"
-                },
-                "correct": "C",
-                "explanation": "Containment is critical to prevent further damage and limit the scope of the incident before other response activities can be effectively undertaken.",
-                "domain": "information-security"
-            }
-        ]
-    }
-    
-    # Get domain-specific questions or use general ones
-    base_questions = domain_questions.get(domain, domain_questions['security-principles'])
-    
-    # Add more general questions to reach the required number
-    general_questions = [
-        {
-            "question": "What is the key difference between a vulnerability and a threat?",
-            "options": {
-                "A": "Vulnerabilities are external, threats are internal",
-                "B": "Threats are potential dangers, vulnerabilities are weaknesses",
-                "C": "Vulnerabilities cost money, threats do not",
-                "D": "There is no significant difference"
-            },
-            "correct": "B",
-            "explanation": "Threats are potential dangers or adverse events, while vulnerabilities are weaknesses that could be exploited by threats.",
-            "domain": domain or "general"
-        },
-        {
-            "question": "In security management, what does 'defense in depth' mean?",
-            "options": {
-                "A": "Having the strongest possible perimeter security",
-                "B": "Multiple layers of security controls",
-                "C": "Deep background checks on all personnel",
-                "D": "Detailed incident response procedures"
-            },
-            "correct": "B",
-            "explanation": "Defense in depth involves implementing multiple layers of security controls so that if one layer fails, others continue to provide protection.",
-            "domain": domain or "general"
-        }
-    ]
-    
-    # Combine and extend questions to meet requirements
-    all_questions = base_questions + general_questions
-    
-    # Extend the list if we need more questions
-    while len(all_questions) < num_questions:
-        all_questions.extend(base_questions)
-    
-    return {
-        "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
-        "quiz_type": quiz_type,
-        "domain": domain or 'general',
-        "difficulty": difficulty,
-        "questions": all_questions[:num_questions]
-    }
-
-@safe_db_operation
-def generate_enhanced_quiz(quiz_type, domain=None, difficulty='medium'):
-    """Generate enhanced quiz questions with duplicate prevention and progressive difficulty"""
-    user_id = session.get('user_id')
-    
-    # Dynamic question count for mock exams
-    if quiz_type == 'mock-exam' and user_id:
-        try:
-            user_progress = UserProgress.query.filter_by(user_id=user_id).all()
-            ready_for_full_exam = len(user_progress) > 0
-            
-            for progress in user_progress:
-                if progress.consecutive_good_scores < 3 or progress.average_score < 75:
-                    ready_for_full_exam = False
-                    break
-            
-            if ready_for_full_exam:
-                num_questions = 125
-                flash('Full 125-question mock exam unlocked! This simulates the actual CPP exam.', 'success')
-            else:
-                num_questions = 50
-                flash('Starting with 50-question practice exam. Score consistently above 75% to unlock the full exam.', 'info')
-        except Exception as e:
-            print(f"Error checking user progress: {e}")
-            num_questions = 50
-    else:
-        num_questions = QUIZ_TYPES.get(quiz_type, {}).get('questions', 10)
-    
-    # Generate questions with uniqueness check
-    max_attempts = 3
-    for attempt in range(max_attempts):
-        try:
-            quiz_data = generate_quiz_questions_with_uniqueness(
-                quiz_type, domain, difficulty, num_questions, user_id
-            )
-            if quiz_data and len(quiz_data.get('questions', [])) >= max(1, num_questions * 0.5):
-                return quiz_data
-        except Exception as e:
-            print(f"Quiz generation attempt {attempt + 1} failed: {e}")
-    
-    # Fallback if all attempts fail
-    print("Using fallback quiz generation")
-    return generate_fallback_quiz(quiz_type, domain, difficulty, num_questions)
-
-@safe_db_operation
-def update_user_progress(user_id, quiz_result):
-    """Update user progress based on quiz results"""
-    try:
-        questions = json.loads(quiz_result.questions)
-        answers = json.loads(quiz_result.answers)
-        
-        # Group questions by domain
-        domain_results = {}
-        for i, question in enumerate(questions):
-            q_domain = question.get('domain', 'general')
-            if q_domain == 'general':
-                continue
-                
-            if q_domain not in domain_results:
-                domain_results[q_domain] = {'correct': 0, 'total': 0}
-            
-            domain_results[q_domain]['total'] += 1
-            user_answer = answers.get(str(i))
-            if user_answer == question['correct']:
-                domain_results[q_domain]['correct'] += 1
-        
-        # Update progress for each domain
-        for domain, results in domain_results.items():
-            progress = UserProgress.query.filter_by(user_id=user_id, domain=domain).first()
-            if not progress:
-                progress = UserProgress(user_id=user_id, domain=domain)
-                db.session.add(progress)
-            
-            # Calculate domain score
-            domain_score = (results['correct'] / results['total']) * 100
-            
-            # Update running average (weighted by question count)
-            total_questions = progress.question_count + results['total']
-            if progress.question_count > 0:
-                progress.average_score = (
-                    (progress.average_score * progress.question_count + domain_score * results['total']) 
-                    / total_questions
-                )
-            else:
-                progress.average_score = domain_score
-                
-            progress.question_count = total_questions
-            progress.last_updated = datetime.utcnow()
-            
-            # Update consecutive good scores
-            if domain_score >= 75:  # Raised threshold for "good" scores
-                progress.consecutive_good_scores += 1
-            else:
-                progress.consecutive_good_scores = 0
-            
-            # Update mastery level
+# Update mastery level
             if progress.average_score >= 90 and progress.consecutive_good_scores >= 3:
                 progress.mastery_level = 'mastered'
             elif progress.average_score >= 75 and progress.consecutive_good_scores >= 2:
@@ -808,6 +66,17 @@ def set_user_subscription_by_customer(customer_id, status, subscription_id=None)
 # -----------------------------------------------------------------------------
 # Routes
 # -----------------------------------------------------------------------------
+
+# Add favicon route to prevent 404 errors
+@app.route('/favicon.ico')
+def favicon():
+    """Serve favicon or return 204 if not found"""
+    try:
+        return app.send_static_file('favicon.ico')
+    except Exception:
+        # Return empty response if favicon not found
+        return Response('', status=204, mimetype='image/x-icon')
+
 @app.get("/healthz")
 def healthz():
     """Health check endpoint"""
@@ -1924,19 +1193,113 @@ def diag_database():
             "timestamp": datetime.utcnow().isoformat()
         }), 500
 
-# Error handlers
+# Error handlers with fallback responses (no template dependency)
 @app.errorhandler(404)
 def not_found_error(error):
-    return render_template('404.html'), 404
+    """Handle 404 errors without requiring template files"""
+    try:
+        return render_template('404.html'), 404
+    except Exception:
+        # Fallback HTML response if template not found
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Page Not Found - CPP Test Prep</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f8f9fa; }
+                .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                h1 { color: #dc3545; margin-bottom: 20px; }
+                p { color: #6c757d; margin-bottom: 30px; }
+                .btn { display: inline-block; padding: 12px 24px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }
+                .btn:hover { background: #0056b3; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>404 - Page Not Found</h1>
+                <p>The page you're looking for doesn't exist.</p>
+                <a href="/" class="btn">Return Home</a>
+            </div>
+        </body>
+        </html>
+        """
+        return html, 404
 
 @app.errorhandler(500)
 def internal_error(error):
-    db.session.rollback()
-    return render_template('500.html'), 500
+    """Handle 500 errors without requiring template files"""
+    try:
+        db.session.rollback()
+    except Exception:
+        pass
+    
+    try:
+        return render_template('500.html'), 500
+    except Exception:
+        # Fallback HTML response if template not found
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Server Error - CPP Test Prep</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f8f9fa; }
+                .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                h1 { color: #dc3545; margin-bottom: 20px; }
+                p { color: #6c757d; margin-bottom: 30px; }
+                .btn { display: inline-block; padding: 12px 24px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }
+                .btn:hover { background: #0056b3; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>500 - Internal Server Error</h1>
+                <p>Something went wrong on our end. Please try again later.</p>
+                <a href="/" class="btn">Return Home</a>
+            </div>
+        </body>
+        </html>
+        """
+        return html, 500
 
 @app.errorhandler(403)
 def forbidden_error(error):
-    return render_template('403.html'), 403
+    """Handle 403 errors without requiring template files"""
+    try:
+        return render_template('403.html'), 403
+    except Exception:
+        # Fallback HTML response if template not found
+        html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Access Forbidden - CPP Test Prep</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body { font-family: Arial, sans-serif; text-align: center; padding: 50px; background: #f8f9fa; }
+                .container { max-width: 600px; margin: 0 auto; background: white; padding: 40px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+                h1 { color: #dc3545; margin-bottom: 20px; }
+                p { color: #6c757d; margin-bottom: 30px; }
+                .btn { display: inline-block; padding: 12px 24px; background: #007bff; color: white; text-decoration: none; border-radius: 4px; }
+                .btn:hover { background: #0056b3; }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>403 - Access Forbidden</h1>
+                <p>You don't have permission to access this resource.</p>
+                <a href="/" class="btn">Return Home</a>
+            </div>
+        </body>
+        </html>
+        """
+        return html, 403
 
 # Context processors for templates
 @app.context_processor
@@ -1963,3 +1326,749 @@ if __name__ == '__main__':
     print(f"Stripe configured: {bool(stripe.api_key)}")
     
     app.run(host='0.0.0.0', port=port, debug=debug)
+                from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import generate_password_hash, check_password_hash
+from datetime import datetime, timedelta
+import json
+import os
+import requests
+import stripe
+import time
+import hashlib
+from functools import wraps
+
+# -----------------------------------------------------------------------------
+# App & Config
+# -----------------------------------------------------------------------------
+app = Flask(__name__)
+
+def require_env(name: str) -> str:
+    val = os.environ.get(name)
+    if not val:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return val
+
+# Required env vars (set these in Render → Environment)
+app.config['SECRET_KEY'] = require_env('SECRET_KEY')
+
+app.config['SQLALCHEMY_DATABASE_URI'] = require_env('DATABASE_URL')
+# Render sometimes provides postgres://; SQLAlchemy expects postgresql://
+if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
+    app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://')
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
+    'pool_pre_ping': True,
+    'pool_recycle': 300,
+    'connect_args': {
+        'sslmode': 'require',
+        'connect_timeout': 10
+    }
+}
+db = SQLAlchemy(app)
+
+# OpenAI config
+OPENAI_API_KEY = require_env('OPENAI_API_KEY')
+OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini')
+OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.openai.com/v1')
+
+# Stripe config
+stripe.api_key = require_env('STRIPE_SECRET_KEY')
+STRIPE_PUBLISHABLE_KEY = require_env('STRIPE_PUBLISHABLE_KEY')
+STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
+
+# Simple rate limiter for AI calls
+last_api_call = None
+
+# -----------------------------------------------------------------------------
+# Quiz Types Configuration (Enhanced)
+# -----------------------------------------------------------------------------
+QUIZ_TYPES = {
+    'practice': {
+        'name': 'Practice Quiz',
+        'description': 'General practice questions across all CPP domains',
+        'questions': 10
+    },
+    'mock-exam': {
+        'name': 'Mock Exam',
+        'description': 'Progressive exam: 50 questions initially, 125 when ready',
+        'questions': 50  # Will be dynamic based on user progress
+    },
+    'domain-specific': {
+        'name': 'Domain-Specific Quiz',
+        'description': 'Focus on specific CPP domains',
+        'questions': 15
+    },
+    'quick-review': {
+        'name': 'Quick Review',
+        'description': 'Short 5-question review',
+        'questions': 5
+    },
+    'difficult': {
+        'name': 'Advanced Challenge',
+        'description': 'Challenging questions for advanced preparation',
+        'questions': 20
+    },
+    'scenario-based': {
+        'name': 'Scenario-Based Quiz',
+        'description': 'Real-world security scenarios and case studies',
+        'questions': 12
+    },
+    'legal-compliance': {
+        'name': 'Legal & Compliance Quiz',
+        'description': 'Focus on legal aspects and compliance requirements',
+        'questions': 15
+    }
+}
+
+CPP_DOMAINS = {
+    'security-principles': {
+        'name': 'Security Principles & Practices',
+        'topics': ['Risk Management', 'Security Governance', 'Ethics', 'Standards & Regulations']
+    },
+    'business-principles': {
+        'name': 'Business Principles & Practices', 
+        'topics': ['Budgeting', 'Contracts', 'Project Management', 'ROI Analysis']
+    },
+    'investigations': {
+        'name': 'Investigations',
+        'topics': ['Investigation Planning', 'Interviews', 'Evidence Collection', 'Report Writing']
+    },
+    'personnel-security': {
+        'name': 'Personnel Security',
+        'topics': ['Background Screening', 'Insider Threat', 'Workplace Violence', 'Security Awareness']
+    },
+    'physical-security': {
+        'name': 'Physical Security',
+        'topics': ['CPTED', 'Access Control', 'Perimeter Security', 'Security Technology']
+    },
+    'information-security': {
+        'name': 'Information Security',
+        'topics': ['Data Protection', 'Cybersecurity', 'Information Classification', 'Incident Response']
+    },
+    'crisis-management': {
+        'name': 'Crisis Management',
+        'topics': ['Business Continuity', 'Disaster Recovery', 'Emergency Response', 'Communications']
+    }
+}
+
+# -----------------------------------------------------------------------------
+# Database Models
+# -----------------------------------------------------------------------------
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    email = db.Column(db.String(120), unique=True, nullable=False)
+    password_hash = db.Column(db.String(128))
+    first_name = db.Column(db.String(50), nullable=False)
+    last_name = db.Column(db.String(50), nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    subscription_status = db.Column(db.String(20), default='trial')
+    subscription_plan = db.Column(db.String(20), default='trial')
+    subscription_end_date = db.Column(db.DateTime)
+    stripe_customer_id = db.Column(db.String(100))
+    stripe_subscription_id = db.Column(db.String(100))
+    discount_code_used = db.Column(db.String(50))
+    study_time = db.Column(db.Integer, default=0)
+    quiz_scores = db.Column(db.Text, default='[]')
+
+class ChatHistory(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    messages = db.Column(db.Text, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class ActivityLog(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    activity = db.Column(db.String(100), nullable=False)
+    details = db.Column(db.Text)
+    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
+
+class QuizResult(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    quiz_type = db.Column(db.String(50), nullable=False)
+    domain = db.Column(db.String(50))  # Fixed: Add missing column
+    questions = db.Column(db.Text, nullable=False)
+    answers = db.Column(db.Text, nullable=False)
+    score = db.Column(db.Float, nullable=False)
+    total_questions = db.Column(db.Integer, nullable=False)
+    time_taken = db.Column(db.Integer)  # Fixed: Add missing column
+    completed_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class StudySession(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    topic = db.Column(db.String(100))
+    duration = db.Column(db.Integer)
+    session_type = db.Column(db.String(50))
+    started_at = db.Column(db.DateTime, default=datetime.utcnow)
+    ended_at = db.Column(db.DateTime)
+
+class QuestionBank(db.Model):
+    """Track all generated questions to prevent duplicates"""
+    id = db.Column(db.Integer, primary_key=True)
+    question_hash = db.Column(db.String(64), unique=True, nullable=False)
+    question_text = db.Column(db.Text, nullable=False)
+    domain = db.Column(db.String(50))
+    difficulty = db.Column(db.String(20))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+class UserProgress(db.Model):
+    """Track user progress by domain and difficulty"""
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False)
+    domain = db.Column(db.String(50), nullable=False)
+    mastery_level = db.Column(db.String(20), default='needs_practice')
+    average_score = db.Column(db.Float, default=0.0)
+    question_count = db.Column(db.Integer, default=0)
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+    consecutive_good_scores = db.Column(db.Integer, default=0)
+
+# Fixed: Database initialization with proper error handling
+def migrate_database_safe():
+    """Safely add missing columns to existing tables"""
+    try:
+        with app.app_context():
+            # Check if tables exist and create them if they don't
+            inspector = db.inspect(db.engine)
+            
+            if 'quiz_result' in inspector.get_table_names():
+                columns = [column['name'] for column in inspector.get_columns('quiz_result')]
+                
+                # Add missing columns with raw SQL
+                with db.engine.connect() as conn:
+                    if 'domain' not in columns:
+                        try:
+                            conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN domain VARCHAR(50)"))
+                            print("Added domain column to quiz_result")
+                        except Exception as e:
+                            print(f"Domain column might already exist: {e}")
+                    
+                    if 'time_taken' not in columns:
+                        try:
+                            conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN time_taken INTEGER"))
+                            print("Added time_taken column to quiz_result")
+                        except Exception as e:
+                            print(f"Time_taken column might already exist: {e}")
+                    
+                    conn.commit()
+            
+            # Create all tables
+            db.create_all()
+            print("Database tables created/updated successfully!")
+            
+    except Exception as e:
+        print(f"Database migration error: {e}")
+        # Try to create tables anyway
+        try:
+            db.create_all()
+            print("Fallback: Created tables without migration")
+        except Exception as e2:
+            print(f"Fallback creation failed: {e2}")
+
+# Initialize database with migration
+with app.app_context():
+    migrate_database_safe()
+
+# -----------------------------------------------------------------------------
+# Helpers & Decorators
+# -----------------------------------------------------------------------------
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            flash('Please log in to access this feature.', 'warning')
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+def subscription_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login'))
+        
+        try:
+            user = User.query.get(session['user_id'])
+            if not user:
+                session.clear()
+                return redirect(url_for('login'))
+                
+            # Check subscription status
+            if user.subscription_status == 'expired':
+                flash('Your subscription has expired. Please renew to continue.', 'danger')
+                return redirect(url_for('subscribe'))
+            
+            # Check trial expiry
+            if user.subscription_status == 'trial' and user.subscription_end_date:
+                if datetime.utcnow() > user.subscription_end_date:
+                    user.subscription_status = 'expired'
+                    db.session.commit()
+                    flash('Your trial has expired. Please subscribe to continue.', 'warning')
+                    return redirect(url_for('subscribe'))
+                    
+        except Exception as e:
+            print(f"Subscription check error: {e}")
+            flash('Authentication error. Please log in again.', 'danger')
+            return redirect(url_for('login'))
+            
+        return f(*args, **kwargs)
+    return decorated_function
+
+def log_activity(user_id, activity, details=None):
+    """Enhanced activity logging with error handling"""
+    try:
+        activity_log = ActivityLog(user_id=user_id, activity=activity, details=details)
+        db.session.add(activity_log)
+        db.session.commit()
+    except Exception as e:
+        print(f"Activity logging error: {e}")
+        # Don't fail the main operation due to logging issues
+
+def safe_db_operation(operation_func):
+    """Decorator for safe database operations with retry"""
+    @wraps(operation_func)
+    def wrapper(*args, **kwargs):
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                return operation_func(*args, **kwargs)
+            except Exception as e:
+                print(f"Database operation failed (attempt {attempt + 1}): {e}")
+                if attempt == max_retries - 1:
+                    db.session.rollback()
+                    raise e
+                time.sleep(0.5)  # Brief delay before retry
+    return wrapper
+
+def chat_with_ai(messages, user_id=None):
+    """Enhanced AI chat function with better error handling"""
+    global last_api_call
+    try:
+        # Rate limiting
+        if last_api_call:
+            delta = datetime.utcnow() - last_api_call
+            if delta.total_seconds() < 2:
+                time.sleep(2 - delta.total_seconds())
+
+        # Enhanced system message
+        system_message = {
+            "role": "system",
+            "content": (
+                "You are an expert tutor for the ASIS Certified Protection Professional (CPP) exam.\n\n"
+                "FOCUS AREAS:\n"
+                "1. Security Principles & Practices - Risk management, governance, ethics\n"
+                "2. Business Principles & Practices - Budgeting, contracts, project management\n"
+                "3. Investigations - Planning, interviews, evidence, reporting\n"
+                "4. Personnel Security - Background screening, insider threats, workplace violence\n"
+                "5. Physical Security - CPTED, access control, perimeter security\n"
+                "6. Information Security - Data protection, cybersecurity, incident response\n"
+                "7. Crisis Management - Business continuity, disaster recovery, emergency response\n\n"
+                "GUIDELINES:\n"
+                "- Use only public, non-proprietary knowledge\n"
+                "- Provide practical, real-world examples\n"
+                "- Format multiple-choice questions clearly\n"
+                "- Give detailed explanations for answers\n"
+                "- Be encouraging and supportive\n"
+                "- Never guarantee exam success\n\n"
+                "QUESTION FORMAT:\n"
+                "**Question #. [Question text]**\n\n"
+                "A. [Option A]\nB. [Option B]\nC. [Option C]\nD. [Option D]\n\n"
+                "**Answer: [Letter]**\n"
+                "**Explanation:** [Clear explanation]\n"
+            )
+        }
+        
+        # Ensure system message is first
+        if not messages or messages[0].get('role') != 'system':
+            messages.insert(0, system_message)
+        else:
+            messages[0] = system_message  # Update existing system message
+
+        headers = {
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        
+        data = {
+            'model': OPENAI_CHAT_MODEL,
+            'messages': messages,
+            'max_tokens': 1500,  # Increased for better responses
+            'temperature': 0.7,
+            'presence_penalty': 0.1,  # Encourage variety
+            'frequency_penalty': 0.1   # Reduce repetition
+        }
+
+        last_api_call = datetime.utcnow()
+        resp = requests.post(
+            f'{OPENAI_API_BASE}/chat/completions', 
+            headers=headers, 
+            json=data, 
+            timeout=45
+        )
+
+        print(f"[OpenAI] status={resp.status_code} model={OPENAI_CHAT_MODEL}")
+
+        if resp.status_code == 200:
+            result = resp.json()
+            content = result['choices'][0]['message']['content']
+            
+            # Log usage for debugging
+            if 'usage' in result:
+                print(f"[OpenAI] tokens used: {result['usage'].get('total_tokens', 'unknown')}")
+            
+            return content
+
+        # Enhanced error messages
+        if resp.status_code in (401, 403):
+            return (
+                "I'm having trouble connecting to my knowledge base. This might be due to "
+                "API authentication issues. Please try again in a moment, or contact support "
+                "if the problem persists."
+            )
+        elif resp.status_code == 429:
+            return (
+                "I'm receiving a lot of questions right now and need a moment to catch up. "
+                "Please wait 30 seconds and try your question again."
+            )
+        elif resp.status_code >= 500:
+            return (
+                "The AI service is temporarily experiencing technical difficulties. "
+                "Please try again in a few minutes."
+            )
+        else:
+            print(f"[OpenAI] Unexpected status: {resp.status_code}, body: {resp.text[:200]}")
+            return "I encountered an unexpected issue. Please try rephrasing your question."
+
+    except requests.exceptions.Timeout:
+        return (
+            "My response is taking longer than usual. Please try again with a shorter "
+            "or more specific question."
+        )
+    except requests.exceptions.ConnectionError:
+        return (
+            "I'm having trouble connecting to my knowledge base. Please check your "
+            "internet connection and try again."
+        )
+    except Exception as e:
+        print(f"[OpenAI] Unexpected error: {e}")
+        return (
+            "I encountered a technical issue while processing your question. "
+            "Please try again, or contact support if this continues."
+        )
+
+def generate_quiz_questions_with_uniqueness(quiz_type, domain, difficulty, num_questions, user_id):
+    """Generate unique questions and store hashes to prevent duplicates"""
+    
+    domain_focus = ""
+    if domain and domain in CPP_DOMAINS:
+        domain_info = CPP_DOMAINS[domain]
+        domain_focus = f"\nFocus specifically on {domain_info['name']} including: {', '.join(domain_info['topics'])}."
+    
+    # Enhanced prompt for better question generation
+    prompt = f"""Create {num_questions} UNIQUE multiple-choice questions for the ASIS CPP exam.
+{domain_focus}
+
+REQUIREMENTS:
+- Difficulty: {difficulty}
+- Each question must be completely unique (no duplicates)
+- Cover different aspects, scenarios, and applications
+- Include practical, real-world scenarios
+- Questions should test understanding, not just memorization
+- Ensure answers are clearly distinguishable
+
+QUESTION TYPES TO INCLUDE:
+- Conceptual understanding (40%)
+- Scenario-based applications (30%)
+- Best practices and procedures (20%)
+- Regulatory and compliance (10%)
+
+Return ONLY valid JSON in this exact format:
+{{
+  "title": "CPP {quiz_type.title().replace('-', ' ')} Quiz",
+  "questions": [
+    {{
+      "question": "Clear, specific question text",
+      "options": {{"A": "option", "B": "option", "C": "option", "D": "option"}},
+      "correct": "A",
+      "explanation": "Detailed explanation with reasoning",
+      "domain": "{domain or 'general'}"
+    }}
+  ]
+}}
+
+Ensure all {num_questions} questions are included in the response."""
+
+    ai_response = chat_with_ai([{'role': 'user', 'content': prompt}])
+    
+    try:
+        import re
+        # Try to extract JSON from response
+        json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
+        if json_match:
+            quiz_data = json.loads(json_match.group())
+            
+            # Validate structure
+            if 'questions' not in quiz_data or not isinstance(quiz_data['questions'], list):
+                raise ValueError("Invalid quiz structure")
+            
+            # Check for duplicates and store new questions
+            unique_questions = []
+            for question in quiz_data.get('questions', []):
+                question_text = question.get('question', '')
+                if not question_text:
+                    continue
+                    
+                question_hash = hashlib.md5(question_text.encode()).hexdigest()
+                
+                # Check if question already exists
+                try:
+                    existing = QuestionBank.query.filter_by(question_hash=question_hash).first()
+                    if not existing:
+                        # Store new question
+                        new_question = QuestionBank(
+                            question_hash=question_hash,
+                            question_text=question_text,
+                            domain=question.get('domain', domain or 'general'),
+                            difficulty=difficulty
+                        )
+                        db.session.add(new_question)
+                        unique_questions.append(question)
+                    else:
+                        print(f"Duplicate question detected: {question_text[:50]}...")
+                except Exception as e:
+                    print(f"Database error checking duplicates: {e}")
+                    # Include question anyway if DB check fails
+                    unique_questions.append(question)
+            
+            # Accept if we have at least 70% unique questions
+            if len(unique_questions) >= max(1, num_questions * 0.7):
+                quiz_data['questions'] = unique_questions[:num_questions]
+                try:
+                    db.session.commit()
+                except Exception as e:
+                    print(f"Error saving questions to database: {e}")
+                    db.session.rollback()
+                return quiz_data
+            else:
+                print(f"Too many duplicates: {len(unique_questions)} unique out of {num_questions}")
+                db.session.rollback()
+                return None
+                
+    except json.JSONDecodeError as e:
+        print(f"JSON parsing error: {e}")
+        print(f"AI response preview: {ai_response[:500]}")
+        return None
+    except Exception as e:
+        print(f"Quiz generation error: {e}")
+        db.session.rollback()
+        return None
+
+def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
+    """Generate fallback quiz when AI generation fails"""
+    
+    # Domain-specific fallback questions
+    domain_questions = {
+        'security-principles': [
+            {
+                "question": "What is the primary purpose of a comprehensive security risk assessment?",
+                "options": {
+                    "A": "To identify all possible security threats",
+                    "B": "To determine cost-effective risk mitigation strategies",
+                    "C": "To eliminate all security risks completely",
+                    "D": "To satisfy insurance and regulatory requirements"
+                },
+                "correct": "B",
+                "explanation": "Risk assessments help organizations identify risks and determine the most cost-effective strategies to mitigate them, balancing security needs with business requirements.",
+                "domain": "security-principles"
+            },
+            {
+                "question": "Which principle is fundamental to effective security governance?",
+                "options": {
+                    "A": "Maximum security at minimum cost",
+                    "B": "Security decisions made by IT department",
+                    "C": "Alignment with business objectives",
+                    "D": "Standardization across all departments"
+                },
+                "correct": "C",
+                "explanation": "Security governance must align with business objectives to be effective and sustainable, ensuring security supports rather than hinders business goals.",
+                "domain": "security-principles"
+            }
+        ],
+        'physical-security': [
+            {
+                "question": "In CPTED principles, what does 'natural surveillance' primarily accomplish?",
+                "options": {
+                    "A": "Reduces the need for security guards",
+                    "B": "Increases the likelihood that criminal activity will be observed",
+                    "C": "Eliminates blind spots in camera coverage",
+                    "D": "Provides legal liability protection"
+                },
+                "correct": "B",
+                "explanation": "Natural surveillance increases visibility and the perception that criminal activity will be observed, which serves as a deterrent to potential offenders.",
+                "domain": "physical-security"
+            }
+        ],
+        'information-security': [
+            {
+                "question": "What is the most critical first step in incident response?",
+                "options": {
+                    "A": "Notify law enforcement",
+                    "B": "Document everything immediately",
+                    "C": "Contain the incident to prevent further damage",
+                    "D": "Identify the root cause"
+                },
+                "correct": "C",
+                "explanation": "Containment is critical to prevent further damage and limit the scope of the incident before other response activities can be effectively undertaken.",
+                "domain": "information-security"
+            }
+        ]
+    }
+    
+    # Get domain-specific questions or use general ones
+    base_questions = domain_questions.get(domain, domain_questions['security-principles'])
+    
+    # Add more general questions to reach the required number
+    general_questions = [
+        {
+            "question": "What is the key difference between a vulnerability and a threat?",
+            "options": {
+                "A": "Vulnerabilities are external, threats are internal",
+                "B": "Threats are potential dangers, vulnerabilities are weaknesses",
+                "C": "Vulnerabilities cost money, threats do not",
+                "D": "There is no significant difference"
+            },
+            "correct": "B",
+            "explanation": "Threats are potential dangers or adverse events, while vulnerabilities are weaknesses that could be exploited by threats.",
+            "domain": domain or "general"
+        },
+        {
+            "question": "In security management, what does 'defense in depth' mean?",
+            "options": {
+                "A": "Having the strongest possible perimeter security",
+                "B": "Multiple layers of security controls",
+                "C": "Deep background checks on all personnel",
+                "D": "Detailed incident response procedures"
+            },
+            "correct": "B",
+            "explanation": "Defense in depth involves implementing multiple layers of security controls so that if one layer fails, others continue to provide protection.",
+            "domain": domain or "general"
+        }
+    ]
+    
+    # Combine and extend questions to meet requirements
+    all_questions = base_questions + general_questions
+    
+    # Extend the list if we need more questions
+    while len(all_questions) < num_questions:
+        all_questions.extend(base_questions)
+    
+    return {
+        "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
+        "quiz_type": quiz_type,
+        "domain": domain or 'general',
+        "difficulty": difficulty,
+        "questions": all_questions[:num_questions]
+    }
+
+@safe_db_operation
+def generate_enhanced_quiz(quiz_type, domain=None, difficulty='medium'):
+    """Generate enhanced quiz questions with duplicate prevention and progressive difficulty"""
+    user_id = session.get('user_id')
+    
+    # Dynamic question count for mock exams
+    if quiz_type == 'mock-exam' and user_id:
+        try:
+            user_progress = UserProgress.query.filter_by(user_id=user_id).all()
+            ready_for_full_exam = len(user_progress) > 0
+            
+            for progress in user_progress:
+                if progress.consecutive_good_scores < 3 or progress.average_score < 75:
+                    ready_for_full_exam = False
+                    break
+            
+            if ready_for_full_exam:
+                num_questions = 125
+                flash('Full 125-question mock exam unlocked! This simulates the actual CPP exam.', 'success')
+            else:
+                num_questions = 50
+                flash('Starting with 50-question practice exam. Score consistently above 75% to unlock the full exam.', 'info')
+        except Exception as e:
+            print(f"Error checking user progress: {e}")
+            num_questions = 50
+    else:
+        num_questions = QUIZ_TYPES.get(quiz_type, {}).get('questions', 10)
+    
+    # Generate questions with uniqueness check
+    max_attempts = 3
+    for attempt in range(max_attempts):
+        try:
+            quiz_data = generate_quiz_questions_with_uniqueness(
+                quiz_type, domain, difficulty, num_questions, user_id
+            )
+            if quiz_data and len(quiz_data.get('questions', [])) >= max(1, num_questions * 0.5):
+                return quiz_data
+        except Exception as e:
+            print(f"Quiz generation attempt {attempt + 1} failed: {e}")
+    
+    # Fallback if all attempts fail
+    print("Using fallback quiz generation")
+    return generate_fallback_quiz(quiz_type, domain, difficulty, num_questions)
+
+@safe_db_operation
+def update_user_progress(user_id, quiz_result):
+    """Update user progress based on quiz results"""
+    try:
+        questions = json.loads(quiz_result.questions)
+        answers = json.loads(quiz_result.answers)
+        
+        # Group questions by domain
+        domain_results = {}
+        for i, question in enumerate(questions):
+            q_domain = question.get('domain', 'general')
+            if q_domain == 'general':
+                continue
+                
+            if q_domain not in domain_results:
+                domain_results[q_domain] = {'correct': 0, 'total': 0}
+            
+            domain_results[q_domain]['total'] += 1
+            user_answer = answers.get(str(i))
+            if user_answer == question['correct']:
+                domain_results[q_domain]['correct'] += 1
+        
+        # Update progress for each domain
+        for domain, results in domain_results.items():
+            progress = UserProgress.query.filter_by(user_id=user_id, domain=domain).first()
+            if not progress:
+                progress = UserProgress(user_id=user_id, domain=domain)
+                db.session.add(progress)
+            
+            # Calculate domain score
+            domain_score = (results['correct'] / results['total']) * 100
+            
+            # Update running average (weighted by question count)
+            total_questions = progress.question_count + results['total']
+            if progress.question_count > 0:
+                progress.average_score = (
+                    (progress.average_score * progress.question_count + domain_score * results['total']) 
+                    / total_questions
+                )
+            else:
+                progress.average_score = domain_score
+                
+            progress.question_count = total_questions
+            progress.last_updated = datetime.utcnow()
+            
+            # Update consecutive good scores
+            if domain_score >= 75:  # Raised threshold for "good" scores
+                progress.consecutive_good_scores += 1
+            else:
+                progress.consecutive_good_scores = 0
+            
+            # Update mastery level
+            if progress.average_score >= 90 and progress.consecutive_good_scores >= 3:
+                progress.mastery_level = 'mastered'
+            elif progress.average_score
