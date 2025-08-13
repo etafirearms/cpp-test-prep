@@ -1288,17 +1288,30 @@ def progress():
 # Subscribe and Stripe Checkout
 # -----------------------------
 @app.route('/subscribe')
-@login_required
 def subscribe():
     try:
-        user = User.query.get(session['user_id'])
-        if not user:
+        # Require login to subscribe (adjust if you use a login_required decorator elsewhere)
+        if 'user_id' not in session:
+            flash('Please log in to subscribe.', 'warning')
             return redirect(url_for('login'))
-        return render_template('subscribe.html', user=user, stripe_key=STRIPE_PUBLISHABLE_KEY)
+
+        user = User.query.get(session['user_id'])  # assumes you have a User model
+        trial_days_left = None
+        if user and user.subscription_status == 'trial' and user.subscription_end_date:
+            # compute days left server-side
+            delta = (user.subscription_end_date - datetime.utcnow())
+            trial_days_left = max(delta.days, 0)
+
+        return render_template(
+            'subscribe.html',
+            user=user,
+            trial_days_left=trial_days_left
+        )
     except Exception as e:
         print(f"Subscribe page error: {e}")
-        flash('Error loading subscription page. Please try again.', 'danger')
+        flash('Could not load the subscribe page. Please try again.', 'danger')
         return redirect(url_for('dashboard'))
+
 
 @app.route('/create-checkout-session', methods=['POST'])
 @login_required
@@ -1714,4 +1727,5 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
