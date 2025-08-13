@@ -1406,16 +1406,19 @@ def subscribe():
 @login_required
 def subscription_success():
     session_id = request.args.get('session_id')
-    plan_type = request.args.get('plan', '3month')
+    plan_type = request.args.get('plan', 'monthly')
 
     if session_id:
         try:
             checkout_session = stripe.checkout.Session.retrieve(session_id)
             if checkout_session.payment_status == 'paid':
                 user = User.query.get(session['user_id'])
-                user.subscription_status = 'active'
-                days = 180 if plan_type == '6month' else 90
-                user.subscription_end_date = datetime.utcnow() + timedelta(days=days)
+                               user.subscription_status = 'active'
+                # We keep an internal end date for convenience/UX; status=active is what actually gates access
+                if plan_type == '6month':
+                    user.subscription_end_date = datetime.utcnow() + timedelta(days=180)
+                else:  # monthly
+                    user.subscription_end_date = datetime.utcnow() + timedelta(days=30)
                 user.subscription_plan = plan_type
                 user.stripe_subscription_id = checkout_session.subscription
                 metadata = checkout_session.metadata or {}
@@ -1741,6 +1744,7 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
