@@ -10,17 +10,11 @@ import requests
 import stripe
 import time
 
-# NEW: Flask-Moment for safe template time formatting
-from flask_moment import Moment
-
 # -----------------------------------------------------------------------------
 # App & Config
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
-moment = Moment(app)
-
-# Initialize Flask-Moment (enables {{ moment(...) }} in templates)
-moment = Moment(app)
+moment = Moment(app)  # Enables {{ moment(...) }} in templates
 
 # Defensive: if Flask-Moment isn't available for any reason later,
 # keep pages from crashing if templates call moment(...)
@@ -535,13 +529,12 @@ def get_domain_recommendation(progress):
             'color': 'danger'
         }
 
-        user.subscription_status = status
-        if subscription_id:
-            user.stripe_subscription_id = subscription_id
-        if status == 'active' and not user.subscription_end_date:
-            user.subscription_end_date = datetime.utcnow() + timedelta(days=90)
-        elif status in ('canceled', 'expired'):
-            user.subscription_status = 'expired'
+def set_user_subscription_by_customer(customer_id, status, subscription_id=None):
+    """
+    Update a user's subscription_status based on Stripe webhooks.
+    Do NOT set subscription_end_date here; we manage trial and initial purchase
+    end dates elsewhere (e.g., /register and /subscription-success).
+    """
     if not customer_id:
         return
     try:
@@ -549,16 +542,25 @@ def get_domain_recommendation(progress):
         if not user:
             print(f"No user found for Stripe customer: {customer_id}")
             return
-        user.subscription_status = status
+
+        # Normalize status (active, past_due, expired)
+        norm = status
+        if status in ('active', 'trialing'):
+            norm = 'active'
+        elif status == 'past_due':
+            norm = 'past_due'
+        else:
+            norm = 'expired'
+
+        user.subscription_status = norm
         if subscription_id:
             user.stripe_subscription_id = subscription_id
-        if status == 'active' and not user.subscription_end_date:
-            user.subscription_end_date = datetime.utcnow() + timedelta(days=90)
-        elif status in ('canceled', 'expired'):
-            user.subscription_status = 'expired'
+
+        # Do not adjust user.subscription_end_date here.
+
         db.session.commit()
-        log_activity(user.id, 'subscription_status_update', f'status={status}')
-        print(f"Updated subscription for user {user.id}: {status}")
+        log_activity(user.id, 'subscription_status_update', f'status={norm}')
+        print(f"Updated subscription for user {user.id}: {norm}")
     except Exception as e:
         print(f"Error updating subscription: {e}")
         db.session.rollback()
@@ -1301,7 +1303,7 @@ def subscribe():
             flash('Please log in to subscribe.', 'warning')
             return redirect(url_for('login'))
 
-        user = User.query.get(session['user_id'])  # assumes you have a User model
+        user = User.query.get(session['user_id'])
         trial_days_left = None
         if user and user.subscription_status == 'trial' and user.subscription_end_date:
             # compute days left server-side
@@ -1318,24 +1320,9 @@ def subscribe():
         flash('Could not load the subscribe page. Please try again.', 'danger')
         return redirect(url_for('dashboard'))
 
-
-        plans = {
-            # New monthly plan: $39.99, billed every 1 month
-            'monthly': {
-                'amount': 3999,  # cents
-                'name': 'CPP Test Prep - Monthly Plan',
-                'interval': 'month',
-                'interval_count': 1
-            },
-            # Keep 6-month plan: $99, billed every 6 months
-            '6month': {
-                'amount': 9900,  # cents
-                'name': 'CPP Test Prep - 6 Month Plan',
-                'interval': 'month',
-                'interval_count': 6
-            }
-        }
-
+@app.route('/create-checkout-session', methods=['POST'])
+@login_required
+def create_checkout_session():
     try:
         user = User.query.get(session['user_id'])
         if not user:
@@ -1344,9 +1331,20 @@ def subscribe():
         plan_type = request.form.get('plan_type')
         discount_code = request.form.get('discount_code', '').strip().upper()
 
+        # Only Monthly ($39.99) and 6-Month ($99) plans
         plans = {
-            '3month': {'amount': 8997, 'name': 'CPP Test Prep - 3 Month Plan', 'interval': 'month', 'interval_count': 3},
-            '6month': {'amount': 9900, 'name': 'CPP Test Prep - 6 Month Plan', 'interval': 'month', 'interval_count': 6}
+            'monthly': {
+                'amount': 3999,  # cents
+                'name': 'CPP Test Prep - Monthly Plan',
+                'interval': 'month',
+                'interval_count': 1
+            },
+            '6month': {
+                'amount': 9900,  # cents
+                'name': 'CPP Test Prep - 6 Month Plan',
+                'interval': 'month',
+                'interval_count': 6
+            }
         }
 
         if plan_type not in plans:
@@ -1419,8 +1417,8 @@ def subscription_success():
             checkout_session = stripe.checkout.Session.retrieve(session_id)
             if checkout_session.payment_status == 'paid':
                 user = User.query.get(session['user_id'])
-                               user.subscription_status = 'active'
-                # We keep an internal end date for convenience/UX; status=active is what actually gates access
+                user.subscription_status = 'active'
+                # Set an internal end date for UX; access is gated by status.
                 if plan_type == '6month':
                     user.subscription_end_date = datetime.utcnow() + timedelta(days=180)
                 else:  # monthly
@@ -1733,7 +1731,8 @@ def inject_now():
 
 @app.context_processor
 def inject_quiz_types():
-    return {'quiz_types': QUIZ_TYPES, 'cpp_domains': CPP_DOMAINS}
+    return {'quiz_types': QUIZ_TYPES, 'cpp_domains': CPP_DOMAINS
+
 
 # -----------------------------
 # App factory and run
@@ -1750,6 +1749,7 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
