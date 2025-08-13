@@ -1,4 +1,3 @@
-# cpptrainer/app.py
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -10,10 +9,26 @@ import requests
 import stripe
 import time
 
+# NEW: Flask-Moment for safe template time formatting
+from flask_moment import Moment
+
 # -----------------------------------------------------------------------------
 # App & Config
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
+
+# Initialize Flask-Moment (enables {{ moment(...) }} in templates)
+moment = Moment(app)
+
+# Defensive: if Flask-Moment isn't available for any reason later,
+# keep pages from crashing if templates call moment(...)
+def _moment_stub(*args, **kwargs):
+    class _Fmt:
+        def format(self, *_a, **_k): return ""
+        def fromNow(self, *_a, **_k): return ""
+        def calendar(self, *_a, **_k): return ""
+    return _Fmt()
+app.jinja_env.globals.setdefault('moment', _moment_stub)
 
 def require_env(name: str) -> str:
     val = os.environ.get(name)
@@ -198,11 +213,12 @@ class UserProgress(db.Model):
 
 # Database initialization with proper error handling
 def migrate_database_safe():
+    """Safely add missing columns to existing tables"""
     try:
         with app.app_context():
             db.create_all()
-            print("Database tables created successfully!")
             inspector = db.inspect(db.engine)
+
             if 'quiz_result' in inspector.get_table_names():
                 columns = [column['name'] for column in inspector.get_columns('quiz_result')]
                 with db.engine.connect() as conn:
@@ -219,6 +235,8 @@ def migrate_database_safe():
                         except Exception as e:
                             print(f"Time_taken column might already exist: {e}")
                     conn.commit()
+
+            print("Database tables created/updated successfully!")
     except Exception as e:
         print(f"Database migration error: {e}")
         try:
@@ -252,9 +270,11 @@ def subscription_required(f):
             if not user:
                 session.clear()
                 return redirect(url_for('login'))
+
             if user.subscription_status == 'expired':
                 flash('Your subscription has expired. Please renew to continue.', 'danger')
                 return redirect(url_for('subscribe'))
+
             if user.subscription_status == 'trial' and user.subscription_end_date:
                 if datetime.utcnow() > user.subscription_end_date:
                     user.subscription_status = 'expired'
@@ -796,7 +816,6 @@ def study():
             db.session.add(chat_history)
             db.session.commit()
 
-        messages = []
         try:
             messages = json.loads(chat_history.messages)
         except (json.JSONDecodeError, TypeError):
@@ -1671,6 +1690,7 @@ def forbidden_error(error):
 # -----------------------------
 @app.context_processor
 def inject_now():
+    # Provides 'now' to all templates, used with {{ moment(now)... }}
     return {'now': datetime.utcnow()}
 
 @app.context_processor
