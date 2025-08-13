@@ -40,17 +40,19 @@
     <div class="card p-3">
       <h5 class="mb-3"><i class="fas fa-diagram-project text-primary me-2"></i>Domain (optional)</h5>
       <div class="list-group" id="domainList">
+        <!-- General -->
         <button type="button" class="list-group-item list-group-item-action active" data-domain="">
           <div class="fw-bold">General (all domains)</div>
           <small class="text-light">Mix of all core CPP domains</small>
         </button>
+
         {% for dkey, dinfo in cpp_domains.items() %}
           <button
             type="button"
             class="list-group-item list-group-item-action"
             data-domain="{{ dkey }}"
           >
-            <!-- === PROGRESS-AWARE HEADER + STATS (your requested block) === -->
+            <!-- Header + mastery badge row -->
             <div class="d-flex justify-content-between align-items-center">
               <div class="fw-bold">{{ dinfo.name }}</div>
               {% set prog = user_progress.get(dkey) %}
@@ -64,11 +66,12 @@
                 {% endif %}
               {% endif %}
             </div>
+
+            <!-- Topics + stats line -->
             <small class="text-muted">
               {{ ', '.join(dinfo.topics[:3]) }}{% if dinfo.topics|length > 3 %}, …{% endif %}
               {% if prog %} • Avg: {{ '%.0f'|format(prog.average_score) }}% • Streak: {{ prog.consecutive_good_scores }}{% endif %}
             </small>
-            <!-- === END PROGRESS-AWARE BLOCK === -->
           </button>
         {% endfor %}
       </div>
@@ -109,14 +112,14 @@
 
 {% block scripts %}
 <script>
-  // State
+  // --- State ---
   let selectedQuizKey = 'practice';
   let selectedQuizName = 'Practice Quiz';
   let selectedDomainKey = '';
   let selectedDomainName = 'General';
   let selectedDifficulty = 'medium';
 
-  // Wire quiz type buttons
+  // --- Quiz type buttons ---
   document.querySelectorAll('#quizTypeList button').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('#quizTypeList button').forEach(b => b.classList.remove('active'));
@@ -127,24 +130,25 @@
       document.getElementById('selQuiz').textContent = selectedQuizName;
     });
   });
-  // Default activate first quiz type
-  const firstQuizBtn = document.querySelector('#quizTypeList button[data-quiz-key="practice"]') || document.querySelector('#quizTypeList button');
+  // Default activate "practice" (or first if not present)
+  const firstQuizBtn =
+    document.querySelector('#quizTypeList button[data-quiz-key="practice"]') ||
+    document.querySelector('#quizTypeList button');
   if (firstQuizBtn) firstQuizBtn.classList.add('active');
 
-  // Wire domain buttons
+  // --- Domain buttons ---
   document.querySelectorAll('#domainList button').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('#domainList button').forEach(b => b.classList.remove('active'));
       btn.classList.add('active');
 
       selectedDomainKey = btn.getAttribute('data-domain') || '';
-      const titleEl = btn.querySelector('.fw-bold');
-      selectedDomainName = titleEl ? titleEl.textContent.trim() : 'General';
+      selectedDomainName = btn.querySelector('.fw-bold')?.textContent.trim() || 'General';
       document.getElementById('selDomain').textContent = selectedDomainName;
     });
   });
 
-  // Difficulty
+  // --- Difficulty radios ---
   document.querySelectorAll('#difficultyGroup input[name="difficulty"]').forEach(r => {
     r.addEventListener('change', () => {
       selectedDifficulty = r.value;
@@ -152,12 +156,13 @@
     });
   });
 
-  // Start button
+  // --- Start button ---
   document.getElementById('startBtn').addEventListener('click', () => {
     const params = new URLSearchParams();
     if (selectedDomainKey) params.set('domain', selectedDomainKey);
     if (selectedDifficulty) params.set('difficulty', selectedDifficulty);
 
+    // Your /quiz/<quiz_type> route validates quiz_type against QUIZ_TYPES
     window.location.href = `/quiz/${encodeURIComponent(selectedQuizKey)}?${params.toString()}`;
   });
 </script>
