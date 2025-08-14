@@ -715,32 +715,41 @@ def home():
 def register():
     if request.method == 'POST':
         try:
-            # Input validation with detailed logging
-            email = request.form.get('email', '').lower().strip()
-            password = request.form.get('password', '')
-            first_name = request.form.get('first_name', '').strip()
-            last_name = request.form.get('last_name', '').strip()
+           # Replace the validation section in your register route with this:
 
-            print(f"Registration attempt for email: {email}")
+# Input validation with detailed logging
+email = request.form.get('email', '').lower().strip()
+password = request.form.get('password', '')
+first_name = request.form.get('first_name', '').strip()
+last_name = request.form.get('last_name', '').strip()
+terms_accepted = request.form.get('terms_accepted')  # New field
 
-            # Validate required fields
-            if not all([email, password, first_name, last_name]):
-                print("Registration failed: Missing required fields")
-                flash('All fields are required.', 'danger')
-                return render_template('register.html')
+print(f"Registration attempt for email: {email}")
 
-            # Validate email format
-            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
-            if not re.match(email_pattern, email):
-                print(f"Registration failed: Invalid email format for {email}")
-                flash('Please enter a valid email address.', 'danger')
-                return render_template('register.html')
+# Validate required fields
+if not all([email, password, first_name, last_name]):
+    print("Registration failed: Missing required fields")
+    flash('All fields are required.', 'danger')
+    return render_template('register.html')
 
-            # Validate password strength
-            if len(password) < 8:
-                print("Registration failed: Password too short")
-                flash('Password must be at least 8 characters long.', 'danger')
-                return render_template('register.html')
+# Validate terms acceptance
+if not terms_accepted:
+    print("Registration failed: Terms not accepted")
+    flash('You must accept the Terms of Service and Privacy Policy to register.', 'danger')
+    return render_template('register.html')
+
+# Validate email format
+email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+if not re.match(email_pattern, email):
+    print(f"Registration failed: Invalid email format for {email}")
+    flash('Please enter a valid email address.', 'danger')
+    return render_template('register.html')
+
+# Validate password strength
+if len(password) < 8:
+    print("Registration failed: Password too short")
+    flash('Password must be at least 8 characters long.', 'danger')
+    return render_template('register.html')
 
             # Check if user already exists
             try:
@@ -2054,4 +2063,5 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
