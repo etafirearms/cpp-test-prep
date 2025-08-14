@@ -1147,55 +1147,81 @@ def performance_analysis():
     try:
         user_id = session['user_id']
         domain_analysis = {}
+        
         for domain_key, domain_info in CPP_DOMAINS.items():
             progress = UserProgress.query.filter_by(user_id=user_id, domain=domain_key).first()
             if not progress:
                 progress = UserProgress(user_id=user_id, domain=domain_key)
                 db.session.add(progress)
+            
+            avg_score = progress.average_score
+            if avg_score is None:
+                avg_score = 0
+            
+            last_updated_str = 'Never'
+            if progress.last_updated:
+                last_updated_str = progress.last_updated.strftime('%Y-%m-%d')
+            
             domain_analysis[domain_key] = {
                 'name': domain_info['name'],
                 'topics': domain_info['topics'],
                 'mastery_level': progress.mastery_level,
-                'average_score': round(progress.average_score or 0, 1),
+                'average_score': round(avg_score, 1),
                 'question_count': progress.question_count,
                 'consecutive_good_scores': progress.consecutive_good_scores,
                 'recommendation': get_domain_recommendation(progress),
-                'last_updated': progress.last_updated.strftime('%Y-%m-%d') if progress.last_updated else 'Never'
+                'last_updated': last_updated_str
             }
+        
         db.session.commit()
 
-        needs_practice = [d for d in domain_analysis.values() if d['mastery_level'] == 'needs_practice']
-        good_progress = [d for d in domain_analysis.values() if d['mastery_level'] == 'good']
-        mastered = [d for d in domain_analysis.values() if d['mastery_level'] == 'mastered']
+        needs_practice = []
+        good_progress = []
+        mastered = []
+        
+        for d in domain_analysis.values():
+            if d['mastery_level'] == 'needs_practice':
+                needs_practice.append(d)
+            elif d['mastery_level'] == 'good':
+                good_progress.append(d)
+            elif d['mastery_level'] == 'mastered':
+                mastered.append(d)
 
         overall_recommendations = []
         if needs_practice:
+            needs_practice_domains = [d['name'] for d in needs_practice[:3]]
             overall_recommendations.append({
                 'priority': 'high',
                 'title': 'Focus Areas - High Priority',
-                'domains': [d['name'] for d in needs_practice[:3]],
+                'domains': needs_practice_domains,
                 'action': 'Spend 60 percent of study time on these domains',
                 'color': 'danger'
             })
+        
         if good_progress:
+            good_progress_domains = [d['name'] for d in good_progress]
             overall_recommendations.append({
                 'priority': 'medium',
                 'title': 'Reinforcement Areas',
-                'domains': [d['name'] for d in good_progress],
+                'domains': good_progress_domains,
                 'action': 'Take advanced quizzes and practice scenarios',
                 'color': 'warning'
             })
+        
         if mastered:
+            mastered_domains = [d['name'] for d in mastered]
             overall_recommendations.append({
                 'priority': 'low',
                 'title': 'Mastered Areas',
-                'domains': [d['name'] for d in mastered],
+                'domains': mastered_domains,
                 'action': 'Light review to maintain knowledge',
                 'color': 'success'
             })
 
         total_domains = len(CPP_DOMAINS)
-        readiness_score = (len(mastered) * 100 + len(good_progress) * 70) / total_domains if total_domains > 0 else 0
+        readiness_score = 0
+        if total_domains > 0:
+            readiness_score = (len(mastered) * 100 + len(good_progress) * 70) / total_domains
 
         return render_template(
             'performance_analysis.html',
