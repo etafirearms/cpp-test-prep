@@ -1283,29 +1283,27 @@ def progress():
 # Subscribe and Stripe Checkout
 # -----------------------------
 @app.route('/subscribe')
+@login_required
 def subscribe():
     try:
-        # Require login to subscribe
-        if 'user_id' not in session:
-            flash('Please log in to subscribe.', 'warning')
-            return redirect(url_for('login'))
-
         user = User.query.get(session['user_id'])
         trial_days_left = None
-
-        # Compute days left safely (avoid any datetime shadowing in templates)
-        now = datetime.utcnow()
         if user and user.subscription_status == 'trial' and user.subscription_end_date:
-            try:
-                delta = user.subscription_end_date - now
-                trial_days_left = max(delta.days, 0)
-            except Exception:
-                trial_days_left = None  # fallback if stored value is odd
+            delta = (user.subscription_end_date - datetime.utcnow())
+            trial_days_left = max(delta.days, 0)
+
+        # Plans shown in the UI (3-month removed)
+        plans = [
+            {"id": "monthly", "label": "Monthly", "amount": 3999, "pretty": "$39.99 / month"},
+            {"id": "6month", "label": "6 Months", "amount": 9900, "pretty": "$99 / 6 months"},
+        ]
 
         return render_template(
             'subscribe.html',
             user=user,
-            trial_days_left=trial_days_left
+            trial_days_left=trial_days_left,
+            plans=plans,
+            STRIPE_PUBLISHABLE_KEY=STRIPE_PUBLISHABLE_KEY
         )
     except Exception as e:
         print(f"Subscribe page error: {e}")
@@ -1748,5 +1746,6 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
