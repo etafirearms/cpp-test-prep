@@ -8,7 +8,19 @@
       <i class="fas fa-clipboard-list fa-lg text-primary me-2"></i>
       <h2 class="mb-0">Choose a Quiz</h2>
     </div>
-    <p class="text-light mt-2">Pick a quiz type, optionally select a CPP domain and difficulty, then start practicing.</p>
+    <p class="text-light mt-2">
+      Pick a quiz type, optionally select a CPP domain and difficulty, then start practicing.
+    </p>
+
+    <!-- Quick actions -->
+    <div class="d-flex flex-wrap gap-2 mt-2">
+      <a class="btn btn-dark" href="{{ url_for('quiz', quiz_type='mock-exam') }}">
+        <i class="fas fa-graduation-cap me-1"></i> Start Mock Exam
+      </a>
+      <a class="btn btn-outline-primary" href="{{ url_for('quiz', quiz_type='practice') }}">
+        <i class="fas fa-dumbbell me-1"></i> Start Practice Quiz
+      </a>
+    </div>
   </div>
 </div>
 
@@ -52,7 +64,6 @@
             class="list-group-item list-group-item-action"
             data-domain="{{ dkey }}"
           >
-            <!-- Header + mastery badge row -->
             <div class="d-flex justify-content-between align-items-center">
               <div class="fw-bold">{{ dinfo.name }}</div>
               {% set prog = user_progress.get(dkey) %}
@@ -66,8 +77,6 @@
                 {% endif %}
               {% endif %}
             </div>
-
-            <!-- Topics + stats line -->
             <small class="text-muted">
               {{ ', '.join(dinfo.topics[:3]) }}{% if dinfo.topics|length > 3 %}, …{% endif %}
               {% if prog %} • Avg: {{ '%.0f'|format(prog.average_score) }}% • Streak: {{ prog.consecutive_good_scores }}{% endif %}
@@ -152,7 +161,9 @@
   document.querySelectorAll('#difficultyGroup input[name="difficulty"]').forEach(r => {
     r.addEventListener('change', () => {
       selectedDifficulty = r.value;
-      document.getElementById('selDiff').textContent = r.labels[0].innerText.trim();
+      // Use label text for display
+      const label = document.querySelector(`label[for="${r.id}"]`);
+      document.getElementById('selDiff').textContent = label ? label.innerText.trim() : r.value;
     });
   });
 
@@ -162,7 +173,6 @@
     if (selectedDomainKey) params.set('domain', selectedDomainKey);
     if (selectedDifficulty) params.set('difficulty', selectedDifficulty);
 
-    // Your /quiz/<quiz_type> route validates quiz_type against QUIZ_TYPES
     window.location.href = `/quiz/${encodeURIComponent(selectedQuizKey)}?${params.toString()}`;
   });
 </script>
