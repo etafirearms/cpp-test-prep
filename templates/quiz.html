@@ -1,164 +1,431 @@
-{% extends "base.html" %}
-
-{% block title %}{{ quiz_data.title }} - CPP Test Prep{% endblock %}
-
-{% block content %}
-<div class="row justify-content-center">
-  <div class="col-lg-8">
-    <div class="card">
-      <div class="card-header">
-        <h4><i class="fas fa-list-check me-2"></i>{{ quiz_data.title }}</h4>
-        <div class="progress mt-2" role="progressbar" aria-label="Quiz progress">
-          <div class="progress-bar" id="progress-bar" style="width: 0%"></div>
-        </div>
-      </div>
-      <div class="card-body">
-        <form id="quiz-form">
-          {% for q in quiz_data.questions %}
-            {% set i = loop.index0 %}
-            <div class="question mb-4" data-question="{{ i }}">
-              <h5>{{ loop.index }}. {{ q.question }}</h5>
-              {% for key, option in q.options.items() %}
-                <div class="form-check quiz-option p-3 mb-2" onclick="selectOption({{ i }}, '{{ key }}')">
-                  <input class="form-check-input" type="radio" name="question_{{ i }}" value="{{ key }}" id="q{{ i }}_{{ key }}">
-                  <label class="form-check-label w-100" for="q{{ i }}_{{ key }}">
-                    <strong>{{ key }}.</strong> {{ option }}
-                  </label>
-                </div>
-              {% endfor %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ quiz_data.title }} - CPP Test Prep</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .quiz-container {
+            max-width: 800px;
+            margin: 0 auto;
+        }
+        .question-card {
+            border: 2px solid #e9ecef;
+            transition: border-color 0.3s;
+        }
+        .question-card.current {
+            border-color: #007bff;
+            box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+        }
+        .option-card {
+            cursor: pointer;
+            transition: all 0.2s;
+            border: 1px solid #dee2e6;
+        }
+        .option-card:hover {
+            background-color: #f8f9fa;
+            border-color: #007bff;
+        }
+        .option-card.selected {
+            background-color: #e3f2fd;
+            border-color: #007bff;
+            border-width: 2px;
+        }
+        .quiz-timer {
+            background: linear-gradient(45deg, #28a745, #20c997);
+            color: white;
+            padding: 1rem;
+            border-radius: 0.5rem;
+            text-align: center;
+            position: sticky;
+            top: 20px;
+            z-index: 100;
+        }
+        .progress-ring {
+            width: 60px;
+            height: 60px;
+            margin: 0 auto;
+        }
+        .progress-ring circle {
+            fill: transparent;
+            stroke: #dee2e6;
+            stroke-width: 4;
+        }
+        .progress-ring .progress {
+            stroke: #007bff;
+            stroke-linecap: round;
+            transition: stroke-dasharray 0.3s;
+        }
+        .question-nav {
+            background: #f8f9fa;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .question-bubble {
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            margin: 0.25rem;
+            cursor: pointer;
+            border: 2px solid #dee2e6;
+            background: white;
+            transition: all 0.2s;
+        }
+        .question-bubble.answered {
+            background: #28a745;
+            color: white;
+            border-color: #28a745;
+        }
+        .question-bubble.current {
+            background: #007bff;
+            color: white;
+            border-color: #007bff;
+        }
+        .question-bubble:hover {
+            transform: scale(1.1);
+        }
+        .quiz-header {
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+            padding: 2rem;
+            border-radius: 0.5rem;
+            margin-bottom: 2rem;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard') }}">
+                <i class="fas fa-shield-alt me-2"></i>CPP Test Prep
+            </a>
+            <div class="navbar-nav ms-auto">
+                <a class="nav-link" href="{{ url_for('dashboard') }}">
+                    <i class="fas fa-times me-1"></i>Exit Quiz
+                </a>
             </div>
-          {% endfor %}
-
-          <div class="text-center">
-            <button type="button" class="btn btn-primary btn-lg" onclick="submitQuiz()">
-              <i class="fas fa-check me-2"></i>Submit Quiz
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Results Modal -->
-<div class="modal fade" id="resultsModal" tabindex="-1" aria-labelledby="resultsModalLabel" aria-hidden="true">
-  <div class="modal-dialog modal-lg">
-    <div class="modal-content">
-      <div class="modal-header">
-        <h5 id="resultsModalLabel" class="modal-title">Quiz Results</h5>
-      </div>
-      <div class="modal-body" id="resultsContent">
-        <!-- Results will be loaded here -->
-      </div>
-      <div class="modal-footer">
-        <a href="{{ url_for('dashboard') }}" class="btn btn-primary">Back to Dashboard</a>
-        <a href="{{ url_for('quiz', quiz_type=quiz_type) }}" class="btn btn-secondary">Take Again</a>
-      </div>
-    </div>
-  </div>
-</div>
-
-<style>
-  /* highlight selected option */
-  .quiz-option.selected {
-    border: 1px solid #0d6efd;
-    background: #eef5ff;
-    border-radius: .5rem;
-  }
-</style>
-{% endblock %}
-
-{% block scripts %}
-<script>
-let selectedAnswers = {};
-const totalQuestions = {{ quiz_data.questions|length }};
-
-function selectOption(questionIndex, option) {
-  selectedAnswers[questionIndex] = option;
-
-  // Update visual selection
-  document.querySelectorAll(`input[name="question_${questionIndex}"]`).forEach(input => {
-    input.checked = (input.value === option);
-    const optionDiv = input.closest('.quiz-option');
-    if (input.checked) {
-      optionDiv.classList.add('selected');
-    } else {
-      optionDiv.classList.remove('selected');
-    }
-  });
-
-  // Update progress
-  const progress = (Object.keys(selectedAnswers).length / totalQuestions) * 100;
-  const bar = document.getElementById('progress-bar');
-  bar.style.width = progress + '%';
-  bar.setAttribute('aria-valuenow', progress.toFixed(0));
-}
-
-function submitQuiz() {
-  if (Object.keys(selectedAnswers).length < totalQuestions) {
-    alert('Please answer all questions before submitting.');
-    return;
-  }
-
-  const quizData = {
-    quiz_type: '{{ quiz_type }}',
-    answers: selectedAnswers,
-    questions: {{ quiz_data.questions|tojson }}
-  };
-
-  fetch('{{ url_for("submit_quiz") }}', {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify(quizData)
-  })
-  .then(res => res.json())
-  .then(data => showResults(data))
-  .catch(() => alert('Error submitting quiz. Please try again.'));
-}
-
-function showResults(data) {
-  let html = `
-    <div class="text-center mb-4">
-      <h3>Score: ${data.correct}/${data.total} (${data.score.toFixed(1)}%)</h3>
-      <div class="progress mb-3">
-        <div class="progress-bar ${data.score >= 70 ? 'bg-success' : 'bg-danger'}" style="width: ${data.score}%"></div>
-      </div>
-    </div>
-    <div class="results-details">
-  `;
-
-  data.results.forEach((result, index) => {
-    html += `
-      <div class="card mb-3">
-        <div class="card-body">
-          <h6>Question ${index + 1}: ${escapeHtml(result.question)}</h6>
-          <p><strong>Your Answer:</strong> ${escapeHtml(result.user_answer || '—')}
-             <span class="badge ${result.is_correct ? 'bg-success' : 'bg-danger'}">
-               ${result.is_correct ? 'Correct' : 'Incorrect'}
-             </span>
-          </p>
-          ${!result.is_correct ? `<p><strong>Correct Answer:</strong> ${escapeHtml(result.correct_answer)}</p>` : ''}
-          ${result.explanation ? `<p class="text-muted"><em>${escapeHtml(result.explanation)}</em></p>` : ''}
         </div>
-      </div>
-    `;
-  });
+    </nav>
 
-  html += '</div>';
+    <div class="container mt-4">
+        <div class="quiz-container">
+            <!-- Quiz Header -->
+            <div class="quiz-header text-center">
+                <h1 class="mb-3">{{ quiz_data.title }}</h1>
+                <div class="row">
+                    <div class="col-md-4">
+                        <div class="display-6" id="questionCount">1</div>
+                        <small>of {{ quiz_data.questions|length }} questions</small>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="display-6" id="timer">00:00</div>
+                        <small>Time elapsed</small>
+                    </div>
+                    <div class="col-md-4">
+                        <div class="display-6" id="answeredCount">0</div>
+                        <small>answered</small>
+                    </div>
+                </div>
+            </div>
 
-  document.getElementById('resultsContent').innerHTML = html;
-  new bootstrap.Modal(document.getElementById('resultsModal')).show();
-}
+            <!-- Question Navigation -->
+            <div class="question-nav text-center">
+                <h6 class="mb-3">Question Navigation</h6>
+                <div id="questionBubbles">
+                    {% for i in range(quiz_data.questions|length) %}
+                        <span class="question-bubble {{ 'current' if loop.index == 1 else '' }}" 
+                              data-question="{{ i }}" onclick="goToQuestion({{ i }})">
+                            {{ loop.index }}
+                        </span>
+                    {% endfor %}
+                </div>
+            </div>
 
-// simple HTML escape for safety
-function escapeHtml(str) {
-  if (str == null) return '';
-  return String(str)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-</script>
-{% endblock %}
+            <!-- Quiz Form -->
+            <form id="quizForm">
+                {% for question in quiz_data.questions %}
+                    <div class="question-card card mb-4 {{ 'current' if loop.index == 1 else 'd-none' }}" 
+                         data-question="{{ loop.index0 }}">
+                        <div class="card-header bg-primary text-white">
+                            <h5 class="mb-0">
+                                <i class="fas fa-question-circle me-2"></i>
+                                Question {{ loop.index }} of {{ quiz_data.questions|length }}
+                            </h5>
+                        </div>
+                        <div class="card-body">
+                            <div class="mb-4">
+                                <h6 class="question-text">{{ question.question }}</h6>
+                                {% if question.domain %}
+                                    <small class="badge bg-secondary">{{ question.domain.replace('-', ' ').title() }}</small>
+                                {% endif %}
+                            </div>
+                            
+                            <div class="row">
+                                {% for option_key, option_value in question.options.items() %}
+                                    <div class="col-md-6 mb-3">
+                                        <div class="option-card card h-100" 
+                                             onclick="selectOption({{ loop.index0 }}, '{{ option_key }}')">
+                                            <div class="card-body">
+                                                <div class="form-check">
+                                                    <input class="form-check-input" type="radio" 
+                                                           name="question_{{ loop.index0 }}" 
+                                                           value="{{ option_key }}" 
+                                                           id="q{{ loop.index0 }}_{{ option_key }}">
+                                                    <label class="form-check-label w-100" 
+                                                           for="q{{ loop.index0 }}_{{ option_key }}">
+                                                        <strong>{{ option_key }}.</strong> {{ option_value }}
+                                                    </label>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <div class="d-flex justify-content-between">
+                                <button type="button" class="btn btn-outline-secondary" 
+                                        onclick="previousQuestion()" 
+                                        {{ 'disabled' if loop.index == 1 else '' }}>
+                                    <i class="fas fa-arrow-left me-1"></i>Previous
+                                </button>
+                                <div>
+                                    {% if loop.index == quiz_data.questions|length %}
+                                        <button type="button" class="btn btn-success" onclick="submitQuiz()">
+                                            <i class="fas fa-check me-1"></i>Submit Quiz
+                                        </button>
+                                    {% else %}
+                                        <button type="button" class="btn btn-primary" onclick="nextQuestion()">
+                                            Next<i class="fas fa-arrow-right ms-1"></i>
+                                        </button>
+                                    {% endif %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                {% endfor %}
+            </form>
+
+            <!-- Progress Bar -->
+            <div class="fixed-bottom bg-white border-top p-3">
+                <div class="container">
+                    <div class="quiz-container">
+                        <div class="progress" style="height: 8px;">
+                            <div class="progress-bar" id="progressBar" 
+                                 style="width: {{ (1 / quiz_data.questions|length * 100) }}%"></div>
+                        </div>
+                        <div class="d-flex justify-content-between mt-2">
+                            <small class="text-muted">Progress: <span id="progressText">1/{{ quiz_data.questions|length }}</span></small>
+                            <small class="text-muted">Started: {{ now.strftime('%H:%M') }}</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Submit Confirmation Modal -->
+    <div class="modal fade" id="submitModal" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Submit Quiz</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <p>Are you sure you want to submit your quiz?</p>
+                    <div class="alert alert-info">
+                        <i class="fas fa-info-circle me-2"></i>
+                        You have answered <span id="finalAnsweredCount">0</span> out of {{ quiz_data.questions|length }} questions.
+                        <span id="unansweredWarning" class="d-none">
+                            <br><strong>Unanswered questions will be marked as incorrect.</strong>
+                        </span>
+                    </div>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                        Continue Quiz
+                    </button>
+                    <button type="button" class="btn btn-success" onclick="confirmSubmit()">
+                        <i class="fas fa-check me-1"></i>Submit Final Answers
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Quiz state
+        let currentQuestion = 0;
+        let answers = {};
+        let startTime = new Date();
+        let timerInterval;
+        const totalQuestions = {{ quiz_data.questions|length }};
+        const quizData = {{ quiz_data|tojson }};
+
+        // Initialize quiz
+        document.addEventListener('DOMContentLoaded', function() {
+            startTimer();
+            updateProgress();
+        });
+
+        // Timer functionality
+        function startTimer() {
+            timerInterval = setInterval(updateTimer, 1000);
+        }
+
+        function updateTimer() {
+            const now = new Date();
+            const elapsed = Math.floor((now - startTime) / 1000);
+            const minutes = Math.floor(elapsed / 60);
+            const seconds = elapsed % 60;
+            document.getElementById('timer').textContent = 
+                `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+        }
+
+        // Navigation functions
+        function goToQuestion(questionIndex) {
+            // Hide current question
+            document.querySelector('.question-card.current').classList.remove('current');
+            document.querySelector('.question-card.current').classList.add('d-none');
+            
+            // Show target question
+            const targetCard = document.querySelector(`[data-question="${questionIndex}"]`);
+            targetCard.classList.remove('d-none');
+            targetCard.classList.add('current');
+            
+            // Update bubble states
+            document.querySelectorAll('.question-bubble').forEach(bubble => {
+                bubble.classList.remove('current');
+            });
+            document.querySelector(`[data-question="${questionIndex}"]`).classList.add('current');
+            
+            currentQuestion = questionIndex;
+            updateProgress();
+        }
+
+        function nextQuestion() {
+            if (currentQuestion < totalQuestions - 1) {
+                goToQuestion(currentQuestion + 1);
+            }
+        }
+
+        function previousQuestion() {
+            if (currentQuestion > 0) {
+                goToQuestion(currentQuestion - 1);
+            }
+        }
+
+        // Answer selection
+        function selectOption(questionIndex, option) {
+            answers[questionIndex] = option;
+            
+            // Update visual selection
+            const questionCard = document.querySelector(`[data-question="${questionIndex}"]`);
+            questionCard.querySelectorAll('.option-card').forEach(card => {
+                card.classList.remove('selected');
+            });
+            questionCard.querySelector(`#q${questionIndex}_${option}`).closest('.option-card').classList.add('selected');
+            
+            // Update radio button
+            questionCard.querySelector(`#q${questionIndex}_${option}`).checked = true;
+            
+            // Update bubble state
+            const bubble = document.querySelector(`.question-bubble[data-question="${questionIndex}"]`);
+            bubble.classList.add('answered');
+            
+            updateProgress();
+        }
+
+        // Progress tracking
+        function updateProgress() {
+            const answeredCount = Object.keys(answers).length;
+            const progressPercent = ((currentQuestion + 1) / totalQuestions) * 100;
+            
+            document.getElementById('questionCount').textContent = currentQuestion + 1;
+            document.getElementById('answeredCount').textContent = answeredCount;
+            document.getElementById('progressBar').style.width = progressPercent + '%';
+            document.getElementById('progressText').textContent = `${currentQuestion + 1}/${totalQuestions}`;
+        }
+
+        // Quiz submission
+        function submitQuiz() {
+            const answeredCount = Object.keys(answers).length;
+            document.getElementById('finalAnsweredCount').textContent = answeredCount;
+            
+            if (answeredCount < totalQuestions) {
+                document.getElementById('unansweredWarning').classList.remove('d-none');
+            } else {
+                document.getElementById('unansweredWarning').classList.add('d-none');
+            }
+            
+            new bootstrap.Modal(document.getElementById('submitModal')).show();
+        }
+
+        async function confirmSubmit() {
+            clearInterval(timerInterval);
+            
+            const submitData = {
+                quiz_type: '{{ quiz_type }}',
+                domain: '{{ quiz_data.domain }}',
+                questions: quizData.questions,
+                answers: answers
+            };
+
+            try {
+                const response = await fetch('/submit-quiz', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify(submitData)
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    // Store results and redirect
+                    sessionStorage.setItem('quizResults', JSON.stringify(result));
+                    window.location.href = '/quiz-results';
+                } else {
+                    alert('Error submitting quiz: ' + result.error);
+                }
+            } catch (error) {
+                alert('Error submitting quiz. Please try again.');
+                console.error('Quiz submission error:', error);
+            }
+        }
+
+        // Keyboard navigation
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'ArrowLeft' && currentQuestion > 0) {
+                previousQuestion();
+            } else if (e.key === 'ArrowRight' && currentQuestion < totalQuestions - 1) {
+                nextQuestion();
+            } else if (e.key >= '1' && e.key <= '4') {
+                const options = ['A', 'B', 'C', 'D'];
+                const optionIndex = parseInt(e.key) - 1;
+                if (optionIndex < options.length) {
+                    selectOption(currentQuestion, options[optionIndex]);
+                }
+            }
+        });
+
+        // Warn before leaving
+        window.addEventListener('beforeunload', function(e) {
+            if (Object.keys(answers).length > 0) {
+                e.preventDefault();
+                e.returnValue = '';
+            }
+        });
+    </script>
+</body>
+</html>
