@@ -225,12 +225,12 @@ def migrate_database_safe():
 
             print("Database tables created/updated successfully!")
     except Exception as e:
-        print(f"Database migration error: {e}")
+        print("Database migration error: " + str(e))
         try:
             db.create_all()
             print("Fallback: Created tables without migration")
         except Exception as e2:
-            print(f"Fallback creation failed: {e2}")
+            print("Fallback creation failed: " + str(e2))
 
 with app.app_context():
     migrate_database_safe()
@@ -281,7 +281,7 @@ def log_activity(user_id, activity, details=None):
         db.session.add(activity_log)
         db.session.commit()
     except Exception as e:
-        print(f"Activity logging error: {e}")
+        print("Activity logging error: " + str(e))
 
 def chat_with_ai(messages, user_id=None):
     global last_api_call
@@ -326,13 +326,13 @@ def chat_with_ai(messages, user_id=None):
         }
         last_api_call = datetime.utcnow()
         resp = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=45)
-        print(f"[OpenAI] status={resp.status_code} model={OPENAI_CHAT_MODEL}")
+        print("[OpenAI] status=" + str(resp.status_code) + " model=" + OPENAI_CHAT_MODEL)
 
         if resp.status_code == 200:
             result = resp.json()
             content = result['choices'][0]['message']['content']
             if 'usage' in result:
-                print(f"[OpenAI] tokens used: {result['usage'].get('total_tokens', 'unknown')}")
+                print("[OpenAI] tokens used: " + str(result['usage'].get('total_tokens', 'unknown')))
             return content
 
         if resp.status_code in (401, 403):
@@ -342,14 +342,14 @@ def chat_with_ai(messages, user_id=None):
         elif resp.status_code >= 500:
             return "The AI service is temporarily experiencing technical difficulties. Please try again soon."
         else:
-            print(f"[OpenAI] Unexpected status: {resp.status_code}")
+            print("[OpenAI] Unexpected status: " + str(resp.status_code))
             return "I encountered an unexpected issue. Please try rephrasing your question."
     except requests.exceptions.Timeout:
         return "My response is taking longer than usual. Please try again with a shorter question."
     except requests.exceptions.ConnectionError:
         return "I am having trouble connecting to my knowledge base. Please check your internet connection."
     except Exception as e:
-        print(f"[OpenAI] Unexpected error: {e}")
+        print("[OpenAI] Unexpected error: " + str(e))
         return "I encountered a technical issue. Please try again, or contact support if this continues."
 
 def generate_enhanced_quiz(quiz_type, domain=None, difficulty='medium'):
@@ -1206,7 +1206,7 @@ def performance_analysis():
         )
 
     except Exception as e:
-        print(f"Performance analysis error: {e}")
+        print("Performance analysis error: " + str(e))
         flash('Error loading performance analysis. Please try again.', 'danger')
         return redirect(url_for('dashboard'))
 
