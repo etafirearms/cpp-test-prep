@@ -1,162 +1,378 @@
-{% extends "base.html" %}
-
-{% block title %}Dashboard - CPP Test Prep{% endblock %}
-
-{% block content %}
-<div class="row g-3">
-  <div class="col-12">
-    <div class="card p-4">
-      <div class="d-flex justify-content-between align-items-center">
-        <h2 class="mb-0">Welcome, {{ user.first_name }}</h2>
-        <span class="badge {% if user.subscription_status in ['active','trial'] %}bg-success{% elif user.subscription_status=='past_due' %}bg-warning text-dark{% else %}bg-danger{% endif %}">
-          {{ user.subscription_status|capitalize }}
-        </span>
-      </div>
-      <p class="text-muted mb-0">
-        Member since {{ moment(user.created_at).format('LL') }}
-        {% if user.subscription_end_date %}
-          • Subscription ends {{ moment(user.subscription_end_date).fromNow() }}
-        {% endif %}
-        {% if days_left %}
-          • <strong>{{ days_left }}</strong> day{{ 's' if days_left != 1 }} left
-        {% endif %}
-      </p>
-    </div>
-  </div>
-
-  <!-- Quick actions -->
-  <div class="col-lg-8">
-    <div class="card p-4">
-      <h5 class="mb-3"><i class="fas fa-clipboard-list text-primary me-2"></i>Your Stats</h5>
-      <div class="row text-center">
-        <div class="col-6 col-md-3 mb-3">
-          <div class="p-3 border rounded-3 bg-light">
-            <div class="h4 mb-0">{{ quiz_stats.total_quizzes }}</div>
-            <small class="text-muted">Quizzes</small>
-          </div>
-        </div>
-        <div class="col-6 col-md-3 mb-3">
-          <div class="p-3 border rounded-3 bg-light">
-            <div class="h4 mb-0">{{ quiz_stats.avg_score|round(1) }}%</div>
-            <small class="text-muted">Avg Score</small>
-          </div>
-        </div>
-        <div class="col-6 col-md-3 mb-3">
-          <div class="p-3 border rounded-3 bg-light">
-            <div class="h4 mb-0">{{ quiz_stats.best_score|round(1) }}%</div>
-            <small class="text-muted">Best Score</small>
-          </div>
-        </div>
-        <div class="col-6 col-md-3 mb-3">
-          <div class="p-3 border rounded-3 bg-light">
-            <div class="h4 mb-0">{{ (total_study_time or 0) }}</div>
-            <small class="text-muted">Study mins</small>
-          </div>
-        </div>
-      </div>
-
-      <div class="d-flex flex-wrap gap-2 mb-2">
-        <a href="{{ url_for('quiz_selector') }}" class="btn btn-outline-primary">
-          <i class="fas fa-bolt me-1"></i> Take a Quiz
-        </a>
-        <a href="{{ url_for('flashcards') }}" class="btn btn-outline-info">
-          <i class="fas fa-clone me-1"></i> Flashcards
-        </a>
-        <a href="{{ url_for('study') }}" class="btn btn-outline-success">
-          <i class="fas fa-book me-1"></i> Study With AI
-        </a>
-        <a href="{{ url_for('progress') }}" class="btn btn-outline-secondary">
-          <i class="fas fa-chart-line me-1"></i> See Progress
-        </a>
-      </div>
-
-      {% if quiz_stats.quiz_types_completed %}
-        <small class="text-muted">Completed types:
-          {{ quiz_stats.quiz_types_completed|sort|join(', ') }}
-        </small>
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- Subscription / CTA -->
-  <div class="col-lg-4">
-    <div class="card p-4">
-      <h5 class="mb-3"><i class="fas fa-id-card text-primary me-2"></i>Your Plan</h5>
-      <p class="mb-2">Current plan: <strong>{{ (user.subscription_plan or 'trial')|replace('_', ' ')|title }}</strong></p>
-      {% if user.subscription_status in ['expired','past_due'] %}
-        <a href="{{ url_for('subscribe') }}" class="btn btn-primary w-100">
-          <i class="fas fa-crown me-1"></i> Subscribe / Renew
-        </a>
-      {% elif user.subscription_status == 'trial' %}
-        <a href="{{ url_for('subscribe') }}" class="btn btn-primary w-100">
-          <i class="fas fa-rocket me-1"></i> Upgrade Now
-        </a>
-        <small class="text-muted d-block mt-2">
-          Trial ends {{ moment(user.subscription_end_date).calendar() }}
-        </small>
-      {% else %}
-        <div class="alert alert-success mb-0">
-          <i class="fas fa-check-circle me-1"></i> Your subscription is active.
-        </div>
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- Recent Quizzes -->
-  <div class="col-lg-6">
-    <div class="card p-4">
-      <h5 class="mb-3"><i class="fas fa-list-check text-primary me-2"></i>Recent Quizzes</h5>
-      {% if recent_quizzes %}
-        <div class="table-responsive">
-          <table class="table align-middle">
-            <thead>
-              <tr>
-                <th>Type</th>
-                <th>Domain</th>
-                <th>Score</th>
-                <th>Completed</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for q in recent_quizzes %}
-              <tr>
-                <td>{{ q.quiz_type }}</td>
-                <td>{{ q.domain or 'general' }}</td>
-                <td>{{ q.score|round(1) }}%</td>
-                <td>{{ moment(q.completed_at).fromNow() }}</td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      {% else %}
-        <p class="text-muted mb-0">No quizzes yet — start with a <a href="{{ url_for('quiz_selector') }}">practice quiz</a>.</p>
-      {% endif %}
-    </div>
-  </div>
-
-  <!-- Recent Activity -->
-  <div class="col-lg-6">
-    <div class="card p-4">
-      <h5 class="mb-3"><i class="fas fa-bell text-primary me-2"></i>Recent Activity</h5>
-      {% if recent_activities %}
-        <ul class="list-group list-group-flush">
-          {% for a in recent_activities %}
-          <li class="list-group-item d-flex justify-content-between align-items-start">
-            <div>
-              <div class="fw-semibold">{{ a.activity|replace('_',' ')|title }}</div>
-              {% if a.details %}
-                <small class="text-muted">{{ a.details }}</small>
-              {% endif %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dashboard - CPP Test Prep</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+</head>
+<body>
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard') }}">
+                <i class="fas fa-shield-alt me-2"></i>CPP Test Prep
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link active" href="{{ url_for('dashboard') }}">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('study') }}">Study</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('quiz_selector') }}">Quizzes</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('flashcards') }}">Flashcards</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('performance_analysis') }}">Analysis</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('progress') }}">Progress</a>
+                    </li>
+                </ul>
+                <ul class="navbar-nav">
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-user me-1"></i>{{ session.user_name }}
+                        </a>
+                        <ul class="dropdown-menu">
+                            {% if user.subscription_status != 'active' %}
+                            <li><a class="dropdown-item text-warning" href="{{ url_for('subscribe') }}">
+                                <i class="fas fa-crown me-1"></i>Subscribe
+                            </a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            {% endif %}
+                            <li><a class="dropdown-item" href="{{ url_for('logout') }}">
+                                <i class="fas fa-sign-out-alt me-1"></i>Logout
+                            </a></li>
+                        </ul>
+                    </li>
+                </ul>
             </div>
-            <small class="text-muted">{{ moment(a.timestamp).fromNow() }}</small>
-          </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="text-muted mb-0">No activity yet.</p>
-      {% endif %}
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <!-- Welcome Section -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card bg-primary text-white">
+                    <div class="card-body">
+                        <h1 class="card-title mb-3">
+                            <i class="fas fa-graduation-cap me-2"></i>
+                            Welcome back, {{ user.first_name }}!
+                        </h1>
+                        <p class="card-text mb-0">Ready to continue your CPP exam preparation?</p>
+                        
+                        <!-- Subscription Status -->
+                        {% if user.subscription_status == 'trial' %}
+                            <div class="mt-3">
+                                <small class="badge bg-warning text-dark">
+                                    <i class="fas fa-clock me-1"></i>
+                                    Trial: {{ days_left }} day{{ 's' if days_left != 1 else '' }} remaining
+                                </small>
+                            </div>
+                        {% elif user.subscription_status == 'active' %}
+                            <div class="mt-3">
+                                <small class="badge bg-success">
+                                    <i class="fas fa-check-circle me-1"></i>
+                                    Active Subscription
+                                </small>
+                            </div>
+                        {% else %}
+                            <div class="mt-3">
+                                <small class="badge bg-danger">
+                                    <i class="fas fa-exclamation-triangle me-1"></i>
+                                    Subscription Expired
+                                </small>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Stats Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3 mb-3">
+                <div class="card bg-info text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-quiz fa-2x mb-2"></i>
+                        <h5 class="card-title">{{ quiz_stats.total_quizzes }}</h5>
+                        <p class="card-text small">Quizzes Completed</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card bg-success text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-chart-line fa-2x mb-2"></i>
+                        <h5 class="card-title">{{ "%.1f"|format(quiz_stats.avg_score) }}%</h5>
+                        <p class="card-text small">Average Score</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card bg-warning text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-trophy fa-2x mb-2"></i>
+                        <h5 class="card-title">{{ "%.1f"|format(quiz_stats.best_score) }}%</h5>
+                        <p class="card-text small">Best Score</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card bg-secondary text-white">
+                    <div class="card-body text-center">
+                        <i class="fas fa-clock fa-2x mb-2"></i>
+                        <h5 class="card-title">{{ total_study_time }}</h5>
+                        <p class="card-text small">Minutes Studied</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Main Content Row -->
+        <div class="row">
+            <!-- Quick Actions -->
+            <div class="col-lg-6 mb-4">
+                <div class="card h-100">
+                    <div class="card-header bg-primary text-white">
+                        <h5 class="mb-0"><i class="fas fa-rocket me-2"></i>Quick Actions</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="d-grid gap-2">
+                            {% if user.subscription_status in ['active', 'trial'] %}
+                                <a href="{{ url_for('study') }}" class="btn btn-outline-primary">
+                                    <i class="fas fa-brain me-2"></i>Start AI Study Session
+                                </a>
+                                <a href="{{ url_for('quiz_selector') }}" class="btn btn-outline-success">
+                                    <i class="fas fa-question-circle me-2"></i>Take a Quiz
+                                </a>
+                                <a href="{{ url_for('flashcards') }}" class="btn btn-outline-info">
+                                    <i class="fas fa-cards-blank me-2"></i>Review Flashcards
+                                </a>
+                                <a href="{{ url_for('performance_analysis') }}" class="btn btn-outline-warning">
+                                    <i class="fas fa-chart-bar me-2"></i>View Performance Analysis
+                                </a>
+                            {% else %}
+                                <a href="{{ url_for('subscribe') }}" class="btn btn-warning">
+                                    <i class="fas fa-crown me-2"></i>Subscribe to Continue
+                                </a>
+                                <p class="text-muted small mt-2">Your trial has expired. Subscribe to continue studying.</p>
+                            {% endif %}
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Recent Activity -->
+            <div class="col-lg-6 mb-4">
+                <div class="card h-100">
+                    <div class="card-header bg-success text-white">
+                        <h5 class="mb-0"><i class="fas fa-history me-2"></i>Recent Activity</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if recent_activities %}
+                            <div class="list-group list-group-flush">
+                                {% for activity in recent_activities[:5] %}
+                                    <div class="list-group-item border-0 px-0">
+                                        <div class="d-flex justify-content-between align-items-start">
+                                            <div>
+                                                <h6 class="mb-1">{{ activity.activity.replace('_', ' ').title() }}</h6>
+                                                {% if activity.details %}
+                                                    <p class="mb-1 small text-muted">{{ activity.details }}</p>
+                                                {% endif %}
+                                            </div>
+                                            <small class="text-muted">{{ format_datetime(activity.timestamp, 'time_ago') }}</small>
+                                        </div>
+                                    </div>
+                                {% endfor %}
+                            </div>
+                            {% if recent_activities|length > 5 %}
+                                <div class="mt-3">
+                                    <a href="{{ url_for('progress') }}" class="btn btn-sm btn-outline-primary">
+                                        View All Activity
+                                    </a>
+                                </div>
+                            {% endif %}
+                        {% else %}
+                            <p class="text-muted">No recent activity. Start studying to see your progress here!</p>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Quizzes Row -->
+        {% if recent_quizzes %}
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0"><i class="fas fa-quiz me-2"></i>Recent Quiz Results</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Quiz Type</th>
+                                        <th>Domain</th>
+                                        <th>Score</th>
+                                        <th>Questions</th>
+                                        <th>Time</th>
+                                        <th>Completed</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    {% for quiz in recent_quizzes %}
+                                        <tr>
+                                            <td>
+                                                <span class="badge bg-primary">{{ quiz.quiz_type.replace('-', ' ').title() }}</span>
+                                            </td>
+                                            <td>{{ quiz.domain.replace('-', ' ').title() if quiz.domain else 'General' }}</td>
+                                            <td>
+                                                <span class="badge bg-{{ 'success' if quiz.score >= 80 else 'warning' if quiz.score >= 70 else 'danger' }}">
+                                                    {{ "%.1f"|format(quiz.score) }}%
+                                                </span>
+                                            </td>
+                                            <td>{{ quiz.total_questions }}</td>
+                                            <td>
+                                                {% if quiz.time_taken %}
+                                                    {{ quiz.time_taken }} min
+                                                {% else %}
+                                                    -
+                                                {% endif %}
+                                            </td>
+                                            <td>
+                                                <small class="text-muted">{{ format_datetime(quiz.completed_at, 'time_ago') }}</small>
+                                            </td>
+                                        </tr>
+                                    {% endfor %}
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="mt-3">
+                            <a href="{{ url_for('progress') }}" class="btn btn-outline-info">
+                                View All Results
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Performance Trend -->
+        {% if quiz_stats.total_quizzes > 0 %}
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-warning text-dark">
+                        <h5 class="mb-0"><i class="fas fa-trending-up me-2"></i>Performance Trend</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-4">
+                                <div class="text-center">
+                                    <h3 class="text-{{ 'success' if quiz_stats.recent_trend == 'improving' else 'warning' if quiz_stats.recent_trend == 'stable' else 'danger' }}">
+                                        {% if quiz_stats.recent_trend == 'improving' %}
+                                            <i class="fas fa-arrow-up"></i> Improving
+                                        {% elif quiz_stats.recent_trend == 'declining' %}
+                                            <i class="fas fa-arrow-down"></i> Declining
+                                        {% else %}
+                                            <i class="fas fa-minus"></i> Stable
+                                        {% endif %}
+                                    </h3>
+                                    <p class="small text-muted">Recent performance trend</p>
+                                </div>
+                            </div>
+                            <div class="col-md-8">
+                                <h6>Completed Quiz Types:</h6>
+                                <div class="d-flex flex-wrap gap-1">
+                                    {% for quiz_type in quiz_stats.quiz_types_completed %}
+                                        <span class="badge bg-secondary">{{ quiz_type.replace('-', ' ').title() }}</span>
+                                    {% endfor %}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
+        <!-- Study Recommendations -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card border-primary">
+                    <div class="card-header bg-light">
+                        <h5 class="mb-0 text-primary"><i class="fas fa-lightbulb me-2"></i>Study Recommendations</h5>
+                    </div>
+                    <div class="card-body">
+                        {% if quiz_stats.total_quizzes == 0 %}
+                            <p>Take your first quiz to get personalized study recommendations!</p>
+                            <a href="{{ url_for('quiz_selector') }}" class="btn btn-primary">Start with a Practice Quiz</a>
+                        {% elif quiz_stats.avg_score < 70 %}
+                            <div class="alert alert-warning">
+                                <h6><i class="fas fa-exclamation-triangle me-2"></i>Focus on Fundamentals</h6>
+                                <p class="mb-2">Your average score suggests reviewing core concepts. Consider:</p>
+                                <ul class="mb-2">
+                                    <li>Spending more time with the AI tutor</li>
+                                    <li>Taking domain-specific quizzes</li>
+                                    <li>Reviewing flashcards daily</li>
+                                </ul>
+                                <a href="{{ url_for('study') }}" class="btn btn-warning btn-sm">Start Study Session</a>
+                            </div>
+                        {% elif quiz_stats.avg_score < 85 %}
+                            <div class="alert alert-info">
+                                <h6><i class="fas fa-chart-line me-2"></i>Good Progress</h6>
+                                <p class="mb-2">You're making good progress! To improve further:</p>
+                                <ul class="mb-2">
+                                    <li>Take more challenging quizzes</li>
+                                    <li>Focus on scenario-based questions</li>
+                                    <li>Review your weak areas</li>
+                                </ul>
+                                <a href="{{ url_for('performance_analysis') }}" class="btn btn-info btn-sm">View Analysis</a>
+                            </div>
+                        {% else %}
+                            <div class="alert alert-success">
+                                <h6><i class="fas fa-trophy me-2"></i>Excellent Work!</h6>
+                                <p class="mb-2">You're performing very well! Keep it up with:</p>
+                                <ul class="mb-2">
+                                    <li>Mock exams to test readiness</li>
+                                    <li>Advanced challenge quizzes</li>
+                                    <li>Regular review sessions</li>
+                                </ul>
+                                <a href="{{ url_for('quiz', quiz_type='mock-exam') }}" class="btn btn-success btn-sm">Take Mock Exam</a>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
     </div>
-  </div>
-</div>
-{% endblock %}
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
