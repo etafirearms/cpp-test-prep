@@ -111,3 +111,456 @@
 </head>
 <body class="bg-light">
     <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
+        <div class="container">
+            <a class="navbar-brand" href="{{ url_for('dashboard') }}">
+                <i class="fas fa-shield-alt me-2"></i>CPP Test Prep
+            </a>
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
+                <span class="navbar-toggler-icon"></span>
+            </button>
+            <div class="collapse navbar-collapse" id="navbarNav">
+                <ul class="navbar-nav me-auto">
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('dashboard') }}">Dashboard</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('study') }}">Study</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('quiz_selector') }}">Quizzes</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link active" href="{{ url_for('flashcards') }}">Flashcards</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('performance_analysis') }}">Analysis</a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link" href="{{ url_for('progress') }}">Progress</a>
+                    </li>
+                </ul>
+                <ul class="navbar-nav">
+                    <li class="nav-item dropdown">
+                        <a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown">
+                            <i class="fas fa-user me-1"></i>{{ session.user_name }}
+                        </a>
+                        <ul class="dropdown-menu">
+                            <li><a class="dropdown-item" href="{{ url_for('logout') }}">
+                                <i class="fas fa-sign-out-alt me-1"></i>Logout
+                            </a></li>
+                        </ul>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </nav>
+
+    <div class="container mt-4">
+        <!-- Flash Messages -->
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
+                        {{ message }}
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+                    </div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        <!-- Page Header -->
+        <div class="row mb-4">
+            <div class="col-12 text-center">
+                <h1><i class="fas fa-cards-blank me-2"></i>CPP Flashcards</h1>
+                <p class="text-muted">Review key concepts with interactive flashcards</p>
+            </div>
+        </div>
+
+        <!-- Topic Selector -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="topic-selector">
+                    <h5 class="mb-3"><i class="fas fa-filter me-2"></i>Select Topic</h5>
+                    <form method="GET" action="{{ url_for('flashcards') }}">
+                        <div class="row">
+                            <div class="col-md-6 mb-3">
+                                <label for="topic" class="form-label">Topic</label>
+                                <select class="form-select" id="topic" name="topic">
+                                    <option value="CPP core domains" {{ 'selected' if flashcard_data.topic == 'CPP core domains' else '' }}>All CPP Domains</option>
+                                    {% for domain_key, domain_info in cpp_domains.items() %}
+                                        <option value="{{ domain_info.name }}" {{ 'selected' if flashcard_data.topic == domain_info.name else '' }}>
+                                            {{ domain_info.name }}
+                                        </option>
+                                    {% endfor %}
+                                    <option value="risk assessment" {{ 'selected' if flashcard_data.topic == 'risk assessment' else '' }}>Risk Assessment</option>
+                                    <option value="CPTED principles" {{ 'selected' if flashcard_data.topic == 'CPTED principles' else '' }}>CPTED Principles</option>
+                                    <option value="crisis management" {{ 'selected' if flashcard_data.topic == 'crisis management' else '' }}>Crisis Management</option>
+                                    <option value="business continuity" {{ 'selected' if flashcard_data.topic == 'business continuity' else '' }}>Business Continuity</option>
+                                </select>
+                            </div>
+                            <div class="col-md-4 mb-3">
+                                <label for="difficulty" class="form-label">Difficulty</label>
+                                <select class="form-select" id="difficulty" name="difficulty">
+                                    <option value="easy" {{ 'selected' if flashcard_data.difficulty == 'easy' else '' }}>Easy</option>
+                                    <option value="medium" {{ 'selected' if flashcard_data.difficulty == 'medium' else '' }}>Medium</option>
+                                    <option value="hard" {{ 'selected' if flashcard_data.difficulty == 'hard' else '' }}>Hard</option>
+                                </select>
+                            </div>
+                            <div class="col-md-2 mb-3">
+                                <label class="form-label">&nbsp;</label>
+                                <button type="submit" class="btn btn-primary w-100">
+                                    <i class="fas fa-sync me-1"></i>Update
+                                </button>
+                            </div>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+
+        <!-- Flashcard Stats -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="stats-card">
+                    <div class="row text-center">
+                        <div class="col-md-3">
+                            <div class="h4 mb-1">{{ flashcard_data.total_cards }}</div>
+                            <small>Total Cards</small>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="h4 mb-1" id="currentCardNum">1</div>
+                            <small>Current Card</small>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="h4 mb-1" id="masteredCount">0</div>
+                            <small>Mastered</small>
+                        </div>
+                        <div class="col-md-3">
+                            <div class="h4 mb-1">{{ flashcard_data.topic }}</div>
+                            <small>Topic</small>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Progress Indicator -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="progress-indicator">
+                    <div class="d-flex justify-content-between align-items-center mb-2">
+                        <span class="small">Progress</span>
+                        <span class="small"><span id="progressText">1</span> of {{ flashcard_data.total_cards }}</span>
+                    </div>
+                    <div class="progress">
+                        <div class="progress-bar" id="progressBar" style="width: {{ (1 / flashcard_data.total_cards * 100) }}%"></div>
+                    </div>
+                    <div class="mastery-indicator">
+                        <div class="mastery-progress" id="masteryBar" style="width: 0%"></div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Flashcard -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="flashcard-container">
+                    <div class="flashcard" id="flashcard" onclick="flipCard()">
+                        <div class="flashcard-inner" id="flashcardInner">
+                            <div class="flashcard-front">
+                                <div class="card-content">
+                                    <h3 id="cardFront">{{ flashcard_data.cards[0].front }}</h3>
+                                    <div class="flip-hint">
+                                        <i class="fas fa-redo me-1"></i>Click to flip
+                                    </div>
+                                </div>
+                                <div class="category-badge">
+                                    <span class="badge bg-light text-primary" id="cardCategory">
+                                        {{ flashcard_data.cards[0].category.title() }}
+                                    </span>
+                                </div>
+                            </div>
+                            <div class="flashcard-back">
+                                <div class="card-content">
+                                    <h4 id="cardBack">{{ flashcard_data.cards[0].back }}</h4>
+                                    <div class="flip-hint">
+                                        <i class="fas fa-undo me-1"></i>Click to flip back
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Control Buttons -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="control-buttons text-center">
+                    <div class="btn-group" role="group">
+                        <button class="btn btn-outline-secondary" onclick="previousCard()" id="prevBtn">
+                            <i class="fas fa-arrow-left me-1"></i>Previous
+                        </button>
+                        <button class="btn btn-outline-primary" onclick="flipCard()">
+                            <i class="fas fa-redo me-1"></i>Flip Card
+                        </button>
+                        <button class="btn btn-outline-secondary" onclick="nextCard()" id="nextBtn">
+                            Next<i class="fas fa-arrow-right ms-1"></i>
+                        </button>
+                    </div>
+                    
+                    <div class="difficulty-buttons">
+                        <h6 class="mb-2">Rate your knowledge:</h6>
+                        <div class="btn-group" role="group">
+                            <button class="btn btn-outline-danger" onclick="rateCard('hard')">
+                                <i class="fas fa-times me-1"></i>Hard
+                            </button>
+                            <button class="btn btn-outline-warning" onclick="rateCard('medium')">
+                                <i class="fas fa-minus me-1"></i>Medium
+                            </button>
+                            <button class="btn btn-outline-success" onclick="rateCard('easy')">
+                                <i class="fas fa-check me-1"></i>Easy
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Study Session Actions -->
+        <div class="row mb-4">
+            <div class="col-12 text-center">
+                <div class="btn-group" role="group">
+                    <button class="btn btn-info" onclick="shuffleCards()">
+                        <i class="fas fa-random me-1"></i>Shuffle Cards
+                    </button>
+                    <button class="btn btn-warning" onclick="resetProgress()">
+                        <i class="fas fa-refresh me-1"></i>Reset Progress
+                    </button>
+                    <button class="btn btn-success" onclick="showOnlyHard()">
+                        <i class="fas fa-filter me-1"></i>Review Difficult
+                    </button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Study Tips -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header bg-info text-white">
+                        <h5 class="mb-0"><i class="fas fa-lightbulb me-2"></i>Study Tips</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <h6>Effective Flashcard Study:</h6>
+                                <ul class="small">
+                                    <li>Read the front, try to recall the answer</li>
+                                    <li>Flip to check your understanding</li>
+                                    <li>Rate honestly based on how well you knew it</li>
+                                    <li>Focus more time on cards you rate as "Hard"</li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h6>Keyboard Shortcuts:</h6>
+                                <ul class="small">
+                                    <li><kbd>Spacebar</kbd> - Flip card</li>
+                                    <li><kbd>←</kbd> - Previous card</li>
+                                    <li><kbd>→</kbd> - Next card</li>
+                                    <li><kbd>1</kbd>/<kbd>2</kbd>/<kbd>3</kbd> - Rate card (Hard/Medium/Easy)</li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Flashcard data and state
+        const flashcardData = {{ flashcard_data|tojson }};
+        let currentCardIndex = 0;
+        let isFlipped = false;
+        let cardRatings = {};
+        let masteredCards = 0;
+        let studyStartTime = new Date();
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', function() {
+            updateCard();
+            updateProgress();
+        });
+
+        // Card navigation
+        function nextCard() {
+            if (currentCardIndex < flashcardData.cards.length - 1) {
+                currentCardIndex++;
+                resetCardFlip();
+                updateCard();
+                updateProgress();
+            }
+        }
+
+        function previousCard() {
+            if (currentCardIndex > 0) {
+                currentCardIndex--;
+                resetCardFlip();
+                updateCard();
+                updateProgress();
+            }
+        }
+
+        function goToCard(index) {
+            if (index >= 0 && index < flashcardData.cards.length) {
+                currentCardIndex = index;
+                resetCardFlip();
+                updateCard();
+                updateProgress();
+            }
+        }
+
+        // Card flipping
+        function flipCard() {
+            const flashcard = document.getElementById('flashcard');
+            flashcard.classList.toggle('flipped');
+            isFlipped = !isFlipped;
+        }
+
+        function resetCardFlip() {
+            const flashcard = document.getElementById('flashcard');
+            flashcard.classList.remove('flipped');
+            isFlipped = false;
+        }
+
+        // Update card content
+        function updateCard() {
+            const card = flashcardData.cards[currentCardIndex];
+            document.getElementById('cardFront').textContent = card.front;
+            document.getElementById('cardBack').textContent = card.back;
+            document.getElementById('cardCategory').textContent = card.category.charAt(0).toUpperCase() + card.category.slice(1);
+            
+            // Update navigation buttons
+            document.getElementById('prevBtn').disabled = currentCardIndex === 0;
+            document.getElementById('nextBtn').disabled = currentCardIndex === flashcardData.cards.length - 1;
+        }
+
+        // Progress tracking
+        function updateProgress() {
+            const progressPercent = ((currentCardIndex + 1) / flashcardData.cards.length) * 100;
+            const masteryPercent = (masteredCards / flashcardData.cards.length) * 100;
+            
+            document.getElementById('currentCardNum').textContent = currentCardIndex + 1;
+            document.getElementById('progressText').textContent = currentCardIndex + 1;
+            document.getElementById('progressBar').style.width = progressPercent + '%';
+            document.getElementById('masteredCount').textContent = masteredCards;
+            document.getElementById('masteryBar').style.width = masteryPercent + '%';
+        }
+
+        // Card rating
+        function rateCard(difficulty) {
+            const cardId = currentCardIndex;
+            const wasNewlyMastered = !cardRatings[cardId] && difficulty === 'easy';
+            
+            cardRatings[cardId] = difficulty;
+            
+            if (wasNewlyMastered) {
+                masteredCards++;
+            } else if (cardRatings[cardId] === 'easy' && difficulty !== 'easy') {
+                masteredCards--;
+            }
+            
+            updateProgress();
+            
+            // Visual feedback
+            const buttons = document.querySelectorAll('.difficulty-buttons .btn');
+            buttons.forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+            
+            // Auto-advance to next card after rating
+            setTimeout(() => {
+                if (currentCardIndex < flashcardData.cards.length - 1) {
+                    nextCard();
+                }
+            }, 1000);
+        }
+
+        // Study session actions
+        function shuffleCards() {
+            // Fisher-Yates shuffle
+            for (let i = flashcardData.cards.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [flashcardData.cards[i], flashcardData.cards[j]] = [flashcardData.cards[j], flashcardData.cards[i]];
+            }
+            currentCardIndex = 0;
+            resetCardFlip();
+            updateCard();
+            updateProgress();
+        }
+
+        function resetProgress() {
+            if (confirm('Are you sure you want to reset your progress on these cards?')) {
+                cardRatings = {};
+                masteredCards = 0;
+                updateProgress();
+            }
+        }
+
+        function showOnlyHard() {
+            const hardCards = flashcardData.cards.filter((card, index) => 
+                cardRatings[index] === 'hard' || !cardRatings[index]
+            );
+            
+            if (hardCards.length === 0) {
+                alert('No difficult cards found! All cards have been rated as Easy or Medium.');
+                return;
+            }
+            
+            flashcardData.cards = hardCards;
+            currentCardIndex = 0;
+            resetCardFlip();
+            updateCard();
+            updateProgress();
+        }
+
+        // Keyboard controls
+        document.addEventListener('keydown', function(e) {
+            switch(e.key) {
+                case ' ':
+                    e.preventDefault();
+                    flipCard();
+                    break;
+                case 'ArrowLeft':
+                    previousCard();
+                    break;
+                case 'ArrowRight':
+                    nextCard();
+                    break;
+                case '1':
+                    rateCard('hard');
+                    break;
+                case '2':
+                    rateCard('medium');
+                    break;
+                case '3':
+                    rateCard('easy');
+                    break;
+            }
+        });
+
+        // Track study time
+        window.addEventListener('beforeunload', function() {
+            const studyTime = Math.floor((new Date() - studyStartTime) / 1000 / 60);
+            if (studyTime > 0) {
+                // You could send this to your backend to track study time
+                console.log(`Studied flashcards for ${studyTime} minutes`);
+            }
+        });
+    </script>
+</body>
+</html>
