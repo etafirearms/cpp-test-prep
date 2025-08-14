@@ -1789,6 +1789,25 @@ def inject_datetime_utils():
         if not dt:
             return 'Never'
         
+        # Handle string timestamps (convert to datetime)
+        if isinstance(dt, str):
+            try:
+                # Try parsing ISO format first
+                dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                try:
+                    # Try parsing common formats
+                    dt = datetime.strptime(dt, '%Y-%m-%dT%H:%M:%S.%f')
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        return dt  # Return as-is if we can't parse
+        
+        # Ensure dt is a datetime object
+        if not isinstance(dt, datetime):
+            return str(dt)
+        
         if format_type == 'time_ago':
             now = datetime.utcnow()
             diff = now - dt
