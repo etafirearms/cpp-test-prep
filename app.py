@@ -9,6 +9,7 @@ import os
 import requests
 import stripe
 import time
+import re
 
 # -----------------------------------------------------------------------------
 # App & Config
@@ -28,15 +29,24 @@ app.config['SQLALCHEMY_DATABASE_URI'] = require_env('DATABASE_URL')
 # Render sometimes provides postgres://; SQLAlchemy expects postgresql://
 if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://')
+
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Enhanced engine options for better connection handling
 app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
     'pool_pre_ping': True,
-    'pool_recycle': 300,
+    'pool_recycle': 300,  # Recycle connections every 5 minutes
+    'pool_size': 5,       # Limit connection pool size
+    'max_overflow': 10,   # Allow up to 10 overflow connections
+    'pool_timeout': 30,   # Timeout for getting connection from pool
     'connect_args': {
         'sslmode': 'require',
-        'connect_timeout': 10
+        'connect_timeout': 10,
+        'application_name': 'cpp_test_prep',
+        'options': '-c statement_timeout=30000'  # 30 second statement timeout
     }
 }
+
 db = SQLAlchemy(app)
 
 # OpenAI config
@@ -53,6 +63,14 @@ STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
 
 # Simple rate limiter for AI calls
 last_api_call = None
+
+# Session configuration for better reliability
+app.config.update(
+    SESSION_COOKIE_SECURE=True if os.environ.get('FLASK_ENV') == 'production' else False,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+    PERMANENT_SESSION_LIFETIME=timedelta(days=30)
+)
 
 # -----------------------------------------------------------------------------
 # Quiz Types Configuration
@@ -200,40 +218,73 @@ class UserProgress(db.Model):
 
 # Database initialization with proper error handling
 def migrate_database_safe():
-    """Safely add missing columns to existing tables"""
-    try:
-        with app.app_context():
-            db.create_all()
-            inspector = db.inspect(db.engine)
-
-            if 'quiz_result' in inspector.get_table_names():
-                columns = [column['name'] for column in inspector.get_columns('quiz_result')]
-                with db.engine.connect() as conn:
-                    if 'domain' not in columns:
-                        try:
-                            conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN domain VARCHAR(50)"))
-                            print("Added domain column to quiz_result")
-                        except Exception as e:
-                            print(f"Domain column might already exist: {e}")
-                    if 'time_taken' not in columns:
-                        try:
-                            conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN time_taken INTEGER"))
-                            print("Added time_taken column to quiz_result")
-                        except Exception as e:
-                            print(f"Time_taken column might already exist: {e}")
-                    conn.commit()
-
-            print("Database tables created/updated successfully!")
-    except Exception as e:
-        print("Database migration error: " + str(e))
+    """Safely add missing columns to existing tables with comprehensive error handling"""
+    max_retries = 3
+    for attempt in range(max_retries):
         try:
-            db.create_all()
-            print("Fallback: Created tables without migration")
-        except Exception as e2:
-            print("Fallback creation failed: " + str(e2))
+            with app.app_context():
+                print(f"Database migration attempt {attempt + 1}")
+                
+                # Test database connection first
+                with db.engine.connect() as conn:
+                    result = conn.execute(db.text('SELECT 1 as test'))
+                    print("Database connection test successful")
+                
+                # Create all tables
+                db.create_all()
+                print("Base tables created/verified")
+                
+                # Check for missing columns and add them
+                inspector = db.inspect(db.engine)
+                
+                if 'quiz_result' in inspector.get_table_names():
+                    columns = [column['name'] for column in inspector.get_columns('quiz_result')]
+                    
+                    with db.engine.connect() as conn:
+                        transaction = conn.begin()
+                        try:
+                            if 'domain' not in columns:
+                                conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN domain VARCHAR(50)"))
+                                print("Added domain column to quiz_result")
+                            
+                            if 'time_taken' not in columns:
+                                conn.execute(db.text("ALTER TABLE quiz_result ADD COLUMN time_taken INTEGER"))
+                                print("Added time_taken column to quiz_result")
+                            
+                            transaction.commit()
+                            print("Migration completed successfully")
+                            return True
+                            
+                        except Exception as alter_error:
+                            transaction.rollback()
+                            print(f"Column alteration error (might be expected): {alter_error}")
+                            # Continue anyway as columns might already exist
+                            return True
+                
+                print("Database migration completed successfully")
+                return True
+                
+        except Exception as e:
+            print(f"Database migration attempt {attempt + 1} failed: {e}")
+            if attempt == max_retries - 1:
+                print("All migration attempts failed, trying fallback creation")
+                try:
+                    db.create_all()
+                    print("Fallback: Created tables without migration")
+                    return True
+                except Exception as fallback_error:
+                    print(f"Fallback creation also failed: {fallback_error}")
+                    return False
+            time.sleep(2 ** attempt)  # Exponential backoff
+    
+    return False
 
+# Initialize database with proper error handling
 with app.app_context():
-    migrate_database_safe()
+    if not migrate_database_safe():
+        print("WARNING: Database migration failed - application may not work correctly")
+    else:
+        print("Database initialization completed successfully")
 
 # -----------------------------------------------------------------------------
 # Helpers & Decorators
@@ -585,11 +636,71 @@ def favicon():
 
 @app.get("/healthz")
 def healthz():
+    """Comprehensive health check endpoint"""
+    health_status = {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": {}
+    }
+    
+    overall_healthy = True
+    
+    # Database check
     try:
-        db.session.execute(db.text('SELECT 1'))
-        return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}, 200
+        with db.engine.connect() as conn:
+            conn.execute(db.text('SELECT 1'))
+        health_status["checks"]["database"] = "healthy"
     except Exception as e:
-        return {"status": "unhealthy", "error": str(e)}, 500
+        health_status["checks"]["database"] = f"unhealthy: {str(e)}"
+        overall_healthy = False
+    
+    # Stripe check
+    try:
+        if stripe.api_key:
+            stripe.Account.retrieve()
+            health_status["checks"]["stripe"] = "healthy"
+        else:
+            health_status["checks"]["stripe"] = "not_configured"
+    except Exception as e:
+        health_status["checks"]["stripe"] = f"unhealthy: {str(e)}"
+        overall_healthy = False
+    
+    # OpenAI check
+    try:
+        if OPENAI_API_KEY:
+            health_status["checks"]["openai"] = "configured"
+        else:
+            health_status["checks"]["openai"] = "not_configured"
+            overall_healthy = False
+    except Exception as e:
+        health_status["checks"]["openai"] = f"error: {str(e)}"
+    
+    if not overall_healthy:
+        health_status["status"] = "unhealthy"
+        return health_status, 503
+    
+    return health_status, 200
+
+@app.get("/readiness")
+def readiness():
+    """Readiness probe for container orchestration"""
+    try:
+        # Quick database test
+        db.session.execute(db.text('SELECT 1'))
+        
+        # Check if essential environment variables are set
+        required_env_vars = ['SECRET_KEY', 'DATABASE_URL']
+        missing_vars = [var for var in required_env_vars if not os.environ.get(var)]
+        
+        if missing_vars:
+            return {
+                "status": "not_ready", 
+                "missing_env_vars": missing_vars
+            }, 503
+        
+        return {"status": "ready", "timestamp": datetime.utcnow().isoformat()}, 200
+    except Exception as e:
+        return {"status": "not_ready", "error": str(e)}, 503
 
 @app.route('/')
 def home():
@@ -603,61 +714,137 @@ def home():
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
-        email = request.form['email'].lower().strip()
-        password = request.form['password']
-        first_name = request.form['first_name'].strip()
-        last_name = request.form['last_name'].strip()
-
-        if not all([email, password, first_name, last_name]):
-            flash('All fields are required.', 'danger')
-            return render_template('register.html')
-
-        if len(password) < 8:
-            flash('Password must be at least 8 characters long.', 'danger')
-            return render_template('register.html')
-
-        # Already registered
-        if User.query.filter_by(email=email).first():
-            flash('Email already registered. Please log in.', 'warning')
-            return redirect(url_for('login'))
-
-        # Create Stripe customer and user record
         try:
-            stripe_customer = stripe.Customer.create(
-                email=email,
-                name=f"{first_name} {last_name}",
-                metadata={'source': 'cpp_test_prep'}
-            )
+            # Input validation with detailed logging
+            email = request.form.get('email', '').lower().strip()
+            password = request.form.get('password', '')
+            first_name = request.form.get('first_name', '').strip()
+            last_name = request.form.get('last_name', '').strip()
 
-            user = User(
-                email=email,
-                password_hash=generate_password_hash(password),
-                first_name=first_name,
-                last_name=last_name,
-                subscription_status='trial',
-                subscription_plan='trial',
-                subscription_end_date=datetime.utcnow() + timedelta(days=7),
-                stripe_customer_id=stripe_customer.id
-            )
-            db.session.add(user)
-            db.session.commit()
+            print(f"Registration attempt for email: {email}")
 
-            log_activity(user.id, 'user_registered', f'New user: {first_name} {last_name}')
+            # Validate required fields
+            if not all([email, password, first_name, last_name]):
+                print("Registration failed: Missing required fields")
+                flash('All fields are required.', 'danger')
+                return render_template('register.html')
 
-            session['user_id'] = user.id
-            session['user_name'] = f"{first_name} {last_name}"
+            # Validate email format
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+            if not re.match(email_pattern, email):
+                print(f"Registration failed: Invalid email format for {email}")
+                flash('Please enter a valid email address.', 'danger')
+                return render_template('register.html')
 
-            flash(f'Welcome {first_name}. You have a 7-day free trial.', 'success')
-            return redirect(url_for('dashboard'))
+            # Validate password strength
+            if len(password) < 8:
+                print("Registration failed: Password too short")
+                flash('Password must be at least 8 characters long.', 'danger')
+                return render_template('register.html')
+
+            # Check if user already exists
+            try:
+                existing_user = User.query.filter_by(email=email).first()
+                if existing_user:
+                    print(f"Registration failed: Email {email} already registered")
+                    flash('Email already registered. Please log in.', 'warning')
+                    return redirect(url_for('login'))
+            except Exception as db_error:
+                print(f"Database error checking existing user: {db_error}")
+                flash('Database error. Please try again.', 'danger')
+                return render_template('register.html')
+
+            # Create Stripe customer with retry logic
+            stripe_customer = None
+            max_retries = 3
+            for attempt in range(max_retries):
+                try:
+                    print(f"Creating Stripe customer (attempt {attempt + 1})")
+                    stripe_customer = stripe.Customer.create(
+                        email=email,
+                        name=f"{first_name} {last_name}",
+                        metadata={'source': 'cpp_test_prep'},
+                        description=f"CPP Test Prep user: {first_name} {last_name}"
+                    )
+                    print(f"Stripe customer created successfully: {stripe_customer.id}")
+                    break
+                except stripe.error.RateLimitError as e:
+                    print(f"Stripe rate limit error (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(2 ** attempt)  # Exponential backoff
+                except stripe.error.StripeError as e:
+                    print(f"Stripe error (attempt {attempt + 1}): {e}")
+                    if attempt == max_retries - 1:
+                        raise
+                    time.sleep(1)
+
+            if not stripe_customer:
+                print("Failed to create Stripe customer after retries")
+                flash('Registration error with payment system. Please try again.', 'danger')
+                return render_template('register.html')
+
+            # Create user record with transaction
+            try:
+                print("Creating user record in database")
+                user = User(
+                    email=email,
+                    password_hash=generate_password_hash(password),
+                    first_name=first_name,
+                    last_name=last_name,
+                    subscription_status='trial',
+                    subscription_plan='trial',
+                    subscription_end_date=datetime.utcnow() + timedelta(days=7),
+                    stripe_customer_id=stripe_customer.id,
+                    created_at=datetime.utcnow()
+                )
+                
+                db.session.add(user)
+                db.session.flush()  # Get the user ID without committing
+                user_id = user.id
+                
+                # Create initial activity log
+                log_activity(user_id, 'user_registered', f'New user: {first_name} {last_name}')
+                
+                # Commit the transaction
+                db.session.commit()
+                print(f"User created successfully with ID: {user_id}")
+
+                # Set session variables
+                session['user_id'] = user_id
+                session['user_name'] = f"{first_name} {last_name}"
+                session.permanent = True  # Make session permanent
+
+                flash(f'Welcome {first_name}! You have a 7-day free trial.', 'success')
+                return redirect(url_for('dashboard'))
+
+            except Exception as db_error:
+                print(f"Database error creating user: {db_error}")
+                db.session.rollback()
+                
+                # Try to clean up Stripe customer if user creation failed
+                try:
+                    if stripe_customer:
+                        stripe.Customer.delete(stripe_customer.id)
+                        print("Cleaned up Stripe customer after database error")
+                except Exception as cleanup_error:
+                    print(f"Failed to cleanup Stripe customer: {cleanup_error}")
+                
+                flash('Registration error. Please try again.', 'danger')
+                return render_template('register.html')
 
         except stripe.error.StripeError as e:
             print(f"Stripe error during registration: {e}")
-            flash('Registration error with payment system. Please try again.', 'danger')
+            flash('Registration error with payment system. Please try again later.', 'danger')
+            return render_template('register.html')
         except Exception as e:
-            print(f"Registration error: {e}")
-            db.session.rollback()
-            flash('Registration error. Please try again.', 'danger')
+            print(f"Unexpected registration error: {e}")
+            import traceback
+            traceback.print_exc()
+            flash('An unexpected error occurred. Please try again.', 'danger')
+            return render_template('register.html')
 
+    # GET request - show registration form
     return render_template('register.html')
 
 # -----------------------------
@@ -1107,7 +1294,6 @@ Return ONLY valid JSON:
         ai_response = chat_with_ai([{'role': 'user', 'content': prompt}])
 
         try:
-            import re
             json_match = re.search(r'\{.*\}', ai_response, re.DOTALL)
             if json_match:
                 flashcard_data = json.loads(json_match.group())
@@ -1690,66 +1876,43 @@ def not_found_error(error):
 
 @app.errorhandler(500)
 def internal_error(error):
+    """Enhanced 500 error handler with logging"""
+    import traceback
+    
+    # Log the full error details
+    error_id = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    print(f"Error ID {error_id}: 500 Internal Server Error")
+    print(f"Error details: {str(error)}")
+    print(f"Stack trace: {traceback.format_exc()}")
+    
+    # Try to rollback any pending database transactions
     try:
         db.session.rollback()
-    except Exception:
-        pass
+    except Exception as rollback_error:
+        print(f"Error during rollback: {rollback_error}")
+    
+    # Log error to activity log if user is logged in
     try:
-        return render_template('500.html'), 500
+        if 'user_id' in session:
+            log_activity(session['user_id'], 'system_error', f'500 Error ID: {error_id}')
+    except Exception as log_error:
+        print(f"Could not log error activity: {log_error}")
+    
+    try:
+        return render_template('500.html', error_id=error_id), 500
     except Exception:
-        html = '''
+        # Fallback HTML response
+        return f'''
         <!DOCTYPE html>
         <html>
-        <head>
-            <title>Server Error - CPP Test Prep</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: #f8f9fa;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 0 auto;
-                    background: white;
-                    padding: 40px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #dc3545;
-                    margin-bottom: 20px;
-                }
-                p {
-                    color: #6c757d;
-                    margin-bottom: 30px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 12px 24px;
-                    background: #007bff;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 4px;
-                }
-                .btn:hover {
-                    background: #0056b3;
-                }
-            </style>
-        </head>
+        <head><title>Server Error</title></head>
         <body>
-            <div class="container">
-                <h1>500 - Internal Server Error</h1>
-                <p>Something went wrong on our end. Please try again later.</p>
-                <a href="/" class="btn">Return Home</a>
-            </div>
+            <h1>500 - Internal Server Error</h1>
+            <p>An error occurred (ID: {error_id}). Please try again later.</p>
+            <a href="/">Return Home</a>
         </body>
         </html>
-        '''
-        return html, 500
+        ''', 500
 
 @app.errorhandler(403)
 def forbidden_error(error):
@@ -1809,6 +1972,15 @@ def forbidden_error(error):
         </html>
         '''
         return html, 403
+
+# Database connection cleanup
+@app.teardown_appcontext
+def close_db_session(error):
+    """Clean up database connections"""
+    try:
+        db.session.remove()
+    except Exception as e:
+        print(f"Error closing database session: {e}")
 
 # -----------------------------
 # Context processors
