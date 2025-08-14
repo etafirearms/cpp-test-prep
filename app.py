@@ -1320,62 +1320,79 @@ def create_checkout_session():
         if not user:
             return redirect(url_for('login'))
 
+        # Expecting plan_type to be "monthly" or "6month"
         plan_type = request.form.get('plan_type')
         discount_code = request.form.get('discount_code', '').strip().upper()
 
-        # Only MONTHLY ($39.99) and 6-MONTH ($99) plans
+        # Supported plans only
         plans = {
-            'monthly': {'amount': 3999, 'name': 'CPP Test Prep - Monthly Plan', 'interval': 'month', 'interval_count': 1},
-            '6month': {'amount': 9900, 'name': 'CPP Test Prep - 6 Month Plan', 'interval': 'month', 'interval_count': 6}
+            # $39.99 billed every month
+            'monthly': {
+                'amount': 3999,  # cents
+                'name': 'CPP Test Prep - Monthly Plan',
+                'interval': 'month',
+                'interval_count': 1
+            },
+            # $99.00 billed every 6 months
+            '6month': {
+                'amount': 9900,  # cents
+                'name': 'CPP Test Prep - 6 Month Plan',
+                'interval': 'month',
+                'interval_count': 6
+            }
         }
 
         if plan_type not in plans:
             flash('Invalid subscription plan selected.', 'danger')
             return redirect(url_for('subscribe'))
 
-        selected_plan = plans[plan_type]
-        final_amount = selected_plan['amount']
+        selected = plans[plan_type]
+        final_amount = selected['amount']
         discount_applied = False
 
-        # Optional discount codes
+        # Optional promo codes (server-side)
         if discount_code == 'LAUNCH50':
-            final_amount = int(selected_plan['amount'] * 0.5)
+            final_amount = int(selected['amount'] * 0.5)
             discount_applied = True
         elif discount_code == 'STUDENT20':
-            final_amount = int(selected_plan['amount'] * 0.8)
+            final_amount = int(selected['amount'] * 0.8)
             discount_applied = True
 
+        # Create an ad-hoc Price for this checkout (keeps it simple)
         price = stripe.Price.create(
             unit_amount=final_amount,
             currency='usd',
-            recurring={'interval': selected_plan['interval'], 'interval_count': selected_plan['interval_count']},
+            recurring={
+                'interval': selected['interval'],
+                'interval_count': selected['interval_count'],
+            },
             product_data={
-                'name': selected_plan['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''),
+                'name': selected['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''),
                 'description': 'AI tutor, practice quizzes, flashcards, progress tracking, and exam preparation'
             }
         )
 
         checkout_session = stripe.checkout.Session.create(
             customer=user.stripe_customer_id,
+            mode='subscription',
             payment_method_types=['card'],
             line_items=[{'price': price.id, 'quantity': 1}],
-            mode='subscription',
-            success_url=url_for('subscription_success', _external=True) + '?session_id={CHECKOUT_SESSION_ID}&plan=' + plan_type,
+            success_url=url_for('subscription_success', _external=True) + f'?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_type}',
             cancel_url=url_for('subscribe', _external=True),
             metadata={
                 'user_id': user.id,
                 'plan_type': plan_type,
                 'discount_code': discount_code if discount_applied else '',
-                'original_amount': selected_plan['amount'],
-                'final_amount': final_amount
+                'original_amount': selected['amount'],
+                'final_amount': final_amount,
             },
-            allow_promotion_codes=True
+            allow_promotion_codes=True,  # lets Stripe coupons/promotions work too
         )
 
         log_activity(
             user.id,
             'subscription_attempt',
-            f'Plan: {plan_type}, Discount: {discount_code}, Amount: ${final_amount/100:.2f}'
+            f'Plan: {plan_type}, Discount: {discount_code or "None"}, Amount: ${final_amount/100:.2f}'
         )
 
         return redirect(checkout_session.url, code=303)
@@ -1731,4 +1748,5 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
