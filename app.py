@@ -1,3 +1,4 @@
+# app.py
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from flask_moment import Moment
@@ -15,16 +16,6 @@ import time
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
 moment = Moment(app)
-
-# Defensive: if Flask-Moment isn't available for any reason later,
-# keep pages from crashing if templates call moment(...)
-def _moment_stub(*args, **kwargs):
-    class _Fmt:
-        def format(self, *_a, **_k): return ""
-        def fromNow(self, *_a, **_k): return ""
-        def calendar(self, *_a, **_k): return ""
-    return _Fmt()
-app.jinja_env.globals.setdefault('moment', _moment_stub)
 
 def require_env(name: str) -> str:
     val = os.environ.get(name)
@@ -56,6 +47,8 @@ OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini')
 OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.openai.com/v1')
 
 # Stripe config
+# IMPORTANT: STRIPE_SECRET_KEY must be a secret key (starts with sk_live_ or sk_test_)
+# STRIPE_PUBLISHABLE_KEY must be a publishable key (starts with pk_live_ or pk_test_)
 stripe.api_key = require_env('STRIPE_SECRET_KEY')
 STRIPE_PUBLISHABLE_KEY = require_env('STRIPE_PUBLISHABLE_KEY')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
@@ -530,7 +523,6 @@ def get_domain_recommendation(progress):
         }
 
 def set_user_subscription_by_customer(customer_id, status, subscription_id=None):
-    """Update a user's subscription status from Stripe webhooks without altering end_date."""
     if not customer_id:
         return
     try:
@@ -538,16 +530,20 @@ def set_user_subscription_by_customer(customer_id, status, subscription_id=None)
         if not user:
             print(f"No user found for Stripe customer: {customer_id}")
             return
-        # Map canceled -> expired for app gating
-        normalized = 'expired' if status in ('canceled', 'unpaid', 'incomplete_expired') else status
-        user.subscription_status = normalized
+
+        user.subscription_status = status
         if subscription_id:
             user.stripe_subscription_id = subscription_id
 
-        # DO NOT set subscription_end_date here; we set it on checkout success for the chosen plan.
+        # Keep a rough end date for UX; access is really gated by status
+        if status == 'active' and not user.subscription_end_date:
+            user.subscription_end_date = datetime.utcnow() + timedelta(days=30)
+        elif status in ('canceled', 'expired'):
+            user.subscription_status = 'expired'
+
         db.session.commit()
-        log_activity(user.id, 'subscription_status_update', f'status={normalized}')
-        print(f"Updated subscription for user {user.id}: {normalized}")
+        log_activity(user.id, 'subscription_status_update', f'status={status}')
+        print(f"Updated subscription for user {user.id}: {status}")
     except Exception as e:
         print(f"Error updating subscription: {e}")
         db.session.rollback()
@@ -605,7 +601,7 @@ def home():
 # -----------------------------
 @app.route('/register', methods=['GET', 'POST'])
 def register():
-    if request.method == 'POST']:
+    if request.method == 'POST':
         email = request.form['email'].lower().strip()
         password = request.form['password']
         first_name = request.form['first_name'].strip()
@@ -668,7 +664,7 @@ def register():
 # -----------------------------
 @app.route('/login', methods=['GET', 'POST'])
 def login():
-    if request.method == 'POST']:
+    if request.method == 'POST':
         email = request.form['email'].lower().strip()
         password = request.form['password']
 
@@ -1031,7 +1027,7 @@ def submit_quiz():
         else:
             performance_insights.append("Consider additional study time in this area before the exam.")
 
-        if time_taken > 0:
+        if time_taken > 0 and total_questions > 0:
             avg_time_per_question = time_taken / total_questions
             if avg_time_per_question < 1:
                 performance_insights.append("Good pace. You completed questions efficiently.")
@@ -1292,7 +1288,6 @@ def subscribe():
             delta = (user.subscription_end_date - datetime.utcnow())
             trial_days_left = max(delta.days, 0)
 
-        # Plans shown in the UI (3-month removed)
         plans = [
             {"id": "monthly", "label": "Monthly", "amount": 3999, "pretty": "$39.99 / month"},
             {"id": "6month", "label": "6 Months", "amount": 9900, "pretty": "$99 / 6 months"},
@@ -1318,79 +1313,60 @@ def create_checkout_session():
         if not user:
             return redirect(url_for('login'))
 
-        # Expecting plan_type to be "monthly" or "6month"
         plan_type = request.form.get('plan_type')
         discount_code = request.form.get('discount_code', '').strip().upper()
 
-        # Supported plans only
         plans = {
-            # $39.99 billed every month
-            'monthly': {
-                'amount': 3999,  # cents
-                'name': 'CPP Test Prep - Monthly Plan',
-                'interval': 'month',
-                'interval_count': 1
-            },
-            # $99.00 billed every 6 months
-            '6month': {
-                'amount': 9900,  # cents
-                'name': 'CPP Test Prep - 6 Month Plan',
-                'interval': 'month',
-                'interval_count': 6
-            }
+            'monthly': {'amount': 3999, 'name': 'CPP Test Prep - Monthly Plan', 'interval': 'month', 'interval_count': 1},
+            '6month': {'amount': 9900, 'name': 'CPP Test Prep - 6 Month Plan', 'interval': 'month', 'interval_count': 6}
         }
 
         if plan_type not in plans:
             flash('Invalid subscription plan selected.', 'danger')
             return redirect(url_for('subscribe'))
 
-        selected = plans[plan_type]
-        final_amount = selected['amount']
+        selected_plan = plans[plan_type]
+        final_amount = selected_plan['amount']
         discount_applied = False
 
-        # Optional promo codes (server-side)
         if discount_code == 'LAUNCH50':
-            final_amount = int(selected['amount'] * 0.5)
+            final_amount = int(selected_plan['amount'] * 0.5)
             discount_applied = True
         elif discount_code == 'STUDENT20':
-            final_amount = int(selected['amount'] * 0.8)
+            final_amount = int(selected_plan['amount'] * 0.8)
             discount_applied = True
 
-        # Create an ad-hoc Price for this checkout (keeps it simple)
         price = stripe.Price.create(
             unit_amount=final_amount,
             currency='usd',
-            recurring={
-                'interval': selected['interval'],
-                'interval_count': selected['interval_count'],
-            },
+            recurring={'interval': selected_plan['interval'], 'interval_count': selected_plan['interval_count']},
             product_data={
-                'name': selected['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''),
+                'name': selected_plan['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''),
                 'description': 'AI tutor, practice quizzes, flashcards, progress tracking, and exam preparation'
             }
         )
 
         checkout_session = stripe.checkout.Session.create(
             customer=user.stripe_customer_id,
-            mode='subscription',
             payment_method_types=['card'],
             line_items=[{'price': price.id, 'quantity': 1}],
+            mode='subscription',
             success_url=url_for('subscription_success', _external=True) + f'?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_type}',
             cancel_url=url_for('subscribe', _external=True),
             metadata={
                 'user_id': user.id,
                 'plan_type': plan_type,
                 'discount_code': discount_code if discount_applied else '',
-                'original_amount': selected['amount'],
-                'final_amount': final_amount,
+                'original_amount': selected_plan['amount'],
+                'final_amount': final_amount
             },
-            allow_promotion_codes=True,  # lets Stripe coupons/promotions work too
+            allow_promotion_codes=True
         )
 
         log_activity(
             user.id,
             'subscription_attempt',
-            f'Plan: {plan_type}, Discount: {discount_code or "None"}, Amount: ${final_amount/100:.2f}'
+            f'Plan: {plan_type}, Discount: {discount_code}, Amount: ${final_amount/100:.2f}'
         )
 
         return redirect(checkout_session.url, code=303)
@@ -1416,13 +1392,15 @@ def subscription_success():
             if checkout_session.payment_status == 'paid':
                 user = User.query.get(session['user_id'])
                 user.subscription_status = 'active'
-                # We keep an internal end date for convenience/UX; status=active gates access.
+                user.subscription_plan = plan_type
+                user.stripe_subscription_id = checkout_session.subscription
+
+                # Set a user-facing end date (for dashboard countdown)
                 if plan_type == '6month':
                     user.subscription_end_date = datetime.utcnow() + timedelta(days=180)
                 else:  # monthly
                     user.subscription_end_date = datetime.utcnow() + timedelta(days=30)
-                user.subscription_plan = plan_type
-                user.stripe_subscription_id = checkout_session.subscription
+
                 metadata = checkout_session.metadata or {}
                 if metadata.get('discount_code'):
                     user.discount_code_used = metadata['discount_code']
@@ -1746,6 +1724,3 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
-
-
-
