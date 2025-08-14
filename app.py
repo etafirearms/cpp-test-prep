@@ -1552,15 +1552,13 @@ def create_checkout_session():
             discount_applied = True
 
         price = stripe.Price.create(
-            unit_amount=final_amount,
-            currency='usd',
-            recurring={'interval': selected_plan['interval'], 'interval_count': selected_plan['interval_count']},
-            product_data={
-                'name': selected_plan['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''),
-                'description': 'AI tutor, practice quizzes, flashcards, progress tracking, and exam preparation'
-            }
-        )
-
+    unit_amount=final_amount,
+    currency='usd',
+    recurring={'interval': selected_plan['interval'], 'interval_count': selected_plan['interval_count']},
+    product_data={
+        'name': selected_plan['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else '')
+    }
+)
         checkout_session = stripe.checkout.Session.create(
             customer=user.stripe_customer_id,
             payment_method_types=['card'],
@@ -2056,3 +2054,4 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
