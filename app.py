@@ -1,7 +1,6 @@
 # app.py
 from flask import Flask, render_template, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
-from flask_moment import Moment
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 from functools import wraps
@@ -15,7 +14,6 @@ import time
 # App & Config
 # -----------------------------------------------------------------------------
 app = Flask(__name__)
-moment = Moment(app)
 
 def require_env(name: str) -> str:
     val = os.environ.get(name)
@@ -1785,9 +1783,37 @@ def forbidden_error(error):
 # Context processors
 # -----------------------------
 @app.context_processor
-def inject_now():
-    # Provides 'now' to all templates, used with {{ moment(now)... }}
-    return {'now': datetime.utcnow()}
+def inject_datetime_utils():
+    def format_datetime(dt, format_type='default'):
+        """Format datetime for templates"""
+        if not dt:
+            return 'Never'
+        
+        if format_type == 'time_ago':
+            now = datetime.utcnow()
+            diff = now - dt
+            
+            if diff.days > 0:
+                return f"{diff.days} day{'s' if diff.days != 1 else ''} ago"
+            elif diff.seconds > 3600:
+                hours = diff.seconds // 3600
+                return f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif diff.seconds > 60:
+                minutes = diff.seconds // 60
+                return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                return "Just now"
+        elif format_type == 'date':
+            return dt.strftime('%Y-%m-%d')
+        elif format_type == 'datetime':
+            return dt.strftime('%Y-%m-%d %H:%M')
+        else:
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    return {
+        'now': datetime.utcnow(),
+        'format_datetime': format_datetime
+    }
 
 @app.context_processor
 def inject_quiz_types():
