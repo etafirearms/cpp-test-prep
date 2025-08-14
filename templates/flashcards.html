@@ -1,155 +1,113 @@
-{% extends "base.html" %}
-
-{% block title %}Flashcards - {{ flashcard_data.topic }} - CPP Test Prep{% endblock %}
-
-{% block content %}
-<div class="row justify-content-center">
-    <div class="col-lg-6">
-        <div class="card">
-            <div class="card-header text-center">
-                <h4><i class="fas fa-layer-group me-2"></i>{{ flashcard_data.topic|title }}</h4>
-                <p class="mb-0">Card <span id="current-card">1</span> of {{ flashcard_data.cards|length }}</p>
-            </div>
-            <div class="card-body text-center" style="min-height: 300px;">
-                <div id="flashcard-container">
-                    <div class="flashcard" onclick="flipCard()">
-                        <div class="flashcard-content p-4">
-                            <div id="card-front">
-                                <h5>{{ flashcard_data.cards[0].front }}</h5>
-                                <p class="text-muted mt-4">Click to reveal answer</p>
-                            </div>
-                            <div id="card-back" style="display: none;">
-                                <h5>{{ flashcard_data.cards[0].back }}</h5>
-                                <p class="text-muted mt-4">Click to see question</p>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-                
-                <div class="mt-4">
-                    <button class="btn btn-outline-secondary me-2" onclick="previousCard()">
-                        <i class="fas fa-arrow-left"></i> Previous
-                    </button>
-                    <button class="btn btn-outline-secondary" onclick="nextCard()">
-                        Next <i class="fas fa-arrow-right"></i>
-                    </button>
-                </div>
-                
-                <div class="mt-3">
-                    <button class="btn btn-success me-2" onclick="markKnown()">
-                        <i class="fas fa-check"></i> Know It
-                    </button>
-                    <button class="btn btn-warning" onclick="markUnsure()">
-                        <i class="fas fa-question"></i> Review Later
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-
-<!-- Suggested CPP Topics -->
-<div class="row mt-4 justify-content-center">
-    <div class="col-lg-6">
-        <div class="card">
-            <div class="card-body text-center">
-                <h6>Study Different Topics</h6>
-                <div class="btn-group-vertical w-100">
-                    <a href="{{ url_for('flashcards', topic='risk assessment') }}" class="btn btn-outline-primary">Risk Assessment</a>
-                    <a href="{{ url_for('flashcards', topic='CPTED (Crime Prevention Through Environmental Design)') }}" class="btn btn-outline-primary">CPTED</a>
-                    <a href="{{ url_for('flashcards', topic='access control and authentication') }}" class="btn btn-outline-primary">Access Control</a>
-                    <a href="{{ url_for('flashcards', topic='investigations: interview & evidence basics') }}" class="btn btn-outline-primary">Investigations</a>
-                    <a href="{{ url_for('flashcards', topic='incident response and crisis communication') }}" class="btn btn-outline-primary">Incident Response</a>
-                    <a href="{{ url_for('flashcards', topic='information security fundamentals') }}" class="btn btn-outline-primary">Information Security</a>
-                    <a href="{{ url_for('flashcards', topic='personnel security & insider threat') }}" class="btn btn-outline-primary">Personnel Security</a>
-                    <a href="{{ url_for('flashcards', topic='business principles: budgeting and contracts') }}" class="btn btn-outline-primary">Business Principles</a>
-                </div>
-            </div>
-        </div>
-    </div>
-</div>
-{% endblock %}
-
-{% block scripts %}
-<script>
-const cards = {{ flashcard_data.cards|tojson }};
-let currentIndex = 0;
-let isFlipped = false;
-
-function flipCard() {
-    const front = document.getElementById('card-front');
-    const back = document.getElementById('card-back');
-    if (isFlipped) {
-        front.style.display = 'block';
-        back.style.display = 'none';
-        isFlipped = false;
-    } else {
-        front.style.display = 'none';
-        back.style.display = 'block';
-        isFlipped = true;
-    }
-}
-
-function nextCard() {
-    if (currentIndex < cards.length - 1) {
-        currentIndex++;
-        updateCard();
-    }
-}
-
-function previousCard() {
-    if (currentIndex > 0) {
-        currentIndex--;
-        updateCard();
-    }
-}
-
-function updateCard() {
-    document.getElementById('card-front').innerHTML = `
-        <h5>${escapeHtml(cards[currentIndex].front)}</h5>
-        <p class="text-muted mt-4">Click to reveal answer</p>
-    `;
-    document.getElementById('card-back').innerHTML = `
-        <h5>${escapeHtml(cards[currentIndex].back)}</h5>
-        <p class="text-muted mt-4">Click to see question</p>
-    `;
-
-    // Reset to front
-    document.getElementById('card-front').style.display = 'block';
-    document.getElementById('card-back').style.display = 'none';
-    isFlipped = false;
-
-    // Update counter
-    document.getElementById('current-card').textContent = currentIndex + 1;
-}
-
-function markKnown() {
-    const card = document.querySelector('.flashcard');
-    card.style.background = 'linear-gradient(45deg, #28a745, #20c997)';
-    setTimeout(() => {
-        card.style.background = '';
-        nextCard();
-    }, 400);
-}
-
-function markUnsure() {
-    const card = document.querySelector('.flashcard');
-    card.style.background = 'linear-gradient(45deg, #ffc107, #fd7e14)';
-    setTimeout(() => {
-        card.style.background = '';
-        nextCard();
-    }, 400);
-}
-
-// simple HTML escape for safety
-function escapeHtml(str) {
-  if (str == null) return '';
-  return String(str)
-    .replaceAll('&', '&amp;')
-    .replaceAll('<', '&lt;')
-    .replaceAll('>', '&gt;')
-    .replaceAll('"', '&quot;')
-    .replaceAll("'", '&#039;');
-}
-</script>
-{% endblock %}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Flashcards - CPP Test Prep</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <style>
+        .flashcard-container {
+            max-width: 600px;
+            margin: 0 auto;
+            min-height: 400px;
+        }
+        .flashcard {
+            width: 100%;
+            height: 350px;
+            perspective: 1000px;
+            margin: 0 auto;
+        }
+        .flashcard-inner {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            text-align: center;
+            transition: transform 0.6s;
+            transform-style: preserve-3d;
+            cursor: pointer;
+        }
+        .flashcard.flipped .flashcard-inner {
+            transform: rotateY(180deg);
+        }
+        .flashcard-front, .flashcard-back {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            backface-visibility: hidden;
+            border-radius: 1rem;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 2rem;
+            box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+        }
+        .flashcard-front {
+            background: linear-gradient(135deg, #007bff, #0056b3);
+            color: white;
+        }
+        .flashcard-back {
+            background: linear-gradient(135deg, #28a745, #1e7e34);
+            color: white;
+            transform: rotateY(180deg);
+        }
+        .card-content {
+            text-align: center;
+        }
+        .progress-indicator {
+            background: #f8f9fa;
+            border-radius: 0.5rem;
+            padding: 1rem;
+            margin-bottom: 1rem;
+        }
+        .control-buttons {
+            margin-top: 2rem;
+        }
+        .difficulty-buttons {
+            margin-top: 1rem;
+        }
+        .topic-selector {
+            background: white;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stats-card {
+            background: linear-gradient(45deg, #17a2b8, #138496);
+            color: white;
+            border-radius: 0.5rem;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+            text-align: center;
+        }
+        .category-badge {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            font-size: 0.8rem;
+        }
+        .flip-hint {
+            position: absolute;
+            bottom: 1rem;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+        .mastery-indicator {
+            height: 4px;
+            background: #dee2e6;
+            border-radius: 2px;
+            overflow: hidden;
+            margin-top: 0.5rem;
+        }
+        .mastery-progress {
+            height: 100%;
+            background: linear-gradient(90deg, #dc3545, #ffc107, #28a745);
+            transition: width 0.3s;
+        }
+    </style>
+</head>
+<body class="bg-light">
+    <!-- Navigation -->
