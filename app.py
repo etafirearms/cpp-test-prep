@@ -494,7 +494,7 @@ def update_user_progress(user_id, quiz_result):
                 progress.mastery_level = 'needs_practice'
         db.session.commit()
     except Exception as e:
-        print(f"Error updating user progress: {e}")
+        print("Error updating user progress: " + str(e))
         db.session.rollback()
 
 def get_domain_recommendation(progress):
@@ -727,7 +727,7 @@ def dashboard():
                 ActivityLog.timestamp.desc()
             ).limit(10).all()
         except Exception as e:
-            print(f"Error fetching activities: {e}")
+            print("Error fetching activities: " + str(e))
             recent_activities = []
 
         try:
@@ -735,7 +735,7 @@ def dashboard():
                 QuizResult.completed_at.desc()
             ).limit(5).all()
         except Exception as e:
-            print(f"Error fetching quiz results: {e}")
+            print("Error fetching quiz results: " + str(e))
             recent_quizzes = []
 
         days_left = 0
@@ -768,14 +768,14 @@ def dashboard():
                         elif recent_scores[-1] < recent_scores[0]:
                             quiz_stats['recent_trend'] = 'declining'
         except Exception as e:
-            print(f"Error calculating quiz stats: {e}")
+            print("Error calculating quiz stats: " + str(e))
 
         total_study_time = 0
         try:
             study_sessions = StudySession.query.filter_by(user_id=user.id).all()
             total_study_time = sum(s.duration or 0 for s in study_sessions)
         except Exception as e:
-            print(f"Error fetching study time: {e}")
+            print("Error fetching study time: " + str(e))
 
         return render_template(
             'dashboard.html',
@@ -790,7 +790,7 @@ def dashboard():
         )
 
     except Exception as e:
-        print(f"Dashboard error: {e}")
+        print("Dashboard error: " + str(e))
         flash('Error loading dashboard. Please try again.', 'danger')
         return redirect(url_for('home'))
 
@@ -902,7 +902,7 @@ def quiz_selector():
                     'consecutive_good_scores': progress.consecutive_good_scores
                 }
         except Exception as e:
-            print(f"Error fetching user progress: {e}")
+            print("Error fetching user progress: " + str(e))
 
         return render_template(
             'quiz_selector.html',
@@ -912,7 +912,7 @@ def quiz_selector():
         )
 
     except Exception as e:
-        print(f"Quiz selector error: {e}")
+        print("Quiz selector error: " + str(e))
         flash('Error loading quiz selector. Please try again.', 'danger')
         return redirect(url_for('dashboard'))
 
