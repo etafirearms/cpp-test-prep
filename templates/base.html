@@ -1,100 +1,161 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>{% block title %}CPP Test Prep{% endblock %}</title>
-
-    {# Load Moment.js via Flask-Moment if available #}
-    {% if moment %}{{ moment.include_moment() }}{% endif %}
-    {% if moment %}{{ moment.lang("en") }}{% endif %}
-
-    <!-- CSS -->
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet" />
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet" />
-
-    <style>
-        body { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; }
-        .card { border: none; border-radius: 15px; box-shadow: 0 10px 30px rgba(0,0,0,0.1); }
-        .btn-primary { background: linear-gradient(135deg, #667eea, #764ba2); border: none; border-radius: 25px; }
-        .chat-container { height: 400px; overflow-y: auto; }
-        .message { margin-bottom: 15px; }
-        .user-message { text-align: right; }
-        .ai-message { text-align: left; }
-        .message-bubble { display: inline-block; padding: 10px 15px; border-radius: 15px; max-width: 80%; }
-        .user-message .message-bubble { background: #007bff; color: #fff; }
-        .ai-message .message-bubble { background: #f8f9fa; border: 1px solid #dee2e6; }
-        .navbar { background: rgba(255,255,255,0.1); backdrop-filter: blur(10px); }
-        footer a { text-decoration: none; }
-    </style>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    {% block extra_css %}{% endblock %}
 </head>
 <body>
-    <!-- Navbar -->
-    <nav class="navbar navbar-expand-lg navbar-dark">
+    <!-- Navigation -->
+    <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
         <div class="container">
-            <a class="navbar-brand fw-bold" href="{{ url_for('home') }}">
-                <i class="fas fa-graduation-cap me-2"></i>CPP Test Prep
+            <a class="navbar-brand" href="{{ url_for('home') if not session.user_id else url_for('dashboard') }}">
+                <i class="fas fa-shield-alt me-2"></i>CPP Test Prep
             </a>
-
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav" aria-label="Toggle navigation">
+            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
                 <span class="navbar-toggler-icon"></span>
             </button>
-
             <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
-                    {% if session.get('user_id') %}
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('dashboard') }}"><i class="fas fa-tachometer-alt me-1"></i>Dashboard</a></li>
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('study') }}"><i class="fas fa-book me-1"></i>Study</a></li>
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('progress') }}"><i class="fas fa-chart-line me-1"></i>Progress</a></li>
-                        <li class="nav-item"><span class="nav-link">Welcome, {{ session.get('user_name') }}!</span></li>
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('logout') }}"><i class="fas fa-sign-out-alt me-1"></i>Logout</a></li>
-                    {% else %}
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('login') }}">Login</a></li>
-                        <li class="nav-item"><a class="nav-link" href="{{ url_for('register') }}">Register</a></li>
-                    {% endif %}
-                </ul>
+                {% if session.user_id %}
+                    <ul class="navbar-nav me-auto">
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'dashboard' else '' }}" 
+                               href="{{ url_for('dashboard') }}">Dashboard</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'study' else '' }}" 
+                               href="{{ url_for('study') }}">Study</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'quiz_selector' else '' }}" 
+                               href="{{ url_for('quiz_selector') }}">Quizzes</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'flashcards' else '' }}" 
+                               href="{{ url_for('flashcards') }}">Flashcards</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'performance_analysis' else '' }}" 
+                               href="{{ url_for('performance_analysis') }}">Analysis</a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'progress' else '' }}" 
+                               href="{{ url_for('progress') }}">Progress</a>
+                        </li>
+                    </ul>
+                    <ul class="navbar-nav">
+                        <li class="nav-item dropdown">
+                            <a class="nav-link dropdown-toggle" href="#" id="navbarDropdown" role="button" data-bs-toggle="dropdown">
+                                <i class="fas fa-user me-1"></i>{{ session.user_name or 'User' }}
+                            </a>
+                            <ul class="dropdown-menu">
+                                {% if session.user_id %}
+                                    {% set user = get_flashed_messages() %} {# This is a placeholder - you'd need to pass user data #}
+                                    <li><a class="dropdown-item" href="{{ url_for('subscribe') }}">
+                                        <i class="fas fa-crown me-1"></i>Subscription
+                                    </a></li>
+                                    <li><hr class="dropdown-divider"></li>
+                                {% endif %}
+                                <li><a class="dropdown-item" href="{{ url_for('logout') }}">
+                                    <i class="fas fa-sign-out-alt me-1"></i>Logout
+                                </a></li>
+                            </ul>
+                        </li>
+                    </ul>
+                {% else %}
+                    <ul class="navbar-nav me-auto">
+                        <li class="nav-item">
+                            <a class="nav-link {{ 'active' if request.endpoint == 'home' else '' }}" 
+                               href="{{ url_for('home') }}">Home</a>
+                        </li>
+                    </ul>
+                    <ul class="navbar-nav">
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('login') }}">
+                                <i class="fas fa-sign-in-alt me-1"></i>Login
+                            </a>
+                        </li>
+                        <li class="nav-item">
+                            <a class="nav-link" href="{{ url_for('register') }}">
+                                <i class="fas fa-user-plus me-1"></i>Register
+                            </a>
+                        </li>
+                    </ul>
+                {% endif %}
             </div>
         </div>
     </nav>
 
-    <!-- Flash messages + page content -->
-    <div class="container mt-4">
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
+    <!-- Flash Messages -->
+    {% with messages = get_flashed_messages(with_categories=true) %}
+        {% if messages %}
+            <div class="container mt-3">
                 {% for category, message in messages %}
                     <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
                         {{ message }}
-                        <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
+                        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                     </div>
                 {% endfor %}
-            {% endif %}
-        {% endwith %}
+            </div>
+        {% endif %}
+    {% endwith %}
 
+    <!-- Main Content -->
+    <main>
         {% block content %}{% endblock %}
-    </div>
+    </main>
 
-    <!-- Global Footer Disclaimer -->
-    <footer class="bg-dark text-light py-3 mt-5">
-        <div class="container">
-            <div class="row gy-2 align-items-center">
-                <div class="col-md-8">
-                    <p class="small mb-1"><strong>Important Notice</strong><br />This service is NOT affiliated with, endorsed by, or approved by ASIS International.</p>
-                    <p class="small mb-1">CPP® (Certified Protection Professional) is a registered certification mark of ASIS International, Inc. This course is an independent study aid created to help candidates prepare for the CPP exam.</p>
-                    <p class="small mb-0">We do not guarantee that using this course will result in passing the CPP exam. Exam success depends on individual study habits, prior knowledge, exam performance, and other factors beyond our control.</p>
-                </div>
-                <div class="col-md-4 text-md-end">
-                    <p class="small mb-0">
-                        <a href="mailto:support@cpptestprep.com" class="text-light">Support</a> •
-                        <a href="{{ url_for('terms') }}" class="text-light">Terms</a> •
-                        <a href="{{ url_for('privacy') }}" class="text-light">Privacy</a>
+    <!-- Footer -->
+    <footer class="bg-dark text-white mt-5">
+        <div class="container py-4">
+            <div class="row">
+                <div class="col-md-6">
+                    <h5><i class="fas fa-shield-alt me-2"></i>CPP Test Prep</h5>
+                    <p class="small text-muted">
+                        Prepare for your ASIS Certified Protection Professional exam with AI-powered study tools, 
+                        practice quizzes, and comprehensive progress tracking.
                     </p>
+                </div>
+                <div class="col-md-3">
+                    <h6>Quick Links</h6>
+                    <ul class="list-unstyled">
+                        {% if session.user_id %}
+                            <li><a href="{{ url_for('dashboard') }}" class="text-light">Dashboard</a></li>
+                            <li><a href="{{ url_for('study') }}" class="text-light">Study</a></li>
+                            <li><a href="{{ url_for('quiz_selector') }}" class="text-light">Quizzes</a></li>
+                        {% else %}
+                            <li><a href="{{ url_for('home') }}" class="text-light">Home</a></li>
+                            <li><a href="{{ url_for('login') }}" class="text-light">Login</a></li>
+                            <li><a href="{{ url_for('register') }}" class="text-light">Register</a></li>
+                        {% endif %}
+                    </ul>
+                </div>
+                <div class="col-md-3">
+                    <h6>Legal</h6>
+                    <ul class="list-unstyled">
+                        <li><a href="{{ url_for('terms') }}" class="text-light">Terms of Service</a></li>
+                        <li><a href="{{ url_for('privacy') }}" class="text-light">Privacy Policy</a></li>
+                        <li><a href="{{ url_for('contact') }}" class="text-light">Contact</a></li>
+                    </ul>
+                </div>
+            </div>
+            <hr class="my-3">
+            <div class="row align-items-center">
+                <div class="col-md-6">
+                    <p class="small mb-0">&copy; {{ now.strftime('%Y') }} CPP Test Prep. All rights reserved.</p>
+                </div>
+                <div class="col-md-6 text-end">
+                    <small class="text-muted">Last updated: {{ now.strftime('%B %Y') }}</small>
                 </div>
             </div>
         </div>
     </footer>
 
-    <!-- JS -->
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    {% block scripts %}{% endblock %}
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+    {% block extra_js %}{% endblock %}
 </body>
 </html>
