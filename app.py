@@ -737,7 +737,7 @@ def register():
                 return render_template('register.html')
 
             # Validate email format
-            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
             if not re.match(email_pattern, email):
                 print(f"Registration failed: Invalid email format for {email}")
                 flash('Please enter a valid email address.', 'danger')
@@ -1466,3 +1466,4 @@ def progress():
             total_study_time = sum(s.duration or 0 for s in study_sessions)
         except Exception as e:
             print(f"Error fetching study sessions: {e}")
+
