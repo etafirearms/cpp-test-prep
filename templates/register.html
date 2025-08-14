@@ -1,7 +1,5 @@
 {% extends "base.html" %}
-
 {% block title %}Register - CPP Test Prep{% endblock %}
-
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-6">
@@ -11,7 +9,7 @@
                     <i class="fas fa-user-plus me-2"></i>Create Account
                 </h2>
                 
-                <form method="POST">
+                <form method="POST" id="registrationForm">
                     <div class="row">
                         <div class="col-md-6 mb-3">
                             <label class="form-label">First Name</label>
@@ -30,22 +28,67 @@
                     
                     <div class="mb-3">
                         <label class="form-label">Password</label>
-                        <input type="password" class="form-control" name="password" required minlength="6">
-                        <div class="form-text">Minimum 6 characters</div>
+                        <input type="password" class="form-control" name="password" required minlength="8">
+                        <div class="form-text">Minimum 8 characters</div>
+                    </div>
+                    
+                    <!-- Terms & Conditions Checkbox -->
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" name="terms_accepted" id="termsCheck" required>
+                            <label class="form-check-label" for="termsCheck">
+                                I agree to the <a href="{{ url_for('terms') }}" target="_blank">Terms of Service</a> 
+                                and <a href="{{ url_for('privacy') }}" target="_blank">Privacy Policy</a>
+                            </label>
+                        </div>
                     </div>
                     
                     <div class="d-grid">
-                        <button type="submit" class="btn btn-primary btn-lg">
+                        <button type="submit" class="btn btn-primary btn-lg" id="submitBtn">
                             <i class="fas fa-rocket me-2"></i>Start Free Trial
                         </button>
                     </div>
                 </form>
                 
                 <div class="text-center mt-3">
-                    <p>Already have an account? <a href="/login">Login here</a></p>
+                    <p>Already have an account? <a href="{{ url_for('login') }}">Login here</a></p>
                 </div>
             </div>
         </div>
     </div>
 </div>
-{% endblock %} 
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('registrationForm');
+    const submitBtn = document.getElementById('submitBtn');
+    const termsCheck = document.getElementById('termsCheck');
+    
+    form.addEventListener('submit', function(e) {
+        // Check if terms are accepted
+        if (!termsCheck.checked) {
+            e.preventDefault();
+            alert('Please accept the Terms of Service and Privacy Policy to continue.');
+            return false;
+        }
+        
+        // Disable submit button to prevent double submission
+        submitBtn.disabled = true;
+        submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin me-2"></i>Creating Account...';
+    });
+    
+    // Enable/disable submit button based on terms checkbox
+    termsCheck.addEventListener('change', function() {
+        if (this.checked) {
+            submitBtn.classList.remove('btn-secondary');
+            submitBtn.classList.add('btn-primary');
+        } else {
+            submitBtn.classList.remove('btn-primary');
+            submitBtn.classList.add('btn-secondary');
+        }
+    });
+});
+</script>
+{% endblock %}
