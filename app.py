@@ -498,14 +498,17 @@ def update_user_progress(user_id, quiz_result):
         db.session.rollback()
 
 def get_domain_recommendation(progress):
-    if progress.average_score >= 90 and progress.consecutive_good_scores >= 3:
+    average_score = progress.average_score or 0
+    consecutive_good_scores = progress.consecutive_good_scores or 0
+    
+    if average_score >= 90 and consecutive_good_scores >= 3:
         return {
             'level': 'mastered',
             'message': 'Excellent. You have mastered this domain.',
             'action': 'Review occasionally to maintain knowledge.',
             'color': 'success'
         }
-    elif progress.average_score >= 75 and progress.consecutive_good_scores >= 2:
+    elif average_score >= 75 and consecutive_good_scores >= 2:
         return {
             'level': 'good',
             'message': 'Good progress. You understand the core concepts.',
@@ -750,19 +753,20 @@ def dashboard():
         try:
             all_quiz_results = QuizResult.query.filter_by(user_id=user.id).all()
             if all_quiz_results:
-                all_scores = [q.score for q in all_quiz_results]
-                quiz_stats.update({
-                    'total_quizzes': len(all_quiz_results),
-                    'avg_score': sum(all_scores) / len(all_scores),
-                    'best_score': max(all_scores),
-                    'quiz_types_completed': list(set([q.quiz_type for q in all_quiz_results]))
-                })
-                if len(all_scores) >= 3:
-                    recent_scores = all_scores[-3:]
-                    if recent_scores[-1] > recent_scores[0]:
-                        quiz_stats['recent_trend'] = 'improving'
-                    elif recent_scores[-1] < recent_scores[0]:
-                        quiz_stats['recent_trend'] = 'declining'
+                all_scores = [q.score for q in all_quiz_results if q.score is not None]
+                if all_scores:
+                    quiz_stats.update({
+                        'total_quizzes': len(all_quiz_results),
+                        'avg_score': sum(all_scores) / len(all_scores),
+                        'best_score': max(all_scores),
+                        'quiz_types_completed': list(set([q.quiz_type for q in all_quiz_results if q.quiz_type]))
+                    })
+                    if len(all_scores) >= 3:
+                        recent_scores = all_scores[-3:]
+                        if recent_scores[-1] > recent_scores[0]:
+                            quiz_stats['recent_trend'] = 'improving'
+                        elif recent_scores[-1] < recent_scores[0]:
+                            quiz_stats['recent_trend'] = 'declining'
         except Exception as e:
             print(f"Error calculating quiz stats: {e}")
 
@@ -894,7 +898,7 @@ def quiz_selector():
             for progress in progress_records:
                 user_progress[progress.domain] = {
                     'mastery_level': progress.mastery_level,
-                    'average_score': progress.average_score,
+                    'average_score': round(progress.average_score or 0, 1),
                     'consecutive_good_scores': progress.consecutive_good_scores
                 }
         except Exception as e:
@@ -1152,7 +1156,7 @@ def performance_analysis():
                 'name': domain_info['name'],
                 'topics': domain_info['topics'],
                 'mastery_level': progress.mastery_level,
-                'average_score': round(progress.average_score, 1),
+                'average_score': round(progress.average_score or 0, 1),
                 'question_count': progress.question_count,
                 'consecutive_good_scores': progress.consecutive_good_scores,
                 'recommendation': get_domain_recommendation(progress),
@@ -1191,7 +1195,7 @@ def performance_analysis():
             })
 
         total_domains = len(CPP_DOMAINS)
-        readiness_score = (len(mastered) * 100 + len(good_progress) * 70) / total_domains
+        readiness_score = (len(mastered) * 100 + len(good_progress) * 70) / total_domains if total_domains > 0 else 0
 
         return render_template(
             'performance_analysis.html',
@@ -1235,7 +1239,8 @@ def progress():
 
         total_sessions = len([a for a in activities if 'study' in a.activity.lower()])
         total_quizzes = len(quiz_results)
-        avg_score = sum(q.score for q in quiz_results) / len(quiz_results) if quiz_results else 0
+        valid_scores = [q.score for q in quiz_results if q.score is not None]
+        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
 
         try:
             study_sessions = StudySession.query.filter_by(user_id=user.id).all()
