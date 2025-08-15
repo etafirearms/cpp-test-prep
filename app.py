@@ -10,7 +10,7 @@ import os
 import requests
 import stripe
 import time
-import hashlib
+import hashlib  # <-- NEW
 
 # For SQL text/inspection helpers
 from sqlalchemy import text, inspect
@@ -150,7 +150,6 @@ class UserProgress(db.Model):
         db.UniqueConstraint('user_id', 'domain', 'topic', name='uq_userprogress_user_domain_topic'),
     )
 
-
 class QuestionEvent(db.Model):
     """
     One row per answered card/question.
@@ -265,6 +264,128 @@ def log_activity(user_id, activity, details=None):
     except Exception as e:
         print(f"Activity logging error: {e}")
         db.session.rollback()
+
+# ---------- NEW: tracking helpers (hash, record event, update progress, seen) ----------
+def _hash_question_payload(question_obj: dict) -> str:
+    """
+    Stable SHA256 hash for a question so we can detect repeats.
+    Uses question text + sorted options.
+    """
+    q_text = (question_obj or {}).get('question', '') or ''
+    opts = (question_obj or {}).get('options', {}) or {}
+    parts = [q_text.strip()]
+    for key in sorted(opts.keys()):
+        parts.append(f"{key}:{str(opts.get(key, '')).strip()}")
+    raw = "||".join(parts)
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def record_question_event(
+    user_id: int,
+    question_obj: dict,
+    domain: str = None,
+    topic: str = None,
+    is_correct: bool = None,
+    response_time_s: int = None,
+    source: str = 'quiz'
+) -> None:
+    """Insert one QuestionEvent row safely."""
+    try:
+        qhash = _hash_question_payload(question_obj)
+        evt = QuestionEvent(
+            user_id=user_id,
+            question_hash=qhash,
+            domain=domain,
+            topic=topic,
+            source=source,
+            is_correct=is_correct,
+            response_time_s=response_time_s,
+        )
+        db.session.add(evt)
+        db.session.commit()
+    except Exception as e:
+        print(f"record_question_event error: {e}")
+        db.session.rollback()
+
+def _mastery_from_stats(avg: float, streak: int) -> str:
+    """
+    Mastery banding:
+    - mastered: avg >= 90 and streak >= 3
+    - good:     avg >= 75 and streak >= 2
+    - needs_practice: otherwise
+    """
+    if (avg or 0) >= 90 and (streak or 0) >= 3:
+        return 'mastered'
+    if (avg or 0) >= 75 and (streak or 0) >= 2:
+        return 'good'
+    return 'needs_practice'
+
+def update_user_progress_on_answer(
+    user_id: int,
+    domain: str,
+    topic: str,
+    is_correct: bool
+) -> None:
+    """
+    Lightweight rolling update for UserProgress.
+    Call this per answer (wired in /submit-quiz).
+    """
+    try:
+        if not domain:
+            return
+
+        row = UserProgress.query.filter_by(user_id=user_id, domain=domain, topic=topic).first()
+        if not row:
+            row = UserProgress(
+                user_id=user_id,
+                domain=domain,
+                topic=topic,
+                average_score=0.0,
+                question_count=0,
+                consecutive_good_scores=0,
+                mastery_level='needs_practice'
+            )
+            db.session.add(row)
+
+        earned = 100.0 if bool(is_correct) else 0.0
+        old_count = row.question_count or 0
+        new_count = old_count + 1
+
+        row.average_score = ((row.average_score or 0.0) * old_count + earned) / new_count
+        row.question_count = new_count
+
+        if earned >= 75.0:
+            row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1
+        else:
+            row.consecutive_good_scores = 0
+
+        row.mastery_level = _mastery_from_stats(row.average_score, row.consecutive_good_scores)
+        row.last_updated = datetime.utcnow()
+
+        db.session.commit()
+    except Exception as e:
+        print(f"update_user_progress_on_answer error: {e}")
+        db.session.rollback()
+
+def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_days: int = 30) -> set:
+    """
+    Return a set of question_hash values the user has seen recently.
+    (Use this for non-repeating flashcards later.)
+    """
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=window_days)
+        q = QuestionEvent.query.filter(
+            QuestionEvent.user_id == user_id,
+            QuestionEvent.created_at >= cutoff
+        )
+        if domain:
+            q = q.filter(QuestionEvent.domain == domain)
+        if topic:
+            q = q.filter(QuestionEvent.topic == topic)
+        return {row.question_hash for row in q.with_entities(QuestionEvent.question_hash).all()}
+    except Exception as e:
+        print(f"get_seen_hashes error: {e}")
+        return set()
+# ---------- END NEW helpers ----------
 
 def chat_with_ai(messages, user_id=None):
     """Thin wrapper to OpenAI Chat Completions with basic rate limiting and robust error handling."""
@@ -1029,6 +1150,7 @@ def quiz(quiz_type):
     """)
     content = page.substitute(title=quiz_data['title'], quiz_json=quiz_json)
     return render_base_template("Quiz", content, user=user)
+
 @app.route('/mock-exam')
 @subscription_required
 def mock_exam():
@@ -1139,6 +1261,7 @@ def mock_exam():
     content = page.substitute(num=num_questions, quiz_json=quiz_json)
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
+# ----------------- UPDATED: Submit quiz (records events & updates progress) ---
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1147,7 +1270,7 @@ def submit_quiz():
         quiz_type = data.get('quiz_type')
         answers = data.get('answers', {})
         questions = data.get('questions', [])
-        domain = data.get('domain', 'general')
+        domain_param = data.get('domain', 'general')
 
         if not quiz_type or not questions:
             return jsonify({'error': 'Invalid quiz data'}), 400
@@ -1161,17 +1284,57 @@ def submit_quiz():
 
         correct_count = 0
         total = len(questions)
+
+        # Per-domain tally for feedback
+        per_domain = {}  # {domain: {'correct': x, 'total': y}}
+
         for i, q in enumerate(questions):
             user_answer = answers.get(str(i))
-            if user_answer and user_answer == q.get('correct'):
+            is_correct = bool(user_answer and user_answer == q.get('correct'))
+
+            if is_correct:
                 correct_count += 1
+
+            # Derive domain/topic per question, fallback to overall param
+            q_domain = (q.get('domain') or domain_param or 'general')
+            q_topic = q.get('topic')  # optional; many of our fallback questions don't have it
+
+            # Tally for feedback
+            if q_domain not in per_domain:
+                per_domain[q_domain] = {'correct': 0, 'total': 0}
+            per_domain[q_domain]['total'] += 1
+            if is_correct:
+                per_domain[q_domain]['correct'] += 1
+
+            # Record event + update progress
+            source = 'mock' if quiz_type == 'mock-exam' else 'quiz'
+            try:
+                record_question_event(
+                    user_id=session['user_id'],
+                    question_obj=q,
+                    domain=q_domain,
+                    topic=q_topic,
+                    is_correct=is_correct,
+                    response_time_s=None,
+                    source=source
+                )
+                update_user_progress_on_answer(
+                    user_id=session['user_id'],
+                    domain=q_domain,
+                    topic=q_topic,
+                    is_correct=is_correct
+                )
+            except Exception as e:
+                # Do not fail submission if tracking fails
+                print(f"tracking error (ignored): {e}")
+
         score = (correct_count / total) * 100 if total else 0.0
 
         # Save result
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
-            domain=domain,
+            domain=domain_param,
             questions=json.dumps(questions),
             answers=json.dumps(answers),
             score=score,
@@ -1191,13 +1354,13 @@ def submit_quiz():
             'score': score,
             'date': datetime.utcnow().isoformat(),
             'type': quiz_type,
-            'domain': domain,
+            'domain': domain_param,
             'time_taken': time_taken
         })
         user.quiz_scores = json.dumps(scores[-50:])
         db.session.commit()
 
-        # Simple insights
+        # Insights
         insights = []
         if score >= 90:
             insights.append("Excellent performance. You're well-prepared for this topic.")
@@ -1207,12 +1370,25 @@ def submit_quiz():
             insights.append("Fair performance. Focus on the areas you missed.")
         else:
             insights.append("Consider more study time in this area before the exam.")
+
         if time_taken > 0 and total > 0:
             avg = time_taken / total
             if avg < 1:
                 insights.append("Great pace. You answered efficiently.")
             elif avg > 3:
                 insights.append("Consider practicing to improve your speed.")
+
+        # Domain-specific guidance
+        try:
+            for dkey, tallies in per_domain.items():
+                if tallies['total'] >= 3:  # only if we have a bit of signal
+                    pct = (tallies['correct'] / tallies['total']) * 100.0
+                    if pct < 70.0:
+                        # Use friendly name if we know it
+                        dname = CPP_DOMAINS.get(dkey, {}).get('name', dkey)
+                        insights.append(f"Focus more on {dname} (recent score ~{pct:.0f}%).")
+        except Exception as e:
+            print(f"insight generation error (ignored): {e}")
 
         log_activity(session['user_id'], 'quiz_completed', f'{quiz_type}: {correct_count}/{total} in {time_taken} min')
 
@@ -1530,8 +1706,3 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
-
-
-
-
-
