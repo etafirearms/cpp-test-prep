@@ -993,6 +993,115 @@ def quiz(quiz_type):
     """)
     content = page.substitute(title=quiz_data['title'], quiz_json=quiz_json)
     return render_base_template("Quiz", content, user=user)
+@app.route('/mock-exam')
+@subscription_required
+def mock_exam():
+    # Allow ?count= up to 100
+    try:
+        requested = int(request.args.get('count', 100))
+    except ValueError:
+        requested = 100
+    num_questions = max(25, min(100, requested))  # sensible bounds
+
+    # Reuse fallback generator directly so we can override count
+    quiz_data = generate_fallback_quiz('mock-exam', domain=None, difficulty='medium', num_questions=num_questions)
+    quiz_json = json.dumps(quiz_data)
+
+    from string import Template
+    page = Template("""
+    <div class="row">
+      <div class="col-md-10 mx-auto">
+        <div class="card">
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h4 class="mb-0">Mock Exam ($num Q)</h4>
+            <button id="submitBtn" class="btn btn-success">Submit</button>
+          </div>
+          <div class="card-body" id="quizContainer"></div>
+        </div>
+        <div class="mt-4" id="results"></div>
+      </div>
+    </div>
+    <script>
+      const QUIZ_DATA = $quiz_json;
+
+      function renderQuiz() {
+        const container = document.getElementById('quizContainer');
+        container.innerHTML = '';
+        QUIZ_DATA.questions.forEach((q, idx) => {
+          const card = document.createElement('div');
+          card.className = 'mb-3 p-3 border rounded';
+          const title = document.createElement('h5');
+          title.textContent = 'Q' + (idx + 1) + '. ' + q.question;
+          card.appendChild(title);
+
+          const options = q.options || {};
+          for (const key in options) {
+            const optId = 'q' + idx + '_' + key;
+            const div = document.createElement('div');
+            div.className = 'form-check';
+            const input = document.createElement('input');
+            input.className = 'form-check-input';
+            input.type = 'radio';
+            input.name = 'q' + idx;
+            input.id = optId;
+            input.value = key;
+            const label = document.createElement('label');
+            label.className = 'form-check-label';
+            label.htmlFor = optId;
+            label.textContent = key + ') ' + options[key];
+            div.appendChild(input);
+            div.appendChild(label);
+            card.appendChild(div);
+          }
+          container.appendChild(card);
+        });
+      }
+
+      async function submitQuiz() {
+        const answers = {};
+        (QUIZ_DATA.questions || []).forEach((q, idx) => {
+          const selected = document.querySelector('input[name="q' + idx + '"]:checked');
+          answers[String(idx)] = selected ? selected.value : null;
+        });
+        try {
+          const res = await fetch('/submit-quiz', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              quiz_type: 'mock-exam',
+              domain: 'general',
+              questions: QUIZ_DATA.questions,
+              answers: answers
+            })
+          });
+          const data = await res.json();
+          const resultsDiv = document.getElementById('results');
+          if (data.error) {
+            resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
+            return;
+          }
+          let html = '<div class="card"><div class="card-body">';
+          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+          if (Array.isArray(data.performance_insights)) {
+            html += '<ul>';
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
+          }
+          html += '</div></div>';
+          resultsDiv.innerHTML = html;
+          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+        } catch (e) {
+          resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
+        }
+      }
+
+      document.getElementById('submitBtn').addEventListener('click', submitQuiz);
+      renderQuiz();
+    </script>
+    """)
+    content = page.substitute(num=num_questions, quiz_json=quiz_json)
+    return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
@@ -1385,5 +1494,6 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
