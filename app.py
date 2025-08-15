@@ -876,10 +876,85 @@ def debug_simple_quiz():
     
     return render_template('quiz.html', quiz_data=quiz_data, quiz_type='debug')
 
-# Static pages
-@app.route('/terms')
-def terms():
-    return render_template('terms.html')
+@app.route('/flashcards')
+@subscription_required
+def flashcards():
+    try:
+        topic = request.args.get('topic', 'CPP core domains')
+        difficulty = request.args.get('difficulty', 'medium')
+        if len(topic) > 100:
+            topic = topic[:100]
+
+        fallback_cards = [
+            {"front": "Risk Assessment", "back": "Systematic process to identify, analyze, and evaluate potential threats and vulnerabilities.", "category": "definitions"},
+            {"front": "CPTED", "back": "Crime Prevention Through Environmental Design uses physical environment design to reduce crime opportunities.", "category": "concepts"},
+            {"front": "Defense in Depth", "back": "Multiple layers of controls so if one fails others continue to provide protection.", "category": "concepts"},
+            {"front": "Least Privilege", "back": "Grant only the minimum access rights needed to perform job functions.", "category": "definitions"}
+        ]
+        
+        flashcard_data = {
+            "topic": topic,
+            "difficulty": difficulty,
+            "total_cards": len(fallback_cards),
+            "cards": fallback_cards
+        }
+
+        log_activity(
+            session['user_id'],
+            'flashcards_viewed',
+            f'Topic: {topic}, Cards: {len(flashcard_data.get("cards", []))}'
+        )
+
+        return render_template('flashcards.html', flashcard_data=flashcard_data, cpp_domains=CPP_DOMAINS)
+
+    except Exception as e:
+        print(f"Flashcards error: {e}")
+        flash('Error loading flashcards. Please try again.', 'danger')
+        return redirect(url_for('dashboard'))
+
+@app.route('/progress')
+@login_required
+def progress():
+    try:
+        user = User.query.get(session['user_id'])
+        if not user:
+            return redirect(url_for('login'))
+
+        try:
+            activities = ActivityLog.query.filter_by(user_id=user.id).order_by(
+                ActivityLog.timestamp.desc()
+            ).limit(50).all()
+        except Exception as e:
+            print(f"Error fetching activities: {e}")
+            activities = []
+
+        try:
+            quiz_results = QuizResult.query.filter_by(user_id=user.id).order_by(
+                QuizResult.completed_at.desc()
+            ).all()
+        except Exception as e:
+            print(f"Error fetching quiz results: {e}")
+            quiz_results = []
+
+        total_sessions = len([a for a in activities if 'study' in a.activity.lower()])
+        total_quizzes = len(quiz_results)
+        valid_scores = [q.score for q in quiz_results if q.score is not None]
+        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
+
+        return render_template(
+            'progress.html',
+            user=user,
+            activities=activities,
+            quiz_results=quiz_results,
+            total_sessions=total_sessions,
+            total_quizzes=total_quizzes,
+            avg_score=round(avg_score, 1)
+        )
+
+    except Exception as e:
+        print(f"Progress page error: {e}")
+        flash('Error loading progress page. Please try again.', 'danger')
+        return redirect(url_for('dashboard'))
 
 @app.route('/privacy')
 def privacy():
@@ -920,6 +995,54 @@ def forbidden_error(error):
         return '<h1>403 - Access Forbidden</h1><p><a href="/">Return Home</a></p>', 403
 
 # Context processors
+@app.context_processor
+def inject_datetime_utils():
+    def format_datetime(dt, format_type='default'):
+        """Format datetime for templates"""
+        if not dt:
+            return 'Never'
+        
+        if isinstance(dt, str):
+            try:
+                dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                try:
+                    dt = datetime.strptime(dt, '%Y-%m-%dT%H:%M:%S.%f')
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        return dt
+        
+        if not isinstance(dt, datetime):
+            return str(dt)
+        
+        if format_type == 'time_ago':
+            now = datetime.utcnow()
+            diff = now - dt
+            
+            if diff.days > 0:
+                return f"{diff.days} day{'s' if diff.days != 1 else ''} ago"
+            elif diff.seconds > 3600:
+                hours = diff.seconds // 3600
+                return f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif diff.seconds > 60:
+                minutes = diff.seconds // 60
+                return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                return "Just now"
+        elif format_type == 'date':
+            return dt.strftime('%Y-%m-%d')
+        elif format_type == 'datetime':
+            return dt.strftime('%Y-%m-%d %H:%M')
+        else:
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    return {
+        'now': datetime.utcnow(),
+        'format_datetime': format_datetime
+    }
+
 @app.context_processor
 def inject_quiz_types():
     return {'quiz_types': QUIZ_TYPES, 'cpp_domains': CPP_DOMAINS}
