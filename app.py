@@ -1270,7 +1270,7 @@ def submit_quiz():
         quiz_type = data.get('quiz_type')
         answers = data.get('answers', {})
         questions = data.get('questions', [])
-        domain_param = data.get('domain', 'general')
+        domain = data.get('domain', 'general')
 
         if not quiz_type or not questions:
             return jsonify({'error': 'Invalid quiz data'}), 400
@@ -1285,48 +1285,26 @@ def submit_quiz():
         correct_count = 0
         total = len(questions)
 
-        # Per-domain tally for feedback
-        per_domain = {}  # {domain: {'correct': x, 'total': y}}
-
+        detailed_results = []
         for i, q in enumerate(questions):
-            user_answer = answers.get(str(i))
-            is_correct = bool(user_answer and user_answer == q.get('correct'))
-
+            user_letter = answers.get(str(i))
+            correct_letter = q.get('correct')
+            options = q.get('options', {}) or {}
+            is_correct = (user_letter == correct_letter)
             if is_correct:
                 correct_count += 1
 
-            # Derive domain/topic per question, fallback to overall param
-            q_domain = (q.get('domain') or domain_param or 'general')
-            q_topic = q.get('topic')  # optional; many of our fallback questions don't have it
-
-            # Tally for feedback
-            if q_domain not in per_domain:
-                per_domain[q_domain] = {'correct': 0, 'total': 0}
-            per_domain[q_domain]['total'] += 1
-            if is_correct:
-                per_domain[q_domain]['correct'] += 1
-
-            # Record event + update progress
-            source = 'mock' if quiz_type == 'mock-exam' else 'quiz'
-            try:
-                record_question_event(
-                    user_id=session['user_id'],
-                    question_obj=q,
-                    domain=q_domain,
-                    topic=q_topic,
-                    is_correct=is_correct,
-                    response_time_s=None,
-                    source=source
-                )
-                update_user_progress_on_answer(
-                    user_id=session['user_id'],
-                    domain=q_domain,
-                    topic=q_topic,
-                    is_correct=is_correct
-                )
-            except Exception as e:
-                # Do not fail submission if tracking fails
-                print(f"tracking error (ignored): {e}")
+            detailed_results.append({
+                'index': i + 1,
+                'question': q.get('question', ''),
+                'correct_letter': correct_letter,
+                'correct_text': options.get(correct_letter, ''),
+                'user_letter': user_letter,
+                'user_text': options.get(user_letter, '') if user_letter else None,
+                'explanation': q.get('explanation', ''),
+                'is_correct': bool(is_correct),
+                'domain': q.get('domain', 'general')
+            })
 
         score = (correct_count / total) * 100 if total else 0.0
 
@@ -1334,7 +1312,7 @@ def submit_quiz():
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
-            domain=domain_param,
+            domain=domain,
             questions=json.dumps(questions),
             answers=json.dumps(answers),
             score=score,
@@ -1354,13 +1332,13 @@ def submit_quiz():
             'score': score,
             'date': datetime.utcnow().isoformat(),
             'type': quiz_type,
-            'domain': domain_param,
+            'domain': domain,
             'time_taken': time_taken
         })
         user.quiz_scores = json.dumps(scores[-50:])
         db.session.commit()
 
-        # Insights
+        # Simple insights
         insights = []
         if score >= 90:
             insights.append("Excellent performance. You're well-prepared for this topic.")
@@ -1370,7 +1348,6 @@ def submit_quiz():
             insights.append("Fair performance. Focus on the areas you missed.")
         else:
             insights.append("Consider more study time in this area before the exam.")
-
         if time_taken > 0 and total > 0:
             avg = time_taken / total
             if avg < 1:
@@ -1378,19 +1355,8 @@ def submit_quiz():
             elif avg > 3:
                 insights.append("Consider practicing to improve your speed.")
 
-        # Domain-specific guidance
-        try:
-            for dkey, tallies in per_domain.items():
-                if tallies['total'] >= 3:  # only if we have a bit of signal
-                    pct = (tallies['correct'] / tallies['total']) * 100.0
-                    if pct < 70.0:
-                        # Use friendly name if we know it
-                        dname = CPP_DOMAINS.get(dkey, {}).get('name', dkey)
-                        insights.append(f"Focus more on {dname} (recent score ~{pct:.0f}%).")
-        except Exception as e:
-            print(f"insight generation error (ignored): {e}")
-
-        log_activity(session['user_id'], 'quiz_completed', f'{quiz_type}: {correct_count}/{total} in {time_taken} min')
+        log_activity(session['user_id'], 'quiz_completed',
+                     f'{quiz_type}: {correct_count}/{total} in {time_taken} min')
 
         return jsonify({
             'success': True,
@@ -1398,12 +1364,14 @@ def submit_quiz():
             'correct': correct_count,
             'total': total,
             'time_taken': time_taken,
-            'performance_insights': insights
+            'performance_insights': insights,
+            'results': detailed_results  # <-- NEW: per-question review payload
         })
     except Exception as e:
         print(f"Submit quiz error: {e}")
         db.session.rollback()
         return jsonify({'error': 'Error processing quiz results.'}), 500
+
 
 # ----------------------------- Subscription & Stripe --------------------------
 @app.route('/subscribe')
@@ -1706,3 +1674,4 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
