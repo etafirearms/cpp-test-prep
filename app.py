@@ -2354,10 +2354,11 @@ def debug_simple_quiz_test():
 @app.route('/test-debug')
 def test_debug():
     """Simple test route to verify debug routes work"""
-    return """
+    current_time = datetime.utcnow()
+    return f"""
     <h1>Debug Route Test</h1>
     <p>If you can see this, debug routes are working!</p>
-    <p>Current time: """ + str(datetime.utcnow()) + """</p>
+    <p>Current time: {current_time}</p>
     <a href="/dashboard">Back to Dashboard</a>
     """
 
@@ -2370,11 +2371,13 @@ def debug_quiz_generation_test():
         quiz_data = generate_enhanced_quiz('practice', None, 'medium')
         
         if quiz_data:
+            questions_count = len(quiz_data.get('questions', []))
+            first_question = quiz_data.get('questions', [{}])[0].get('question', 'No question') if quiz_data.get('questions') else 'No questions'
             return f"""
             <h1>Quiz Generation: SUCCESS</h1>
             <p>Title: {quiz_data.get('title')}</p>
-            <p>Questions: {len(quiz_data.get('questions', []))}</p>
-            <p>First question: {quiz_data.get('questions', [{}])[0].get('question', 'No question') if quiz_data.get('questions') else 'No questions'}</p>
+            <p>Questions: {questions_count}</p>
+            <p>First question: {first_question}</p>
             <a href="/dashboard">Back to Dashboard</a>
             """
         else:
