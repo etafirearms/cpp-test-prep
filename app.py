@@ -2351,9 +2351,58 @@ def debug_simple_quiz_test():
         return f"<h1>Simple Quiz Test Failed</h1><p>Error: {str(e)}</p><a href='/dashboard'>Back</a>"
 
 # Add this debug route after the other debug routes
-@app.route('/terms')
-def terms():
-    return render_template('terms.html')
+@app.route('/test-debug')
+def test_debug():
+    """Simple test route to verify debug routes work"""
+    return """
+    <h1>Debug Route Test</h1>
+    <p>If you can see this, debug routes are working!</p>
+    <p>Current time: """ + str(datetime.utcnow()) + """</p>
+    <a href="/dashboard">Back to Dashboard</a>
+    """
+
+@app.route('/debug/quiz-generation-test')
+@login_required
+def debug_quiz_generation_test():
+    """Test quiz generation directly"""
+    try:
+        print("=== TESTING QUIZ GENERATION ===")
+        quiz_data = generate_enhanced_quiz('practice', None, 'medium')
+        
+        if quiz_data:
+            return f"""
+            <h1>Quiz Generation: SUCCESS</h1>
+            <p>Title: {quiz_data.get('title')}</p>
+            <p>Questions: {len(quiz_data.get('questions', []))}</p>
+            <p>First question: {quiz_data.get('questions', [{}])[0].get('question', 'No question') if quiz_data.get('questions') else 'No questions'}</p>
+            <a href="/dashboard">Back to Dashboard</a>
+            """
+        else:
+            return "<h1>Quiz Generation: FAILED - No data returned</h1><a href='/dashboard'>Back</a>"
+    except Exception as e:
+        return f"<h1>Quiz Generation: ERROR</h1><p>{str(e)}</p><a href='/dashboard'>Back</a>"
+
+@app.route('/debug/simple-quiz')
+@login_required  
+def debug_simple_quiz():
+    """Test quiz template with simple data"""
+    quiz_data = {
+        "title": "Debug Test Quiz",
+        "quiz_type": "debug",
+        "domain": "general", 
+        "difficulty": "easy",
+        "questions": [
+            {
+                "question": "What is 1 + 1?",
+                "options": {"A": "1", "B": "2", "C": "3", "D": "4"},
+                "correct": "B",
+                "explanation": "1 + 1 = 2",
+                "domain": "general"
+            }
+        ]
+    }
+    
+    return render_template('quiz.html', quiz_data=quiz_data, quiz_type='debug')
 
 @app.route('/privacy')
 def privacy():
