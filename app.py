@@ -656,6 +656,7 @@ def dashboard():
     if user.subscription_end_date:
         days_left = max(0, (user.subscription_end_date - datetime.utcnow()).days)
 
+    from string import Template
     tmpl = Template("""
     <div class="row">
       <div class="col-12"><h1>Welcome back, $first_name!</h1></div>
@@ -678,35 +679,49 @@ def dashboard():
             </div>
           </div>
         </div>
-        <div class="row mt-4">
-          <div class="col-md-4">
+
+        <div class="row mt-4 g-3">
+          <div class="col-md-3">
             <div class="card h-100">
-              <div class="card-body text-center">
-                <h5>🎯 Take Quiz</h5>
-                <p>Practice with curated questions</p>
-                <a href="/quiz-selector" class="btn btn-primary">Start Quiz</a>
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">🤖 Study with AI Tutor</h5>
+                <p class="text-muted flex-grow-1">Ask questions and get explanations.</p>
+                <a href="/study" class="btn btn-primary mt-auto">Open AI Tutor</a>
               </div>
             </div>
           </div>
-          <div class="col-md-4">
+
+          <div class="col-md-3">
             <div class="card h-100">
-              <div class="card-body text-center">
-                <h5>🤖 AI Tutor</h5>
-                <p>Get personalized study help</p>
-                <a href="/study" class="btn btn-success">Start Studying</a>
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">🃏 Flashcards</h5>
+                <p class="text-muted flex-grow-1">Quick recall on key CPP topics.</p>
+                <a href="/flashcards" class="btn btn-secondary mt-auto">Open Flashcards</a>
               </div>
             </div>
           </div>
-          <div class="col-md-4">
+
+          <div class="col-md-3">
             <div class="card h-100">
-              <div class="card-body text-center">
-                <h5>💳 Subscription</h5>
-                <p>Activate or manage your plan</p>
-                <a href="/subscribe" class="btn btn-warning">View Plans</a>
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">📝 Quizzes</h5>
+                <p class="text-muted flex-grow-1">Domain-specific & practice quizzes.</p>
+                <a href="/quiz-selector" class="btn btn-success mt-auto">Choose a Quiz</a>
+              </div>
+            </div>
+          </div>
+
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">🏁 Mock Exam</h5>
+                <p class="text-muted flex-grow-1">Up to 100 questions in one go.</p>
+                <a href="/mock-exam" class="btn btn-warning mt-auto">Start Mock Exam</a>
               </div>
             </div>
           </div>
         </div>
+
       </div>
     </div>
     """)
@@ -1351,3 +1366,4 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
