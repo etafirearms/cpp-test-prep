@@ -10,7 +10,8 @@ import os
 import requests
 import stripe
 import time
-import hashlib  # for question hashing
+import random
+import hashlib
 
 # For SQL text/inspection helpers
 from sqlalchemy import text, inspect
@@ -59,6 +60,17 @@ STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
 last_api_call = None
 
 # -----------------------------------------------------------------------------
+# Cache-Buster (avoid stale inline JS/HTML after deploy)
+# -----------------------------------------------------------------------------
+@app.after_request
+def add_no_cache_headers(response):
+    if response.mimetype in ('text/html', 'application/json'):
+        response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, max-age=0, private'
+        response.headers['Pragma'] = 'no-cache'
+        response.headers['Expires'] = '0'
+    return response
+
+# -----------------------------------------------------------------------------
 # Quiz Types & Domains
 # -----------------------------------------------------------------------------
 QUIZ_TYPES = {
@@ -78,6 +90,77 @@ CPP_DOMAINS = {
     'information-security': {'name': 'Information Security', 'topics': ['Data Protection', 'Cybersecurity']},
     'crisis-management': {'name': 'Crisis Management', 'topics': ['Business Continuity', 'Emergency Response']}
 }
+
+# -----------------------------------------------------------------------------
+# Base Question Bank (single-source of truth for fallback + flashcards)
+# -----------------------------------------------------------------------------
+BASE_QUESTION_BANK = [
+    {
+        "question": "What is the primary purpose of a security risk assessment?",
+        "options": {
+            "A": "Identify all threats",
+            "B": "Determine cost-effective mitigation",
+            "C": "Eliminate all risks",
+            "D": "Satisfy compliance"
+        },
+        "correct": "B",
+        "explanation": "Risk assessments help determine cost-effective mitigation strategies.",
+        "domain": "security-principles",
+        "topic": "Risk Management"
+    },
+    {
+        "question": "In CPTED, natural surveillance primarily accomplishes what?",
+        "options": {
+            "A": "Reduces guard costs",
+            "B": "Increases observation likelihood",
+            "C": "Eliminates cameras",
+            "D": "Provides legal protection"
+        },
+        "correct": "B",
+        "explanation": "Natural surveillance increases the likelihood that criminal activity will be observed.",
+        "domain": "physical-security",
+        "topic": "CPTED"
+    },
+    {
+        "question": "Which concept means applying multiple security layers so if one fails others still protect?",
+        "options": {
+            "A": "Security by Obscurity",
+            "B": "Defense in Depth",
+            "C": "Zero Trust",
+            "D": "Least Privilege"
+        },
+        "correct": "B",
+        "explanation": "Defense in Depth uses layered controls to maintain protection despite single-point failures.",
+        "domain": "security-principles",
+        "topic": "Security Governance"
+    },
+    {
+        "question": "In incident response, what is usually the FIRST priority?",
+        "options": {
+            "A": "Notify law enforcement",
+            "B": "Contain the incident",
+            "C": "Eradicate malware",
+            "D": "Perform lessons learned"
+        },
+        "correct": "B",
+        "explanation": "Containment prevents further damage before eradication and recovery.",
+        "domain": "information-security",
+        "topic": "Cybersecurity"
+    },
+    {
+        "question": "Background investigations primarily support which objective?",
+        "options": {
+            "A": "Regulatory compliance only",
+            "B": "Improving marketing outcomes",
+            "C": "Personnel Security risk reduction",
+            "D": "Disaster response coordination"
+        },
+        "correct": "C",
+        "explanation": "They help reduce personnel security risks such as insider threat.",
+        "domain": "personnel-security",
+        "topic": "Background Screening"
+    }
+]
 
 # -----------------------------------------------------------------------------
 # Database Models
@@ -232,27 +315,28 @@ def login_required(f):
 def subscription_required(f):
     @wraps(f)
     def inner(*args, **kwargs):
-        if 'user_id' not in session:
-            return redirect(url_for('login'))
-        try:
-            user = User.query.get(session['user_id'])
-            if not user:
-                session.clear()
-                return redirect(url_for('login'))
+        if 'user_id' in session:
+            try:
+                user = User.query.get(session['user_id'])
+                if not user:
+                    session.clear()
+                    return redirect(url_for('login'))
 
-            if user.subscription_status == 'expired':
-                flash('Your subscription has expired. Please renew to continue.', 'danger')
-                return redirect(url_for('subscribe'))
-
-            if user.subscription_status == 'trial' and user.subscription_end_date:
-                if datetime.utcnow() > user.subscription_end_date:
-                    user.subscription_status = 'expired'
-                    db.session.commit()
-                    flash('Your trial has expired. Please subscribe to continue.', 'warning')
+                if user.subscription_status == 'expired':
+                    flash('Your subscription has expired. Please renew to continue.', 'danger')
                     return redirect(url_for('subscribe'))
-        except Exception as e:
-            print(f"Subscription check error: {e}")
-            flash('Authentication error. Please log in again.', 'danger')
+
+                if user.subscription_status == 'trial' and user.subscription_end_date:
+                    if datetime.utcnow() > user.subscription_end_date:
+                        user.subscription_status = 'expired'
+                        db.session.commit()
+                        flash('Your trial has expired. Please subscribe to continue.', 'warning')
+                        return redirect(url_for('subscribe'))
+            except Exception as e:
+                print(f"Subscription check error: {e}")
+                flash('Authentication error. Please log in again.', 'danger')
+                return redirect(url_for('login'))
+        else:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return inner
@@ -267,7 +351,10 @@ def log_activity(user_id, activity, details=None):
 
 # ---------- Tracking helpers (hash, record event, update progress, seen) ----------
 def _hash_question_payload(question_obj: dict) -> str:
-    """Stable SHA256 hash for a question so we can detect repeats (text + sorted options)."""
+    """
+    Stable SHA256 hash for a question so we can detect repeats.
+    Uses question text + sorted options.
+    """
     q_text = (question_obj or {}).get('question', '') or ''
     opts = (question_obj or {}).get('options', {}) or {}
     parts = [q_text.strip()]
@@ -285,7 +372,6 @@ def record_question_event(
     response_time_s: int = None,
     source: str = 'quiz'
 ) -> None:
-    """Insert one QuestionEvent row safely."""
     try:
         qhash = _hash_question_payload(question_obj)
         evt = QuestionEvent(
@@ -304,12 +390,6 @@ def record_question_event(
         db.session.rollback()
 
 def _mastery_from_stats(avg: float, streak: int) -> str:
-    """
-    Mastery banding:
-    - mastered: avg >= 90 and streak >= 3
-    - good:     avg >= 75 and streak >= 2
-    - needs_practice: otherwise
-    """
     if (avg or 0) >= 90 and (streak or 0) >= 3:
         return 'mastered'
     if (avg or 0) >= 75 and (streak or 0) >= 2:
@@ -322,11 +402,9 @@ def update_user_progress_on_answer(
     topic: str,
     is_correct: bool
 ) -> None:
-    """Lightweight rolling update for UserProgress. Call this per answer."""
     try:
         if not domain:
             return
-
         row = UserProgress.query.filter_by(user_id=user_id, domain=domain, topic=topic).first()
         if not row:
             row = UserProgress(
@@ -346,7 +424,6 @@ def update_user_progress_on_answer(
 
         row.average_score = ((row.average_score or 0.0) * old_count + earned) / new_count
         row.question_count = new_count
-
         if earned >= 75.0:
             row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1
         else:
@@ -354,14 +431,12 @@ def update_user_progress_on_answer(
 
         row.mastery_level = _mastery_from_stats(row.average_score, row.consecutive_good_scores)
         row.last_updated = datetime.utcnow()
-
         db.session.commit()
     except Exception as e:
         print(f"update_user_progress_on_answer error: {e}")
         db.session.rollback()
 
 def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_days: int = 30) -> set:
-    """Return a set of question_hash values the user has seen recently."""
     try:
         cutoff = datetime.utcnow() - timedelta(days=window_days)
         q = QuestionEvent.query.filter(
@@ -376,13 +451,13 @@ def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_
     except Exception as e:
         print(f"get_seen_hashes error: {e}")
         return set()
-# ---------- End tracking helpers ----------
 
+# -----------------------------------------------------------------------------
+# AI Chat Wrapper
+# -----------------------------------------------------------------------------
 def chat_with_ai(messages, user_id=None):
-    """Thin wrapper to OpenAI Chat Completions with basic rate limiting and robust error handling."""
     global last_api_call
     try:
-        # Friendly rate limit to avoid hammering API
         if last_api_call:
             delta = datetime.utcnow() - last_api_call
             if delta.total_seconds() < 2:
@@ -429,73 +504,18 @@ def chat_with_ai(messages, user_id=None):
         print(f"AI chat error: {e}")
         return "I encountered a technical issue. Please try again."
 
+# -----------------------------------------------------------------------------
+# Fallback Quiz Generator (uses base bank)
+# -----------------------------------------------------------------------------
 def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
-    """Small static bank to guarantee quiz rendering even if AI calls are disabled."""
-    base_questions = [
-        {
-            "question": "What is the primary purpose of a security risk assessment?",
-            "options": {
-                "A": "Identify all threats",
-                "B": "Determine cost-effective mitigation",
-                "C": "Eliminate all risks",
-                "D": "Satisfy compliance"
-            },
-            "correct": "B",
-            "explanation": "Risk assessments help determine cost-effective mitigation strategies.",
-            "domain": "security-principles"
-        },
-        {
-            "question": "In CPTED, natural surveillance primarily accomplishes what?",
-            "options": {
-                "A": "Reduces guard costs",
-                "B": "Increases observation likelihood",
-                "C": "Eliminates cameras",
-                "D": "Provides legal protection"
-            },
-            "correct": "B",
-            "explanation": "Natural surveillance increases the likelihood that criminal activity will be observed.",
-            "domain": "physical-security"
-        },
-        {
-            "question": "Which concept means applying multiple security layers so if one fails others still protect?",
-            "options": {
-                "A": "Security by Obscurity",
-                "B": "Defense in Depth",
-                "C": "Zero Trust",
-                "D": "Least Privilege"
-            },
-            "correct": "B",
-            "explanation": "Defense in Depth uses layered controls to maintain protection despite single-point failures.",
-            "domain": "security-principles"
-        },
-        {
-            "question": "In incident response, what is usually the FIRST priority?",
-            "options": {
-                "A": "Notify law enforcement",
-                "B": "Contain the incident",
-                "C": "Eradicate malware",
-                "D": "Perform lessons learned"
-            },
-            "correct": "B",
-            "explanation": "Containment prevents further damage before eradication and recovery.",
-            "domain": "information-security"
-        },
-        {
-            "question": "Background investigations primarily support which objective?",
-            "options": {
-                "A": "Regulatory compliance only",
-                "B": "Improving marketing outcomes",
-                "C": "Personnel Security risk reduction",
-                "D": "Disaster response coordination"
-            },
-            "correct": "C",
-            "explanation": "They help reduce personnel security risks such as insider threat.",
-            "domain": "personnel-security"
-        }
-    ]
+    # Filter by domain if provided, else use full bank
+    pool = [q for q in BASE_QUESTION_BANK if (not domain or q.get('domain') == domain)]
+    if not pool:
+        pool = BASE_QUESTION_BANK[:]
+    # Repeat/round-robin to reach desired length
     questions = []
     while len(questions) < num_questions:
-        for q in base_questions:
+        for q in pool:
             if len(questions) < num_questions:
                 questions.append(q.copy())
     return {
@@ -511,7 +531,7 @@ def generate_quiz(quiz_type, domain=None, difficulty='medium'):
     return generate_fallback_quiz(quiz_type, domain, difficulty, config['questions'])
 
 # -----------------------------------------------------------------------------
-# HTML Base Template (no f-strings; safe for braces via string.Template)
+# HTML Base Template
 # -----------------------------------------------------------------------------
 def render_base_template(title, content_html, user=None):
     disclaimer = """
@@ -646,7 +666,6 @@ def register():
             return redirect(url_for('login'))
 
         try:
-            # Create Stripe customer
             stripe_customer = stripe.Customer.create(
                 email=email,
                 name=f"{first_name} {last_name}",
@@ -679,7 +698,6 @@ def register():
             db.session.rollback()
             flash('Registration error. Please try again.', 'danger')
 
-    # GET form
     content = """
     <div class="row justify-content-center">
       <div class="col-md-6">
@@ -884,17 +902,13 @@ def dashboard():
 @subscription_required
 def study():
     user = User.query.get(session['user_id'])
-    # Start study timer
     session['study_start_time'] = datetime.utcnow().timestamp()
 
     content = """
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">AI Tutor</h4>
-            <button class="btn btn-outline-secondary btn-sm" onclick="endSession(true)">End Session</button>
-          </div>
+          <div class="card-header"><h4 class="mb-0">AI Tutor</h4></div>
           <div class="card-body">
             <div id="chat" style="height: 360px; overflow-y: auto; border: 1px solid #eee; padding: 10px; margin-bottom: 12px;"></div>
             <div class="input-group">
@@ -940,37 +954,6 @@ def study():
 
       sendBtn.addEventListener('click', send);
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
-
-      // --- Automatic end-of-session capture ---
-      async function endSession(manual=false) {
-        try {
-          const res = await fetch('/end-study-session', { method: 'POST' });
-          if (manual) {
-            const data = await res.json();
-            alert(data.success ? ('Session saved (' + data.duration + ' min).') : 'No active session to end.');
-          }
-        } catch(e) { console.log('End session error:', e); }
-      }
-
-      // Try to record on tab close/navigation
-      window.addEventListener('beforeunload', function() {
-        try {
-          const blob = new Blob([], { type: 'application/x-www-form-urlencoded' });
-          navigator.sendBeacon('/end-study-session', blob);
-        } catch(e) {
-          fetch('/end-study-session', { method: 'POST', keepalive: true }).catch(()=>{});
-        }
-      });
-
-      // Also record when the tab becomes hidden (best-effort)
-      document.addEventListener('visibilitychange', function() {
-        if (document.visibilityState === 'hidden') {
-          try {
-            const blob = new Blob([], { type: 'application/x-www-form-urlencoded' });
-            navigator.sendBeacon('/end-study-session', blob);
-          } catch(e) {}
-        }
-      });
     </script>
     """
     return render_base_template("Study", content, user=user)
@@ -986,7 +969,6 @@ def chat():
 
         user_id = session['user_id']
 
-        # Load or create chat history
         ch = ChatHistory.query.filter_by(user_id=user_id).first()
         if not ch:
             ch = ChatHistory(user_id=user_id, messages='[]')
@@ -998,7 +980,6 @@ def chat():
         except json.JSONDecodeError:
             messages = []
 
-        # Trim history for safety
         if len(messages) > 20:
             messages = messages[-20:]
 
@@ -1018,32 +999,251 @@ def chat():
         print(f"Chat error: {e}")
         return jsonify({'error': 'Sorry, I encountered an error processing your message.'}), 500
 
+# --------------------------------- Flashcards ---------------------------------
 @app.route('/flashcards')
 @subscription_required
 def flashcards_page():
     user = User.query.get(session['user_id'])
-    content = """
+    # Build a simple domains->topics map for the client
+    dom_map = {k: {"name": v["name"], "topics": v.get("topics", [])} for k, v in CPP_DOMAINS.items()}
+    dom_json = json.dumps(dom_map)
+
+    page = Template("""
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card">
-          <div class="card-body">
-            <h3 class="mb-3">Flashcards</h3>
-            <p class="text-muted">Flashcards are coming next. Tell me your preferred format (topics, counts, spaced repetition) and I’ll wire it up.</p>
-            <a href="/dashboard" class="btn btn-outline-secondary">Back to Dashboard</a>
+          <div class="card-header d-flex align-items-center justify-content-between">
+            <h4 class="mb-0">Flashcards</h4>
+            <div class="d-flex gap-2">
+              <select id="domainSel" class="form-select form-select-sm" style="width:auto;">
+                <option value="">All Domains</option>
+              </select>
+              <select id="topicSel" class="form-select form-select-sm" style="width:auto;">
+                <option value="">All Topics</option>
+              </select>
+            </div>
           </div>
+          <div class="card-body">
+            <div id="cardBox" class="p-4 border rounded" style="min-height: 140px;">
+              <div id="qText" class="fs-5 fw-semibold">Press "Next Card" to begin.</div>
+              <div id="aText" class="mt-3 text-muted" style="display:none;"></div>
+            </div>
+
+            <div class="mt-3 d-flex gap-2">
+              <button id="showBtn" class="btn btn-outline-secondary">Show Answer</button>
+              <button id="knowBtn" class="btn btn-success" disabled>I knew this</button>
+              <button id="dontBtn" class="btn btn-danger" disabled>I didn’t know</button>
+              <button id="nextBtn" class="btn btn-primary ms-auto">Next Card</button>
+            </div>
+            <div class="mt-2" id="flashMsg"></div>
+          </div>
+        </div>
+        <div class="alert alert-info mt-3">
+          Flashcards are unlimited and avoid recent repeats. Use the dropdowns to study by domain/topic or leave on “All”.
         </div>
       </div>
     </div>
-    """
+
+    <script>
+      const DOMAINS = $dom_json;
+      const domainSel = document.getElementById('domainSel');
+      const topicSel = document.getElementById('topicSel');
+      const qEl = document.getElementById('qText');
+      const aEl = document.getElementById('aText');
+      const showBtn = document.getElementById('showBtn');
+      const knowBtn = document.getElementById('knowBtn');
+      const dontBtn = document.getElementById('dontBtn');
+      const nextBtn = document.getElementById('nextBtn');
+      const msg = document.getElementById('flashMsg');
+
+      let currentCard = null;
+
+      // Populate domain select
+      for (const key in DOMAINS) {
+        const opt = document.createElement('option');
+        opt.value = key;
+        opt.textContent = DOMAINS[key].name;
+        domainSel.appendChild(opt);
+      }
+
+      // Update topic options when domain changes
+      function refreshTopics() {
+        const d = domainSel.value;
+        topicSel.innerHTML = '';
+        const any = document.createElement('option');
+        any.value = '';
+        any.textContent = 'All Topics';
+        topicSel.appendChild(any);
+        if (d && DOMAINS[d]) {
+          (DOMAINS[d].topics || []).forEach(t => {
+            const o = document.createElement('option');
+            o.value = t;
+            o.textContent = t;
+            topicSel.appendChild(o);
+          });
+        }
+      }
+      domainSel.addEventListener('change', refreshTopics);
+      refreshTopics();
+
+      function setButtons(state) {
+        if (state === 'fresh') {
+          showBtn.disabled = false;
+          knowBtn.disabled = true;
+          dontBtn.disabled = true;
+        } else if (state === 'revealed') {
+          showBtn.disabled = true;
+          knowBtn.disabled = false;
+          dontBtn.disabled = false;
+        } else if (state === 'loading') {
+          showBtn.disabled = true;
+          knowBtn.disabled = true;
+          dontBtn.disabled = true;
+        }
+      }
+
+      async function nextCard() {
+        setButtons('loading');
+        qEl.textContent = 'Loading...';
+        aEl.style.display = 'none';
+        aEl.textContent = '';
+        msg.innerHTML = '';
+        try {
+          const res = await fetch('/api/next-flashcard', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
+              domain: domainSel.value || null,
+              topic: topicSel.value || null
+            })
+          });
+          const data = await res.json();
+          if (data && data.card) {
+            currentCard = data.card;
+            qEl.textContent = currentCard.question;
+            aEl.textContent = currentCard.answer_text || '(no explanation provided)';
+            aEl.style.display = 'none';
+            setButtons('fresh');
+            if (data.restarted) {
+              msg.innerHTML = '<div class="text-muted small">No unseen cards left for this filter — restarting deck.</div>';
+            }
+          } else {
+            qEl.textContent = 'No card available.';
+            setButtons('fresh');
+          }
+        } catch (e) {
+            qEl.textContent = 'Error loading card.';
+            setButtons('fresh');
+        }
+      }
+
+      function reveal() {
+        aEl.style.display = '';
+        setButtons('revealed');
+      }
+
+      async function sendFeedback(knew) {
+        if (!currentCard) return;
+        try {
+          await fetch('/api/flashcard-feedback', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({card: currentCard, knew: !!knew})
+          });
+        } catch (_) {}
+        nextCard();
+      }
+
+      showBtn.addEventListener('click', reveal);
+      knowBtn.addEventListener('click', () => sendFeedback(true));
+      dontBtn.addEventListener('click', () => sendFeedback(false));
+      nextBtn.addEventListener('click', nextCard);
+    </script>
+    """)
+    content = page.substitute(dom_json=dom_json)
     return render_base_template("Flashcards", content, user=user)
+
+@app.post('/api/next-flashcard')
+@subscription_required
+def api_next_flashcard():
+    try:
+        payload = request.get_json() or {}
+        domain = payload.get('domain') or None
+        topic = payload.get('topic') or None
+
+        # Filter base bank
+        pool = [q for q in BASE_QUESTION_BANK
+                if (not domain or q.get('domain') == domain)
+                and (not topic or q.get('topic') == topic)]
+        if not pool:
+            pool = BASE_QUESTION_BANK[:]
+
+        # Avoid repeats within last 30 days
+        seen = get_seen_hashes(session['user_id'], domain=domain, topic=topic, window_days=30)
+        unseen = [q for q in pool if _hash_question_payload(q) not in seen]
+
+        restarted = False
+        candidates = unseen if unseen else pool
+        if not unseen:
+            restarted = True  # deck exhausted for this filter
+
+        q = random.choice(candidates).copy()
+        # Build flashcard payload
+        card = {
+            "question": q.get("question", ""),
+            "answer_text": q.get("explanation", ""),
+            "domain": q.get("domain", None),
+            "topic": q.get("topic", None),
+            # include raw for hashing/feedback
+            "options": q.get("options", {}),
+            "correct": q.get("correct", None)
+        }
+        return jsonify({"card": card, "restarted": restarted})
+    except Exception as e:
+        print(f"/api/next-flashcard error: {e}")
+        return jsonify({"error": "Unable to get next card"}), 500
+
+@app.post('/api/flashcard-feedback')
+@subscription_required
+def api_flashcard_feedback():
+    try:
+        data = request.get_json() or {}
+        card = data.get('card') or {}
+        knew = bool(data.get('knew'))
+
+        # Reconstruct a question-like object for consistent hashing
+        q_like = {
+            "question": card.get("question", ""),
+            "options": card.get("options", {}) or {},
+        }
+        domain = card.get("domain")
+        topic = card.get("topic")
+
+        # Log event + update progress
+        record_question_event(
+            user_id=session['user_id'],
+            question_obj=q_like,
+            domain=domain,
+            topic=topic,
+            is_correct=knew,
+            source='flashcard'
+        )
+        update_user_progress_on_answer(
+            user_id=session['user_id'],
+            domain=domain or 'general',
+            topic=topic,
+            is_correct=knew
+        )
+        return jsonify({"success": True})
+    except Exception as e:
+        print(f"/api/flashcard-feedback error: {e}")
+        return jsonify({"error": "Unable to record feedback"}), 500
 
 # ------------------------------ Quizzes ---------------------------------------
 @app.route('/quiz-selector')
 @subscription_required
 def quiz_selector():
     user = User.query.get(session['user_id'])
-
-    # Build a simple selector
     items_html = []
     for key, meta in QUIZ_TYPES.items():
         items_html.append(
@@ -1074,7 +1274,6 @@ def quiz(quiz_type):
     domain = request.args.get('domain')
     difficulty = request.args.get('difficulty', 'medium')
 
-    # Start quiz timer
     session['quiz_start_time'] = datetime.utcnow().timestamp()
 
     quiz_data = generate_quiz(quiz_type, domain, difficulty)
@@ -1091,6 +1290,7 @@ def quiz(quiz_type):
           <div class="card-body" id="quizContainer"></div>
         </div>
         <div class="mt-4" id="results"></div>
+        <div class="mt-3" id="review"></div>
       </div>
     </div>
     <script>
@@ -1099,7 +1299,7 @@ def quiz(quiz_type):
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
+        QUIZ_DATA.questions.forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1129,39 +1329,25 @@ def quiz(quiz_type):
         });
       }
 
-      function renderReview(data) {
-        const resultsDiv = document.getElementById('results');
-        let html = '';
-        html += '<div class="card mb-3"><div class="card-body">';
-        html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-        html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
-        if (Array.isArray(data.performance_insights)) {
-          html += '<ul>';
-          data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-          html += '</ul>';
-        }
+      function buildReviewList(items) {
+        if (!Array.isArray(items) || !items.length) return '';
+        let html = '<div class="card"><div class="card-header"><strong>Review Answers</strong></div><div class="list-group list-group-flush">';
+        items.forEach(r => {
+          const status = r.is_correct ? '✅' : '❌';
+          const userAns = r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '(no answer)';
+          const correctAns = r.correct_letter ? (r.correct_letter + ') ' + (r.correct_text || '')) : '(n/a)';
+          html += '<div class="list-group-item">';
+          html += '<div class="fw-semibold">' + status + ' Q' + r.index + ': ' + r.question + '</div>';
+          html += '<div class="mt-1"><span class="badge bg-' + (r.is_correct ? 'success' : 'danger') + ' me-2">' + (r.is_correct ? 'Correct' : 'Incorrect') + '</span>';
+          html += '<span class="text-muted">Your answer:</span> ' + userAns + '</div>';
+          html += '<div><span class="text-muted">Correct answer:</span> ' + correctAns + '</div>';
+          if (r.explanation) {
+            html += '<div class="mt-1"><em>Explanation:</em> ' + r.explanation.replace(/</g,'&lt;') + '</div>';
+          }
+          html += '</div>';
+        });
         html += '</div></div>';
-
-        if (Array.isArray(data.results)) {
-          data.results.forEach(r => {
-            const cls = r.is_correct ? 'success' : 'danger';
-            html += '<div class="card mb-2 border-' + cls + '">';
-            html += '<div class="card-body">';
-            html += '<h6 class="mb-2">Q' + r.index + '. ' + r.question + '</h6>';
-            html += '<p class="mb-1"><strong>Your answer:</strong> ' +
-                    (r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '<em>no answer</em>') + '</p>';
-            html += '<p class="mb-1"><strong>Correct answer:</strong> ' +
-                    (r.correct_letter + ') ' + (r.correct_text || '')) + '</p>';
-            if (r.explanation) {
-              html += '<div class="mt-2 p-2 bg-light border rounded"><strong>Explanation:</strong> ' +
-                      r.explanation + '</div>';
-            }
-            html += '</div></div>';
-          });
-        }
-
-        resultsDiv.innerHTML = html;
-        window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+        return html;
       }
 
       async function submitQuiz() {
@@ -1170,7 +1356,6 @@ def quiz(quiz_type):
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
-        const resultsDiv = document.getElementById('results');
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1183,12 +1368,27 @@ def quiz(quiz_type):
             })
           });
           const data = await res.json();
+          const resultsDiv = document.getElementById('results');
+          const reviewDiv = document.getElementById('review');
           if (data.error) {
             resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
+            reviewDiv.innerHTML = '';
             return;
           }
-          renderReview(data);
+          let html = '<div class="card"><div class="card-body">';
+          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+          if (Array.isArray(data.performance_insights)) {
+            html += '<ul>';
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
+          }
+          html += '</div></div>';
+          resultsDiv.innerHTML = html;
+          reviewDiv.innerHTML = buildReviewList(data.results || []);
+          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
         } catch (e) {
+          const resultsDiv = document.getElementById('results');
           resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
       }
@@ -1203,14 +1403,12 @@ def quiz(quiz_type):
 @app.route('/mock-exam')
 @subscription_required
 def mock_exam():
-    # Allow ?count= up to 100
     try:
         requested = int(request.args.get('count', 100))
     except ValueError:
         requested = 100
-    num_questions = max(25, min(100, requested))  # sensible bounds
+    num_questions = max(25, min(100, requested))
 
-    # Reuse fallback generator directly so we can override count
     quiz_data = generate_fallback_quiz('mock-exam', domain=None, difficulty='medium', num_questions=num_questions)
     quiz_json = json.dumps(quiz_data)
 
@@ -1225,6 +1423,7 @@ def mock_exam():
           <div class="card-body" id="quizContainer"></div>
         </div>
         <div class="mt-4" id="results"></div>
+        <div class="mt-3" id="review"></div>
       </div>
     </div>
     <script>
@@ -1233,7 +1432,7 @@ def mock_exam():
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
+        QUIZ_DATA.questions.forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1263,39 +1462,25 @@ def mock_exam():
         });
       }
 
-      function renderReview(data) {
-        const resultsDiv = document.getElementById('results');
-        let html = '';
-        html += '<div class="card mb-3"><div class="card-body">';
-        html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-        html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
-        if (Array.isArray(data.performance_insights)) {
-          html += '<ul>';
-          data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-          html += '</ul>';
-        }
+      function buildReviewList(items) {
+        if (!Array.isArray(items) || !items.length) return '';
+        let html = '<div class="card"><div class="card-header"><strong>Review Answers</strong></div><div class="list-group list-group-flush">';
+        items.forEach(r => {
+          const status = r.is_correct ? '✅' : '❌';
+          const userAns = r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '(no answer)';
+          const correctAns = r.correct_letter ? (r.correct_letter + ') ' + (r.correct_text || '')) : '(n/a)';
+          html += '<div class="list-group-item">';
+          html += '<div class="fw-semibold">' + status + ' Q' + r.index + ': ' + r.question + '</div>';
+          html += '<div class="mt-1"><span class="badge bg-' + (r.is_correct ? 'success' : 'danger') + ' me-2">' + (r.is_correct ? 'Correct' : 'Incorrect') + '</span>';
+          html += '<span class="text-muted">Your answer:</span> ' + userAns + '</div>';
+          html += '<div><span class="text-muted">Correct answer:</span> ' + correctAns + '</div>';
+          if (r.explanation) {
+            html += '<div class="mt-1"><em>Explanation:</em> ' + r.explanation.replace(/</g,'&lt;') + '</div>';
+          }
+          html += '</div>';
+        });
         html += '</div></div>';
-
-        if (Array.isArray(data.results)) {
-          data.results.forEach(r => {
-            const cls = r.is_correct ? 'success' : 'danger';
-            html += '<div class="card mb-2 border-' + cls + '">';
-            html += '<div class="card-body">';
-            html += '<h6 class="mb-2">Q' + r.index + '. ' + r.question + '</h6>';
-            html += '<p class="mb-1"><strong>Your answer:</strong> ' +
-                    (r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '<em>no answer</em>') + '</p>';
-            html += '<p class="mb-1"><strong>Correct answer:</strong> ' +
-                    (r.correct_letter + ') ' + (r.correct_text || '')) + '</p>';
-            if (r.explanation) {
-              html += '<div class="mt-2 p-2 bg-light border rounded"><strong>Explanation:</strong> ' +
-                      r.explanation + '</div>';
-            }
-            html += '</div></div>';
-          });
-        }
-
-        resultsDiv.innerHTML = html;
-        window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+        return html;
       }
 
       async function submitQuiz() {
@@ -1304,7 +1489,6 @@ def mock_exam():
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
-        const resultsDiv = document.getElementById('results');
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1317,12 +1501,27 @@ def mock_exam():
             })
           });
           const data = await res.json();
+          const resultsDiv = document.getElementById('results');
+          const reviewDiv = document.getElementById('review');
           if (data.error) {
             resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
+            reviewDiv.innerHTML = '';
             return;
           }
-          renderReview(data);
+          let html = '<div class="card"><div class="card-body">';
+          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+          if (Array.isArray(data.performance_insights)) {
+            html += '<ul>';
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
+          }
+          html += '</div></div>';
+          resultsDiv.innerHTML = html;
+          reviewDiv.innerHTML = buildReviewList(data.results || []);
+          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
         } catch (e) {
+          const resultsDiv = document.getElementById('results');
           resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
       }
@@ -1334,7 +1533,7 @@ def mock_exam():
     content = page.substitute(num=num_questions, quiz_json=quiz_json)
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
-# ----------------- Submit quiz (records events, updates progress, returns review)
+# ----------------- Submit quiz (returns detailed results for review) ----------
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1367,23 +1566,19 @@ def submit_quiz():
             if is_correct:
                 correct_count += 1
 
-            # Use question-provided domain/topic when available; fall back to request domain
-            q_domain = q.get('domain') or domain or 'general'
-            q_topic = q.get('topic') if isinstance(q.get('topic'), str) else None
-
-            # Record per-question event and update progress
+            # Record per-question event + update progress
             record_question_event(
                 user_id=session['user_id'],
                 question_obj=q,
-                domain=q_domain,
-                topic=q_topic,
+                domain=q.get('domain') or domain,
+                topic=q.get('topic'),
                 is_correct=is_correct,
-                source=('mock' if quiz_type == 'mock-exam' else 'quiz')
+                source='mock' if quiz_type == 'mock-exam' else 'quiz'
             )
             update_user_progress_on_answer(
                 user_id=session['user_id'],
-                domain=q_domain,
-                topic=q_topic,
+                domain=q.get('domain') or domain,
+                topic=q.get('topic'),
                 is_correct=is_correct
             )
 
@@ -1396,12 +1591,12 @@ def submit_quiz():
                 'user_text': options.get(user_letter, '') if user_letter else None,
                 'explanation': q.get('explanation', ''),
                 'is_correct': bool(is_correct),
-                'domain': q_domain
+                'domain': q.get('domain', 'general')
             })
 
         score = (correct_count / total) * 100 if total else 0.0
 
-        # Save overall result
+        # Save result header row
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
@@ -1415,7 +1610,7 @@ def submit_quiz():
         db.session.add(qr)
         db.session.commit()
 
-        # Update user quiz score history (compact)
+        # Append to user's brief score history
         user = User.query.get(session['user_id'])
         try:
             scores = json.loads(user.quiz_scores) if user.quiz_scores else []
@@ -1431,7 +1626,7 @@ def submit_quiz():
         user.quiz_scores = json.dumps(scores[-50:])
         db.session.commit()
 
-        # Simple insights
+        # Insights
         insights = []
         if score >= 90:
             insights.append("Excellent performance. You're well-prepared for this topic.")
@@ -1594,7 +1789,6 @@ def subscription_success():
                 user.subscription_status = 'active'
                 user.subscription_plan = plan_type
                 user.stripe_subscription_id = cs.subscription
-                # Set a user-facing end date for the dashboard countdown
                 if plan_type == '6month':
                     user.subscription_end_date = datetime.utcnow() + timedelta(days=180)
                 else:
