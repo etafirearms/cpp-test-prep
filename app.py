@@ -2169,12 +2169,15 @@ def debug_templates():
                 </table>
             </div>
             <div class="mt-4">
-                <a href="/" class="btn">Return Home</a>
+                <a href="/dashboard" class="btn btn-primary">Back to Dashboard</a>
+                <a href="/debug/quiz-test" class="btn btn-success">Test Quiz</a>
             </div>
-        </body>
-        </html>
-        '''
-        return html, 403
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
 
 # Database connection cleanup
 @app.teardown_appcontext
@@ -2571,7 +2574,7 @@ def forbidden_error(error):
     try:
         return render_template('403.html'), 403
     except Exception:
-      html = '<h1>403 - Access Forbidden</h1><p>You do not have permission to access this resource.</p><p><a href="/">Return Home</a></p>'
+        html = '<h1>403 - Access Forbidden</h1><p>You do not have permission to access this resource.</p><p><a href="/">Return Home</a></p>'
         return html, 403
 
 # Database connection cleanup
@@ -2649,3 +2652,4 @@ if __name__ == '__main__':
     print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
