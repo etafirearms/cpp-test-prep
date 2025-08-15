@@ -2294,9 +2294,63 @@ def debug_quiz_data(quiz_type):
             'quiz_type': quiz_type
         }), 500
 
-# -----------------------------
-# Static Pages
-# -----------------------------
+# Add this debug route after the other routes
+@app.route('/debug/simple-quiz-test')
+@login_required
+def debug_simple_quiz_test():
+    """Simple quiz test with hardcoded data"""
+    try:
+        # Create simple hardcoded quiz data
+        simple_quiz_data = {
+            "title": "Simple Test Quiz",
+            "quiz_type": "test",
+            "domain": "general",
+            "difficulty": "easy",
+            "questions": [
+                {
+                    "question": "What is 2 + 2?",
+                    "options": {
+                        "A": "3",
+                        "B": "4", 
+                        "C": "5",
+                        "D": "6"
+                    },
+                    "correct": "B",
+                    "explanation": "2 + 2 equals 4",
+                    "domain": "general"
+                },
+                {
+                    "question": "What color is the sky?",
+                    "options": {
+                        "A": "Red",
+                        "B": "Blue",
+                        "C": "Green", 
+                        "D": "Purple"
+                    },
+                    "correct": "B",
+                    "explanation": "The sky is blue",
+                    "domain": "general"
+                }
+            ]
+        }
+        
+        print(f"[SIMPLE_QUIZ] Rendering with data: {simple_quiz_data}")
+        
+        return render_template(
+            'quiz.html',
+            quiz_data=simple_quiz_data,
+            quiz_type='test',
+            domain='general',
+            difficulty='easy'
+        )
+        
+    except Exception as e:
+        import traceback
+        print(f"[SIMPLE_QUIZ] Error: {e}")
+        traceback.print_exc()
+        return f"<h1>Simple Quiz Test Failed</h1><p>Error: {str(e)}</p><a href='/dashboard'>Back</a>"
+
+# Add this debug route after the other debug routes
 @app.route('/terms')
 def terms():
     return render_template('terms.html')
