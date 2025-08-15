@@ -134,6 +134,41 @@ class StudySession(db.Model):
     started_at = db.Column(db.DateTime, default=datetime.utcnow)
     ended_at = db.Column(db.DateTime)
 
+class UserProgress(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    domain = db.Column(db.String(50), nullable=False, index=True)
+    topic = db.Column(db.String(100), nullable=True, index=True)  # optional drill-down
+    mastery_level = db.Column(db.String(20), default='needs_practice')  # needs_practice | good | mastered
+    average_score = db.Column(db.Float, default=0.0)  # 0-100
+    question_count = db.Column(db.Integer, default=0)
+    last_updated = db.Column(db.DateTime, default=datetime.utcnow)
+    consecutive_good_scores = db.Column(db.Integer, default=0)
+
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'domain', 'topic', name='uq_userprogress_user_domain_topic'),
+    )
+
+
+class QuestionEvent(db.Model):
+    """
+    One row per answered card/question.
+    source: 'quiz' | 'mock' | 'flashcard' | 'tutor'
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    question_hash = db.Column(db.String(64), nullable=False, index=True)  # sha256 of content
+    domain = db.Column(db.String(50), nullable=True, index=True)
+    topic = db.Column(db.String(100), nullable=True, index=True)
+    source = db.Column(db.String(20), nullable=False)  # quiz/mock/flashcard/tutor
+    is_correct = db.Column(db.Boolean, nullable=True)  # flashcards can be Know/Don't Know
+    response_time_s = db.Column(db.Integer)  # optional
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+    __table_args__ = (
+        db.Index('ix_question_event_user_created', 'user_id', 'created_at'),
+    )
+
 # -----------------------------------------------------------------------------
 # Database Initialization / Migrations (safe, idempotent)
 # -----------------------------------------------------------------------------
@@ -1494,6 +1529,7 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
