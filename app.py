@@ -837,6 +837,25 @@ def chat():
         print(f"Chat error: {e}")
         return jsonify({'error': 'Sorry, I encountered an error processing your message.'}), 500
 
+@app.route('/flashcards')
+@subscription_required
+def flashcards_page():
+    user = User.query.get(session['user_id'])
+    content = """
+    <div class="row">
+      <div class="col-md-8 mx-auto">
+        <div class="card">
+          <div class="card-body">
+            <h3 class="mb-3">Flashcards</h3>
+            <p class="text-muted">Flashcards are coming next. Tell me your preferred format (topics, counts, spaced repetition) and I’ll wire it up.</p>
+            <a href="/dashboard" class="btn btn-outline-secondary">Back to Dashboard</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_base_template("Flashcards", content, user=user)
+
 # ------------------------------ Quizzes ---------------------------------------
 @app.route('/quiz-selector')
 @subscription_required
@@ -1366,4 +1385,5 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
