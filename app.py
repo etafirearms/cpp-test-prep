@@ -2372,58 +2372,56 @@ def not_found_error(error):
     try:
         return render_template('404.html'), 404
     except Exception:
-        html = '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Page Not Found - CPP Test Prep</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: #f8f9fa;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 0 auto;
-                    background: white;
-                    padding: 40px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #dc3545;
-                    margin-bottom: 20px;
-                }
-                p {
-                    color: #6c757d;
-                    margin-bottom: 30px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 12px 24px;
-                    background: #007bff;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 4px;
-                }
-                .btn:hover {
-                    background: #0056b3;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>404 - Page Not Found</h1>
-                <p>The page you are looking for does not exist.</p>
-                <a href="/" class="btn">Return Home</a>
-            </div>
-        </body>
-        </html>
-        '''
+        html = '''<!DOCTYPE html>
+<html>
+<head>
+    <title>Page Not Found - CPP Test Prep</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            padding: 50px;
+            background: #f8f9fa;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #dc3545;
+            margin-bottom: 20px;
+        }
+        p {
+            color: #6c757d;
+            margin-bottom: 30px;
+        }
+        .btn {
+            display: inline-block;
+            padding: 12px 24px;
+            background: #007bff;
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+        }
+        .btn:hover {
+            background: #0056b3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>404 - Page Not Found</h1>
+        <p>The page you are looking for does not exist.</p>
+        <a href="/" class="btn">Return Home</a>
+    </div>
+</body>
+</html>'''
         return html, 404
 
 @app.errorhandler(500)
@@ -2454,17 +2452,16 @@ def internal_error(error):
         return render_template('500.html', error_id=error_id), 500
     except Exception:
         # Fallback HTML response
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head><title>Server Error</title></head>
-        <body>
-            <h1>500 - Internal Server Error</h1>
-            <p>An error occurred (ID: {error_id}). Please try again later.</p>
-            <a href="/">Return Home</a>
-        </body>
-        </html>
-        ''', 500
+        html = f'''<!DOCTYPE html>
+<html>
+<head><title>Server Error</title></head>
+<body>
+    <h1>500 - Internal Server Error</h1>
+    <p>An error occurred (ID: {error_id}). Please try again later.</p>
+    <a href="/">Return Home</a>
+</body>
+</html>'''
+        return html, 500
 
 @app.errorhandler(403)
 def forbidden_error(error):
