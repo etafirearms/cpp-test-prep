@@ -2571,51 +2571,81 @@ def forbidden_error(error):
     try:
         return render_template('403.html'), 403
     except Exception:
-        html = '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Access Forbidden - CPP Test Prep</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: #f8f9fa;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 0 auto;
-                    background: white;
-                    padding: 40px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #dc3545;
-                    margin-bottom: 20px;
-                }
-                p {
-                    color: #6c757d;
-                    margin-bottom: 30px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 12px 24px;
-                    background: #007bff;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 4px;
-                }
-                .btn:hover {
-                    background: #0056b3;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>403 - Access Forbidden</h1>
-                <p>You do not have permission to access this resource.</p>
-                <a href="/"
+      html = '<h1>403 - Access Forbidden</h1><p>You do not have permission to access this resource.</p><p><a href="/">Return Home</a></p>'
+        return html, 403
+
+# Database connection cleanup
+@app.teardown_appcontext
+def close_db_session(error):
+    """Clean up database connections"""
+    try:
+        db.session.remove()
+    except Exception as e:
+        print(f"Error closing database session: {e}")
+
+# Context processors
+@app.context_processor
+def inject_datetime_utils():
+    def format_datetime(dt, format_type='default'):
+        """Format datetime for templates"""
+        if not dt:
+            return 'Never'
+        
+        if isinstance(dt, str):
+            try:
+                dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                try:
+                    dt = datetime.strptime(dt, '%Y-%m-%dT%H:%M:%S.%f')
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        return dt
+        
+        if not isinstance(dt, datetime):
+            return str(dt)
+        
+        if format_type == 'time_ago':
+            now = datetime.utcnow()
+            diff = now - dt
+            
+            if diff.days > 0:
+                return f"{diff.days} day{'s' if diff.days != 1 else ''} ago"
+            elif diff.seconds > 3600:
+                hours = diff.seconds // 3600
+                return f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif diff.seconds > 60:
+                minutes = diff.seconds // 60
+                return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                return "Just now"
+        elif format_type == 'date':
+            return dt.strftime('%Y-%m-%d')
+        elif format_type == 'datetime':
+            return dt.strftime('%Y-%m-%d %H:%M')
+        else:
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    return {
+        'now': datetime.utcnow(),
+        'format_datetime': format_datetime
+    }
+
+@app.context_processor
+def inject_quiz_types():
+    return {'quiz_types': QUIZ_TYPES, 'cpp_domains': CPP_DOMAINS}
+
+# App factory and run
+def create_app(config_name='default'):
+    return app
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    print(f"Starting CPP Test Prep Application on port {port}")
+    print(f"Debug mode: {debug}")
+    print(f"Database URL configured: {bool(app.config.get('SQLALCHEMY_DATABASE_URI'))}")
+    print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
+    print(f"Stripe configured: {bool(stripe.api_key)}")
+    app.run(host='0.0.0.0', port=port, debug=debug)
