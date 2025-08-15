@@ -11,902 +11,7 @@ import stripe
 import time
 import re
 
-# -----------------------------
-# Performance Analysis
-# -----------------------------
-@app.route('/performance-analysis')
-@login_required
-def performance_analysis():
-    try:
-        user_id = session['user_id']
-        domain_analysis = {}
-        
-        for domain_key, domain_info in CPP_DOMAINS.items():
-            progress = UserProgress.query.filter_by(user_id=user_id, domain=domain_key).first()
-            if not progress:
-                progress = UserProgress(user_id=user_id, domain=domain_key)
-                db.session.add(progress)
-            
-            avg_score = progress.average_score
-            if avg_score is None:
-                avg_score = 0
-            
-            last_updated_str = 'Never'
-            if progress.last_updated:
-                last_updated_str = progress.last_updated.strftime('%Y-%m-%d')
-            
-            domain_analysis[domain_key] = {
-                'name': domain_info['name'],
-                'topics': domain_info['topics'],
-                'mastery_level': progress.mastery_level,
-                'average_score': round(avg_score, 1),
-                'question_count': progress.question_count,
-                'consecutive_good_scores': progress.consecutive_good_scores,
-                'recommendation': get_domain_recommendation(progress),
-                'last_updated': last_updated_str
-            }
-        
-        db.session.commit()
-
-        needs_practice = []
-        good_progress = []
-        mastered = []
-        
-        for d in domain_analysis.values():
-            if d['mastery_level'] == 'needs_practice':
-                needs_practice.append(d)
-            elif d['mastery_level'] == 'good':
-                good_progress.append(d)
-            elif d['mastery_level'] == 'mastered':
-                mastered.append(d)
-
-        overall_recommendations = []
-        if needs_practice:
-            needs_practice_domains = [d['name'] for d in needs_practice[:3]]
-            overall_recommendations.append({
-                'priority': 'high',
-                'title': 'Focus Areas - High Priority',
-                'domains': needs_practice_domains,
-                'action': 'Spend 60 percent of study time on these domains',
-                'color': 'danger'
-            })
-        
-        if good_progress:
-            good_progress_domains = [d['name'] for d in good_progress]
-            overall_recommendations.append({
-                'priority': 'medium',
-                'title': 'Reinforcement Areas',
-                'domains': good_progress_domains,
-                'action': 'Take advanced quizzes and practice scenarios',
-                'color': 'warning'
-            })
-        
-        if mastered:
-            mastered_domains = [d['name'] for d in mastered]
-            overall_recommendations.append({
-                'priority': 'low',
-                'title': 'Mastered Areas',
-                'domains': mastered_domains,
-                'action': 'Light review to maintain knowledge',
-                'color': 'success'
-            })
-
-        total_domains = len(CPP_DOMAINS)
-        readiness_score = 0
-        if total_domains > 0:
-            readiness_score = (len(mastered) * 100 + len(good_progress) * 70) / total_domains
-
-        return render_template(
-            'performance_analysis.html',
-            domain_analysis=domain_analysis,
-            recommendations=overall_recommendations,
-            readiness_score=round(readiness_score, 1),
-            cpp_domains=CPP_DOMAINS
-        )
-
-    except Exception as e:
-        print("Performance analysis error: " + str(e))
-        flash('Error loading performance analysis. Please try again.', 'danger')
-        return redirect(url_for('dashboard'))
-
-# -----------------------------
-# Progress
-# -----------------------------
-@app.route('/progress')
-@login_required
-def progress():
-    try:
-        user = User.query.get(session['user_id'])
-        if not user:
-            return redirect(url_for('login'))
-
-        try:
-            activities = ActivityLog.query.filter_by(user_id=user.id).order_by(
-                ActivityLog.timestamp.desc()
-            ).limit(50).all()
-        except Exception as e:
-            print(f"Error fetching activities: {e}")
-            activities = []
-
-        try:
-            quiz_results = QuizResult.query.filter_by(user_id=user.id).order_by(
-                QuizResult.completed_at.desc()
-            ).all()
-        except Exception as e:
-            print(f"Error fetching quiz results: {e}")
-            quiz_results = []
-
-        total_sessions = len([a for a in activities if 'study' in a.activity.lower()])
-        total_quizzes = len(quiz_results)
-        valid_scores = [q.score for q in quiz_results if q.score is not None]
-        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
-
-        try:
-            study_sessions = StudySession.query.filter_by(user_id=user.id).all()
-            total_study_time = sum(s.duration or 0 for s in study_sessions)
-        except Exception as e:
-            print(f"Error fetching study sessions: {e}")
-            total_study_time = 0
-
-        score_trend = 'stable'
-        if len(quiz_results) >= 5:
-            recent_scores = [q.score for q in quiz_results[:5]]
-            older_scores = [q.score for q in quiz_results[5:10]] if len(quiz_results) >= 10 else []
-            if older_scores:
-                recent_avg = sum(recent_scores) / len(recent_scores)
-                older_avg = sum(older_scores) / len(older_scores)
-                if recent_avg > older_avg + 5:
-                    score_trend = 'improving'
-                elif recent_avg < older_avg - 5:
-                    score_trend = 'declining'
-
-        return render_template(
-            'progress.html',
-            user=user,
-            activities=activities,
-            quiz_results=quiz_results,
-            total_sessions=total_sessions,
-            total_quizzes=total_quizzes,
-            avg_score=round(avg_score, 1),
-            total_study_time=total_study_time,
-            score_trend=score_trend
-        )
-
-    except Exception as e:
-        print(f"Progress page error: {e}")
-        flash('Error loading progress page. Please try again.', 'danger')
-        return redirect(url_for('dashboard'))
-
-# -----------------------------
-# Subscribe and Stripe Checkout
-# -----------------------------
-@app.route('/subscribe')
-@login_required
-def subscribe():
-    try:
-        user = User.query.get(session['user_id'])
-        trial_days_left = None
-        if user and user.subscription_status == 'trial' and user.subscription_end_date:
-            delta = (user.subscription_end_date - datetime.utcnow())
-            trial_days_left = max(delta.days, 0)
-
-        plans = [
-            {"id": "monthly", "label": "Monthly", "amount": 3999, "pretty": "$39.99 / month"},
-            {"id": "6month", "label": "6 Months", "amount": 9900, "pretty": "$99 / 6 months"},
-        ]
-
-        return render_template(
-            'subscribe.html',
-            user=user,
-            trial_days_left=trial_days_left,
-            plans=plans,
-            STRIPE_PUBLISHABLE_KEY=STRIPE_PUBLISHABLE_KEY
-        )
-    except Exception as e:
-        print(f"Subscribe page error: {e}")
-        flash('Could not load the subscribe page. Please try again.', 'danger')
-        return redirect(url_for('dashboard'))
-
-@app.route('/create-checkout-session', methods=['POST'])
-@login_required
-def create_checkout_session():
-    try:
-        user = User.query.get(session['user_id'])
-        if not user:
-            return redirect(url_for('login'))
-
-        plan_type = request.form.get('plan_type')
-        discount_code = request.form.get('discount_code', '').strip().upper()
-
-        plans = {
-            'monthly': {'amount': 3999, 'name': 'CPP Test Prep - Monthly Plan', 'interval': 'month', 'interval_count': 1},
-            '6month': {'amount': 9900, 'name': 'CPP Test Prep - 6 Month Plan', 'interval': 'month', 'interval_count': 6}
-        }
-
-        if plan_type not in plans:
-            flash('Invalid subscription plan selected.', 'danger')
-            return redirect(url_for('subscribe'))
-
-        selected_plan = plans[plan_type]
-        final_amount = selected_plan['amount']
-        discount_applied = False
-
-        if discount_code == 'LAUNCH50':
-            final_amount = int(selected_plan['amount'] * 0.5)
-            discount_applied = True
-        elif discount_code == 'STUDENT20':
-            final_amount = int(selected_plan['amount'] * 0.8)
-            discount_applied = True
-
-        price = stripe.Price.create(
-            unit_amount=final_amount,
-            currency='usd',
-            recurring={'interval': selected_plan['interval'], 'interval_count': selected_plan['interval_count']},
-            product_data={
-                'name': selected_plan['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else '')
-            }
-        )
-
-        checkout_session = stripe.checkout.Session.create(
-            customer=user.stripe_customer_id,
-            payment_method_types=['card'],
-            line_items=[{'price': price.id, 'quantity': 1}],
-            mode='subscription',
-            success_url=url_for('subscription_success', _external=True) + f'?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_type}',
-            cancel_url=url_for('subscribe', _external=True),
-            metadata={
-                'user_id': user.id,
-                'plan_type': plan_type,
-                'discount_code': discount_code if discount_applied else '',
-                'original_amount': selected_plan['amount'],
-                'final_amount': final_amount
-            },
-            allow_promotion_codes=True
-        )
-
-        log_activity(
-            user.id,
-            'subscription_attempt',
-            f'Plan: {plan_type}, Discount: {discount_code}, Amount: ${final_amount/100:.2f}'
-        )
-
-        return redirect(checkout_session.url, code=303)
-
-    except stripe.error.StripeError as e:
-        print(f"Stripe checkout error: {e}")
-        flash('Payment processing error. Please try again or contact support.', 'danger')
-        return redirect(url_for('subscribe'))
-    except Exception as e:
-        print(f"Checkout session error: {e}")
-        flash('Error creating payment session. Please try again.', 'danger')
-        return redirect(url_for('subscribe'))
-
-@app.route('/subscription-success')
-@login_required
-def subscription_success():
-    session_id = request.args.get('session_id')
-    plan_type = request.args.get('plan', 'monthly')
-
-    if session_id:
-        try:
-            checkout_session = stripe.checkout.Session.retrieve(session_id)
-            if checkout_session.payment_status == 'paid':
-                user = User.query.get(session['user_id'])
-                user.subscription_status = 'active'
-                user.subscription_plan = plan_type
-                user.stripe_subscription_id = checkout_session.subscription
-
-                # Set a user-facing end date (for dashboard countdown)
-                if plan_type == '6month':
-                    user.subscription_end_date = datetime.utcnow() + timedelta(days=180)
-                else:  # monthly
-                    user.subscription_end_date = datetime.utcnow() + timedelta(days=30)
-
-                metadata = checkout_session.metadata or {}
-                if metadata.get('discount_code'):
-                    user.discount_code_used = metadata['discount_code']
-                db.session.commit()
-
-                log_activity(
-                    user.id,
-                    'subscription_activated',
-                    f'Plan: {plan_type}, Amount: ${metadata.get("final_amount", "0")}'
-                )
-                flash(f'Subscription activated. Welcome to CPP Test Prep ({plan_type.upper()}).', 'success')
-            else:
-                flash('Payment verification failed. Please contact support.', 'danger')
-        except stripe.error.StripeError as e:
-            print(f"Stripe verification error: {e}")
-            flash('Payment verification error. Please contact support.', 'danger')
-        except Exception as e:
-            print(f"Subscription verification error: {e}")
-            flash('Subscription verification error. Please contact support.', 'danger')
-
-    return redirect(url_for('dashboard'))
-
-# -----------------------------
-# Stripe Webhook
-# -----------------------------
-@app.post("/webhook")
-def stripe_webhook():
-    if not STRIPE_WEBHOOK_SECRET:
-        print("Webhook secret not configured")
-        return 'Webhook not configured', 200
-
-    payload = request.get_data(as_text=True)
-    sig_header = request.headers.get('Stripe-Signature')
-
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except ValueError as e:
-        print(f"Invalid payload: {e}")
-        return 'Invalid payload', 400
-    except stripe.error.SignatureVerificationError as e:
-        print(f"Invalid signature: {e}")
-        return 'Invalid signature', 400
-
-    event_type = event.get('type')
-    data_object = event.get('data', {}).get('object', {})
-    customer_id = data_object.get('customer')
-    subscription_id = data_object.get('subscription') or data_object.get('id')
-
-    print(f"Processing webhook: {event_type} for customer {customer_id}")
-
-    try:
-        if event_type == 'invoice.payment_succeeded':
-            set_user_subscription_by_customer(customer_id, 'active', subscription_id)
-        elif event_type == 'invoice.payment_failed':
-            set_user_subscription_by_customer(customer_id, 'past_due', subscription_id)
-        elif event_type in ('customer.subscription.created', 'customer.subscription.updated'):
-            status = data_object.get('status', 'active')
-            if status in ('active', 'trialing'):
-                normalized_status = 'active'
-            elif status == 'past_due':
-                normalized_status = 'past_due'
-            else:
-                normalized_status = 'expired'
-            set_user_subscription_by_customer(customer_id, normalized_status, subscription_id)
-        elif event_type == 'customer.subscription.deleted':
-            set_user_subscription_by_customer(customer_id, 'expired', subscription_id)
-    except Exception as e:
-        print(f"Error processing webhook {event_type}: {e}")
-        return 'Webhook processing error', 500
-
-    return 'Success', 200
-
-# -----------------------------
-# Study Session Tracking
-# -----------------------------
-@app.route('/end-study-session', methods=['POST'])
-@login_required
-def end_study_session():
-    try:
-        if 'study_start_time' in session:
-            start_time = datetime.fromtimestamp(session['study_start_time'])
-            duration = int((datetime.utcnow() - start_time).total_seconds() / 60)
-
-            study_session = StudySession(
-                user_id=session['user_id'],
-                duration=duration,
-                session_type='chat',
-                started_at=start_time,
-                ended_at=datetime.utcnow()
-            )
-            db.session.add(study_session)
-
-            user = User.query.get(session['user_id'])
-            if user:
-                user.study_time = (user.study_time or 0) + duration
-
-            db.session.commit()
-            del session['study_start_time']
-            log_activity(session['user_id'], 'study_session_completed', f'Duration: {duration} minutes')
-
-            return jsonify({'success': True, 'duration': duration})
-        else:
-            return jsonify({'success': False, 'error': 'No active session'})
-    except Exception as e:
-        print(f"Error ending study session: {e}")
-        return jsonify({'success': False, 'error': 'Session end error'})
-
-# -----------------------------
-# Chat History
-# -----------------------------
-@app.route('/clear-chat', methods=['POST'])
-@login_required
-def clear_chat():
-    try:
-        user_id = session['user_id']
-        chat_history = ChatHistory.query.filter_by(user_id=user_id).first()
-        if chat_history:
-            chat_history.messages = '[]'
-            chat_history.updated_at = datetime.utcnow()
-            db.session.commit()
-        log_activity(user_id, 'chat_cleared', 'User cleared chat history')
-        return jsonify({'success': True})
-    except Exception as e:
-        print(f"Error clearing chat: {e}")
-        return jsonify({'success': False, 'error': 'Failed to clear chat'})
-
-# -----------------------------
-# Debug Routes
-# -----------------------------
-@app.route('/debug/quiz-test')
-@login_required
-def debug_quiz_test():
-    """Debug route to test quiz functionality"""
-    try:
-        # Generate a simple test quiz
-        test_quiz = {
-            "title": "Debug Test Quiz",
-            "quiz_type": "practice",
-            "domain": "general", 
-            "difficulty": "medium",
-            "questions": [
-                {
-                    "question": "What is the primary purpose of a security risk assessment?",
-                    "options": {
-                        "A": "To eliminate all risks",
-                        "B": "To identify and evaluate potential threats",
-                        "C": "To reduce insurance costs", 
-                        "D": "To satisfy compliance requirements"
-                    },
-                    "correct": "B",
-                    "explanation": "Risk assessments help identify and evaluate potential threats.",
-                    "domain": "security-principles"
-                },
-                {
-                    "question": "Which principle is central to CPTED?",
-                    "options": {
-                        "A": "Natural surveillance",
-                        "B": "Electronic monitoring", 
-                        "C": "Armed security",
-                        "D": "Access badges"
-                    },
-                    "correct": "A",
-                    "explanation": "Natural surveillance is a key CPTED principle.",
-                    "domain": "physical-security"
-                }
-            ]
-        }
-        
-        print(f"Debug quiz generated with {len(test_quiz['questions'])} questions")
-        
-        # Use the same template as regular quiz
-        return render_template('quiz.html', quiz_data=test_quiz, quiz_type='debug')
-        
-    except Exception as e:
-        print(f"Debug quiz error: {e}")
-        import traceback
-        traceback.print_exc()
-        return f"<h1>Debug Error</h1><p>{str(e)}</p><a href='/dashboard'>Back to Dashboard</a>"
-
-@app.route('/debug/templates')
-@login_required 
-def debug_templates():
-    """Check if required templates exist"""
-    import os
-    from flask import current_app
-    
-    template_folder = current_app.template_folder or 'templates'
-    templates_to_check = [
-        'quiz.html',
-        'quiz_selector.html', 
-        'base.html',
-        'dashboard.html',
-        'home.html',
-        'login.html',
-        'register.html'
-    ]
-    
-    results = {}
-    for template in templates_to_check:
-        template_path = os.path.join(template_folder, template)
-        results[template] = {
-            'exists': os.path.exists(template_path),
-            'path': template_path
-        }
-        
-        # Also check file size
-        if results[template]['exists']:
-            try:
-                results[template]['size'] = os.path.getsize(template_path)
-            except:
-                results[template]['size'] = 'unknown'
-    
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Template Check - CPP Test Prep</title>
-        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
-    </head>
-    <body>
-        <div class="container mt-4">
-            <h1>Template Check</h1>
-            <p><strong>Template Folder:</strong> {}</p>
-            <div class="table-responsive">
-                <table class="table table-striped">
-                    <thead>
-                        <tr>
-                            <th>Template</th>
-                            <th>Status</th>
-                            <th>Size (bytes)</th>
-                            <th>Path</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-    """.format(template_folder)
-    
-    for template, info in results.items():
-        status_badge = "success" if info['exists'] else "danger"
-        status_text = "✅ EXISTS" if info['exists'] else "❌ MISSING"
-        size_text = str(info.get('size', 'N/A')) if info['exists'] else 'N/A'
-        
-        html += f"""
-                        <tr>
-                            <td><strong>{template}</strong></td>
-                            <td><span class="badge bg-{status_badge}">{status_text}</span></td>
-                            <td>{size_text}</td>
-                            <td><small>{info['path']}</small></td>
-                        </tr>
-        """
-    
-    html += """
-                    </tbody>
-                </table>
-            </div>
-            <div class="mt-4">
-                <a href="/dashboard" class="btn btn-primary">Back to Dashboard</a>
-                <a href="/debug/quiz-test" class="btn btn-success">Test Quiz</a>
-            </div>
-        </div>
-    </body>
-    </html>
-    """
-    
-    return html
-
-@app.route('/debug/quiz-data/<quiz_type>')
-@login_required
-def debug_quiz_data(quiz_type):
-    """Debug route to see raw quiz data"""
-    try:
-        domain = request.args.get('domain')
-        difficulty = request.args.get('difficulty', 'medium')
-        
-        quiz_data = generate_enhanced_quiz(quiz_type, domain, difficulty)
-        
-        return jsonify({
-            'success': True,
-            'quiz_data': quiz_data,
-            'quiz_type': quiz_type,
-            'domain': domain,
-            'difficulty': difficulty,
-            'questions_count': len(quiz_data.get('questions', [])) if quiz_data else 0
-        })
-        
-    except Exception as e:
-        return jsonify({
-            'success': False,
-            'error': str(e),
-            'quiz_type': quiz_type
-        }), 500
-
-# -----------------------------
-# Static Pages
-# -----------------------------
-@app.route('/terms')
-def terms():
-    return render_template('terms.html')
-
-@app.route('/privacy')
-def privacy():
-    return render_template('privacy.html')
-
-@app.route('/contact')
-def contact():
-    return render_template('contact.html')
-
-# -----------------------------
-# Diagnostics
-# -----------------------------
-@app.get("/diag/openai")
-def diag_openai():
-    has_key = bool(os.environ.get("OPENAI_API_KEY"))
-    model = os.environ.get("OPENAI_CHAT_MODEL", OPENAI_CHAT_MODEL)
-    try:
-        headers = {
-            'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY","")}',
-            'Content-Type': 'application/json'
-        }
-        data = {
-            'model': model,
-            'messages': [{"role": "user", "content": "Say 'pong' if you can hear me."}],
-            'max_tokens': 10,
-            'temperature': 0
-        }
-        response = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=20)
-        success = (response.status_code == 200)
-        return jsonify({
-            "has_key": has_key,
-            "model": model,
-            "status_code": response.status_code,
-            "success": success,
-            "response_preview": response.text[:300],
-            "timestamp": datetime.utcnow().isoformat()
-        }), (200 if success else 500)
-    except Exception as e:
-        return jsonify({
-            "has_key": has_key,
-            "model": model,
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
-
-@app.get("/diag/database")
-def diag_database():
-    try:
-        db.session.execute(db.text('SELECT 1'))
-        user_count = User.query.count()
-        quiz_count = QuizResult.query.count()
-        return jsonify({
-            "status": "healthy",
-            "user_count": user_count,
-            "quiz_count": quiz_count,
-            "timestamp": datetime.utcnow().isoformat()
-        }), 200
-    except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
-
-# -----------------------------
-# Error Handlers
-# -----------------------------
-@app.errorhandler(404)
-def not_found_error(error):
-    try:
-        return render_template('404.html'), 404
-    except Exception:
-        html = '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Page Not Found - CPP Test Prep</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: #f8f9fa;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 0 auto;
-                    background: white;
-                    padding: 40px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #dc3545;
-                    margin-bottom: 20px;
-                }
-                p {
-                    color: #6c757d;
-                    margin-bottom: 30px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 12px 24px;
-                    background: #007bff;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 4px;
-                }
-                .btn:hover {
-                    background: #0056b3;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>404 - Page Not Found</h1>
-                <p>The page you are looking for does not exist.</p>
-                <a href="/" class="btn">Return Home</a>
-            </div>
-        </body>
-        </html>
-        '''
-        return html, 404
-
-@app.errorhandler(500)
-def internal_error(error):
-    """Enhanced 500 error handler with logging"""
-    import traceback
-    
-    # Log the full error details
-    error_id = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
-    print(f"Error ID {error_id}: 500 Internal Server Error")
-    print(f"Error details: {str(error)}")
-    print(f"Stack trace: {traceback.format_exc()}")
-    
-    # Try to rollback any pending database transactions
-    try:
-        db.session.rollback()
-    except Exception as rollback_error:
-        print(f"Error during rollback: {rollback_error}")
-    
-    # Log error to activity log if user is logged in
-    try:
-        if 'user_id' in session:
-            log_activity(session['user_id'], 'system_error', f'500 Error ID: {error_id}')
-    except Exception as log_error:
-        print(f"Could not log error activity: {log_error}")
-    
-    try:
-        return render_template('500.html', error_id=error_id), 500
-    except Exception:
-        # Fallback HTML response
-        return f'''
-        <!DOCTYPE html>
-        <html>
-        <head><title>Server Error</title></head>
-        <body>
-            <h1>500 - Internal Server Error</h1>
-            <p>An error occurred (ID: {error_id}). Please try again later.</p>
-            <a href="/">Return Home</a>
-        </body>
-        </html>
-        ''', 500
-
-@app.errorhandler(403)
-def forbidden_error(error):
-    try:
-        return render_template('403.html'), 403
-    except Exception:
-        html = '''
-        <!DOCTYPE html>
-        <html>
-        <head>
-            <title>Access Forbidden - CPP Test Prep</title>
-            <meta charset="utf-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1">
-            <style>
-                body {
-                    font-family: Arial, sans-serif;
-                    text-align: center;
-                    padding: 50px;
-                    background: #f8f9fa;
-                }
-                .container {
-                    max-width: 600px;
-                    margin: 0 auto;
-                    background: white;
-                    padding: 40px;
-                    border-radius: 8px;
-                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
-                }
-                h1 {
-                    color: #dc3545;
-                    margin-bottom: 20px;
-                }
-                p {
-                    color: #6c757d;
-                    margin-bottom: 30px;
-                }
-                .btn {
-                    display: inline-block;
-                    padding: 12px 24px;
-                    background: #007bff;
-                    color: white;
-                    text-decoration: none;
-                    border-radius: 4px;
-                }
-                .btn:hover {
-                    background: #0056b3;
-                }
-            </style>
-        </head>
-        <body>
-            <div class="container">
-                <h1>403 - Access Forbidden</h1>
-                <p>You do not have permission to access this resource.</p>
-                <a href="/" class="btn">Return Home</a>
-            </div>
-        </body>
-        </html>
-        '''
-        return html, 403
-
-# Database connection cleanup
-@app.teardown_appcontext
-def close_db_session(error):
-    """Clean up database connections"""
-    try:
-        db.session.remove()
-    except Exception as e:
-        print(f"Error closing database session: {e}")
-
-# -----------------------------
-# Context processors
-# -----------------------------
-@app.context_processor
-def inject_datetime_utils():
-    def format_datetime(dt, format_type='default'):
-        """Format datetime for templates"""
-        if not dt:
-            return 'Never'
-        
-        # Handle string timestamps (convert to datetime)
-        if isinstance(dt, str):
-            try:
-                # Try parsing ISO format first
-                dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
-            except (ValueError, AttributeError):
-                try:
-                    # Try parsing common formats
-                    dt = datetime.strptime(dt, '%Y-%m-%dT%H:%M:%S.%f')
-                except ValueError:
-                    try:
-                        dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
-                    except ValueError:
-                        return dt  # Return as-is if we can't parse
-        
-        # Ensure dt is a datetime object
-        if not isinstance(dt, datetime):
-            return str(dt)
-        
-        if format_type == 'time_ago':
-            now = datetime.utcnow()
-            diff = now - dt
-            
-            if diff.days > 0:
-                return f"{diff.days} day{'s' if diff.days != 1 else ''} ago"
-            elif diff.seconds > 3600:
-                hours = diff.seconds // 3600
-                return f"{hours} hour{'s' if hours != 1 else ''} ago"
-            elif diff.seconds > 60:
-                minutes = diff.seconds // 60
-                return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
-            else:
-                return "Just now"
-        elif format_type == 'date':
-            return dt.strftime('%Y-%m-%d')
-        elif format_type == 'datetime':
-            return dt.strftime('%Y-%m-%d %H:%M')
-        else:
-            return dt.strftime('%Y-%m-%d %H:%M:%S')
-    
-    return {
-        'now': datetime.utcnow(),
-        'format_datetime': format_datetime
-    }
-
-@app.context_processor
-def inject_quiz_types():
-    return {'quiz_types': QUIZ_TYPES, 'cpp_domains': CPP_DOMAINS}
-
-# -----------------------------
-# App factory and run
-# -----------------------------
-def create_app(config_name='default'):
-    return app
-
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
-    print(f"Starting CPP Test Prep Application on port {port}")
-    print(f"Debug mode: {debug}")
-    print(f"Database URL configured: {bool(app.config.get('SQLALCHEMY_DATABASE_URI'))}")
-    print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
-    print(f"Stripe configured: {bool(stripe.api_key)}")
-    app.run(host='0.0.0.0', port=port, debug=debug)----------------------------------------------------------------
+# -----------------------------------------------------------------------------
 # Validation Functions (Added)
 # -----------------------------------------------------------------------------
 
@@ -1752,7 +857,7 @@ def register():
                 flash('You must accept the Terms of Service and Privacy Policy to register.', 'danger')
                 return render_template('register.html')
 
-            # Validate email format
+            # Validate email format - FIXED THE SYNTAX ERROR HERE
             email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}'
             if not re.match(email_pattern, email):
                 print(f"Registration failed: Invalid email format for {email}")
@@ -2382,5 +1487,899 @@ Return ONLY valid JSON:
         flash('Error loading flashcards. Please try again.', 'danger')
         return redirect(url_for('dashboard'))
 
-# -------------
+# -----------------------------
+# Performance Analysis
+# -----------------------------
+@app.route('/performance-analysis')
+@login_required
+def performance_analysis():
+    try:
+        user_id = session['user_id']
+        domain_analysis = {}
+        
+        for domain_key, domain_info in CPP_DOMAINS.items():
+            progress = UserProgress.query.filter_by(user_id=user_id, domain=domain_key).first()
+            if not progress:
+                progress = UserProgress(user_id=user_id, domain=domain_key)
+                db.session.add(progress)
+            
+            avg_score = progress.average_score
+            if avg_score is None:
+                avg_score = 0
+            
+            last_updated_str = 'Never'
+            if progress.last_updated:
+                last_updated_str = progress.last_updated.strftime('%Y-%m-%d')
+            
+            domain_analysis[domain_key] = {
+                'name': domain_info['name'],
+                'topics': domain_info['topics'],
+                'mastery_level': progress.mastery_level,
+                'average_score': round(avg_score, 1),
+                'question_count': progress.question_count,
+                'consecutive_good_scores': progress.consecutive_good_scores,
+                'recommendation': get_domain_recommendation(progress),
+                'last_updated': last_updated_str
+            }
+        
+        db.session.commit()
 
+        needs_practice = []
+        good_progress = []
+        mastered = []
+        
+        for d in domain_analysis.values():
+            if d['mastery_level'] == 'needs_practice':
+                needs_practice.append(d)
+            elif d['mastery_level'] == 'good':
+                good_progress.append(d)
+            elif d['mastery_level'] == 'mastered':
+                mastered.append(d)
+
+        overall_recommendations = []
+        if needs_practice:
+            needs_practice_domains = [d['name'] for d in needs_practice[:3]]
+            overall_recommendations.append({
+                'priority': 'high',
+                'title': 'Focus Areas - High Priority',
+                'domains': needs_practice_domains,
+                'action': 'Spend 60 percent of study time on these domains',
+                'color': 'danger'
+            })
+        
+        if good_progress:
+            good_progress_domains = [d['name'] for d in good_progress]
+            overall_recommendations.append({
+                'priority': 'medium',
+                'title': 'Reinforcement Areas',
+                'domains': good_progress_domains,
+                'action': 'Take advanced quizzes and practice scenarios',
+                'color': 'warning'
+            })
+        
+        if mastered:
+            mastered_domains = [d['name'] for d in mastered]
+            overall_recommendations.append({
+                'priority': 'low',
+                'title': 'Mastered Areas',
+                'domains': mastered_domains,
+                'action': 'Light review to maintain knowledge',
+                'color': 'success'
+            })
+
+        total_domains = len(CPP_DOMAINS)
+        readiness_score = 0
+        if total_domains > 0:
+            readiness_score = (len(mastered) * 100 + len(good_progress) * 70) / total_domains
+
+        return render_template(
+            'performance_analysis.html',
+            domain_analysis=domain_analysis,
+            recommendations=overall_recommendations,
+            readiness_score=round(readiness_score, 1),
+            cpp_domains=CPP_DOMAINS
+        )
+
+    except Exception as e:
+        print("Performance analysis error: " + str(e))
+        flash('Error loading performance analysis. Please try again.', 'danger')
+        return redirect(url_for('dashboard'))
+
+# -----------------------------
+# Progress
+# -----------------------------
+@app.route('/progress')
+@login_required
+def progress():
+    try:
+        user = User.query.get(session['user_id'])
+        if not user:
+            return redirect(url_for('login'))
+
+        try:
+            activities = ActivityLog.query.filter_by(user_id=user.id).order_by(
+                ActivityLog.timestamp.desc()
+            ).limit(50).all()
+        except Exception as e:
+            print(f"Error fetching activities: {e}")
+            activities = []
+
+        try:
+            quiz_results = QuizResult.query.filter_by(user_id=user.id).order_by(
+                QuizResult.completed_at.desc()
+            ).all()
+        except Exception as e:
+            print(f"Error fetching quiz results: {e}")
+            quiz_results = []
+
+        total_sessions = len([a for a in activities if 'study' in a.activity.lower()])
+        total_quizzes = len(quiz_results)
+        valid_scores = [q.score for q in quiz_results if q.score is not None]
+        avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else 0
+
+        try:
+            study_sessions = StudySession.query.filter_by(user_id=user.id).all()
+            total_study_time = sum(s.duration or 0 for s in study_sessions)
+        except Exception as e:
+            print(f"Error fetching study sessions: {e}")
+            total_study_time = 0
+
+        score_trend = 'stable'
+        if len(quiz_results) >= 5:
+            recent_scores = [q.score for q in quiz_results[:5]]
+            older_scores = [q.score for q in quiz_results[5:10]] if len(quiz_results) >= 10 else []
+            if older_scores:
+                recent_avg = sum(recent_scores) / len(recent_scores)
+                older_avg = sum(older_scores) / len(older_scores)
+                if recent_avg > older_avg + 5:
+                    score_trend = 'improving'
+                elif recent_avg < older_avg - 5:
+                    score_trend = 'declining'
+
+        return render_template(
+            'progress.html',
+            user=user,
+            activities=activities,
+            quiz_results=quiz_results,
+            total_sessions=total_sessions,
+            total_quizzes=total_quizzes,
+            avg_score=round(avg_score, 1),
+            total_study_time=total_study_time,
+            score_trend=score_trend
+        )
+
+    except Exception as e:
+        print(f"Progress page error: {e}")
+        flash('Error loading progress page. Please try again.', 'danger')
+        return redirect(url_for('dashboard'))
+
+# -----------------------------
+# Subscribe and Stripe Checkout
+# -----------------------------
+@app.route('/subscribe')
+@login_required
+def subscribe():
+    try:
+        user = User.query.get(session['user_id'])
+        trial_days_left = None
+        if user and user.subscription_status == 'trial' and user.subscription_end_date:
+            delta = (user.subscription_end_date - datetime.utcnow())
+            trial_days_left = max(delta.days, 0)
+
+        plans = [
+            {"id": "monthly", "label": "Monthly", "amount": 3999, "pretty": "$39.99 / month"},
+            {"id": "6month", "label": "6 Months", "amount": 9900, "pretty": "$99 / 6 months"},
+        ]
+
+        return render_template(
+            'subscribe.html',
+            user=user,
+            trial_days_left=trial_days_left,
+            plans=plans,
+            STRIPE_PUBLISHABLE_KEY=STRIPE_PUBLISHABLE_KEY
+        )
+    except Exception as e:
+        print(f"Subscribe page error: {e}")
+        flash('Could not load the subscribe page. Please try again.', 'danger')
+        return redirect(url_for('dashboard'))
+
+@app.route('/create-checkout-session', methods=['POST'])
+@login_required
+def create_checkout_session():
+    try:
+        user = User.query.get(session['user_id'])
+        if not user:
+            return redirect(url_for('login'))
+
+        plan_type = request.form.get('plan_type')
+        discount_code = request.form.get('discount_code', '').strip().upper()
+
+        plans = {
+            'monthly': {'amount': 3999, 'name': 'CPP Test Prep - Monthly Plan', 'interval': 'month', 'interval_count': 1},
+            '6month': {'amount': 9900, 'name': 'CPP Test Prep - 6 Month Plan', 'interval': 'month', 'interval_count': 6}
+        }
+
+        if plan_type not in plans:
+            flash('Invalid subscription plan selected.', 'danger')
+            return redirect(url_for('subscribe'))
+
+        selected_plan = plans[plan_type]
+        final_amount = selected_plan['amount']
+        discount_applied = False
+
+        if discount_code == 'LAUNCH50':
+            final_amount = int(selected_plan['amount'] * 0.5)
+            discount_applied = True
+        elif discount_code == 'STUDENT20':
+            final_amount = int(selected_plan['amount'] * 0.8)
+            discount_applied = True
+
+        price = stripe.Price.create(
+            unit_amount=final_amount,
+            currency='usd',
+            recurring={'interval': selected_plan['interval'], 'interval_count': selected_plan['interval_count']},
+            product_data={
+                'name': selected_plan['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else '')
+            }
+        )
+
+        checkout_session = stripe.checkout.Session.create(
+            customer=user.stripe_customer_id,
+            payment_method_types=['card'],
+            line_items=[{'price': price.id, 'quantity': 1}],
+            mode='subscription',
+            success_url=url_for('subscription_success', _external=True) + f'?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_type}',
+            cancel_url=url_for('subscribe', _external=True),
+            metadata={
+                'user_id': user.id,
+                'plan_type': plan_type,
+                'discount_code': discount_code if discount_applied else '',
+                'original_amount': selected_plan['amount'],
+                'final_amount': final_amount
+            },
+            allow_promotion_codes=True
+        )
+
+        log_activity(
+            user.id,
+            'subscription_attempt',
+            f'Plan: {plan_type}, Discount: {discount_code}, Amount: ${final_amount/100:.2f}'
+        )
+
+        return redirect(checkout_session.url, code=303)
+
+    except stripe.error.StripeError as e:
+        print(f"Stripe checkout error: {e}")
+        flash('Payment processing error. Please try again or contact support.', 'danger')
+        return redirect(url_for('subscribe'))
+    except Exception as e:
+        print(f"Checkout session error: {e}")
+        flash('Error creating payment session. Please try again.', 'danger')
+        return redirect(url_for('subscribe'))
+
+@app.route('/subscription-success')
+@login_required
+def subscription_success():
+    session_id = request.args.get('session_id')
+    plan_type = request.args.get('plan', 'monthly')
+
+    if session_id:
+        try:
+            checkout_session = stripe.checkout.Session.retrieve(session_id)
+            if checkout_session.payment_status == 'paid':
+                user = User.query.get(session['user_id'])
+                user.subscription_status = 'active'
+                user.subscription_plan = plan_type
+                user.stripe_subscription_id = checkout_session.subscription
+
+                # Set a user-facing end date (for dashboard countdown)
+                if plan_type == '6month':
+                    user.subscription_end_date = datetime.utcnow() + timedelta(days=180)
+                else:  # monthly
+                    user.subscription_end_date = datetime.utcnow() + timedelta(days=30)
+
+                metadata = checkout_session.metadata or {}
+                if metadata.get('discount_code'):
+                    user.discount_code_used = metadata['discount_code']
+                db.session.commit()
+
+                log_activity(
+                    user.id,
+                    'subscription_activated',
+                    f'Plan: {plan_type}, Amount: ${metadata.get("final_amount", "0")}'
+                )
+                flash(f'Subscription activated. Welcome to CPP Test Prep ({plan_type.upper()}).', 'success')
+            else:
+                flash('Payment verification failed. Please contact support.', 'danger')
+        except stripe.error.StripeError as e:
+            print(f"Stripe verification error: {e}")
+            flash('Payment verification error. Please contact support.', 'danger')
+        except Exception as e:
+            print(f"Subscription verification error: {e}")
+            flash('Subscription verification error. Please contact support.', 'danger')
+
+    return redirect(url_for('dashboard'))
+
+# -----------------------------
+# Stripe Webhook
+# -----------------------------
+@app.post("/webhook")
+def stripe_webhook():
+    if not STRIPE_WEBHOOK_SECRET:
+        print("Webhook secret not configured")
+        return 'Webhook not configured', 200
+
+    payload = request.get_data(as_text=True)
+    sig_header = request.headers.get('Stripe-Signature')
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except ValueError as e:
+        print(f"Invalid payload: {e}")
+        return 'Invalid payload', 400
+    except stripe.error.SignatureVerificationError as e:
+        print(f"Invalid signature: {e}")
+        return 'Invalid signature', 400
+
+    event_type = event.get('type')
+    data_object = event.get('data', {}).get('object', {})
+    customer_id = data_object.get('customer')
+    subscription_id = data_object.get('subscription') or data_object.get('id')
+
+    print(f"Processing webhook: {event_type} for customer {customer_id}")
+
+    try:
+        if event_type == 'invoice.payment_succeeded':
+            set_user_subscription_by_customer(customer_id, 'active', subscription_id)
+        elif event_type == 'invoice.payment_failed':
+            set_user_subscription_by_customer(customer_id, 'past_due', subscription_id)
+        elif event_type in ('customer.subscription.created', 'customer.subscription.updated'):
+            status = data_object.get('status', 'active')
+            if status in ('active', 'trialing'):
+                normalized_status = 'active'
+            elif status == 'past_due':
+                normalized_status = 'past_due'
+            else:
+                normalized_status = 'expired'
+            set_user_subscription_by_customer(customer_id, normalized_status, subscription_id)
+        elif event_type == 'customer.subscription.deleted':
+            set_user_subscription_by_customer(customer_id, 'expired', subscription_id)
+    except Exception as e:
+        print(f"Error processing webhook {event_type}: {e}")
+        return 'Webhook processing error', 500
+
+    return 'Success', 200
+
+# -----------------------------
+# Study Session Tracking
+# -----------------------------
+@app.route('/end-study-session', methods=['POST'])
+@login_required
+def end_study_session():
+    try:
+        if 'study_start_time' in session:
+            start_time = datetime.fromtimestamp(session['study_start_time'])
+            duration = int((datetime.utcnow() - start_time).total_seconds() / 60)
+
+            study_session = StudySession(
+                user_id=session['user_id'],
+                duration=duration,
+                session_type='chat',
+                started_at=start_time,
+                ended_at=datetime.utcnow()
+            )
+            db.session.add(study_session)
+
+            user = User.query.get(session['user_id'])
+            if user:
+                user.study_time = (user.study_time or 0) + duration
+
+            db.session.commit()
+            del session['study_start_time']
+            log_activity(session['user_id'], 'study_session_completed', f'Duration: {duration} minutes')
+
+            return jsonify({'success': True, 'duration': duration})
+        else:
+            return jsonify({'success': False, 'error': 'No active session'})
+    except Exception as e:
+        print(f"Error ending study session: {e}")
+        return jsonify({'success': False, 'error': 'Session end error'})
+
+# -----------------------------
+# Chat History
+# -----------------------------
+@app.route('/clear-chat', methods=['POST'])
+@login_required
+def clear_chat():
+    try:
+        user_id = session['user_id']
+        chat_history = ChatHistory.query.filter_by(user_id=user_id).first()
+        if chat_history:
+            chat_history.messages = '[]'
+            chat_history.updated_at = datetime.utcnow()
+            db.session.commit()
+        log_activity(user_id, 'chat_cleared', 'User cleared chat history')
+        return jsonify({'success': True})
+    except Exception as e:
+        print(f"Error clearing chat: {e}")
+        return jsonify({'success': False, 'error': 'Failed to clear chat'})
+
+# -----------------------------
+# Debug Routes
+# -----------------------------
+@app.route('/debug/quiz-test')
+@login_required
+def debug_quiz_test():
+    """Debug route to test quiz functionality"""
+    try:
+        # Generate a simple test quiz
+        test_quiz = {
+            "title": "Debug Test Quiz",
+            "quiz_type": "practice",
+            "domain": "general", 
+            "difficulty": "medium",
+            "questions": [
+                {
+                    "question": "What is the primary purpose of a security risk assessment?",
+                    "options": {
+                        "A": "To eliminate all risks",
+                        "B": "To identify and evaluate potential threats",
+                        "C": "To reduce insurance costs", 
+                        "D": "To satisfy compliance requirements"
+                    },
+                    "correct": "B",
+                    "explanation": "Risk assessments help identify and evaluate potential threats.",
+                    "domain": "security-principles"
+                },
+                {
+                    "question": "Which principle is central to CPTED?",
+                    "options": {
+                        "A": "Natural surveillance",
+                        "B": "Electronic monitoring", 
+                        "C": "Armed security",
+                        "D": "Access badges"
+                    },
+                    "correct": "A",
+                    "explanation": "Natural surveillance is a key CPTED principle.",
+                    "domain": "physical-security"
+                }
+            ]
+        }
+        
+        print(f"Debug quiz generated with {len(test_quiz['questions'])} questions")
+        
+        # Use the same template as regular quiz
+        return render_template('quiz.html', quiz_data=test_quiz, quiz_type='debug')
+        
+    except Exception as e:
+        print(f"Debug quiz error: {e}")
+        import traceback
+        traceback.print_exc()
+        return f"<h1>Debug Error</h1><p>{str(e)}</p><a href='/dashboard'>Back to Dashboard</a>"
+
+@app.route('/debug/templates')
+@login_required 
+def debug_templates():
+    """Check if required templates exist"""
+    import os
+    from flask import current_app
+    
+    template_folder = current_app.template_folder or 'templates'
+    templates_to_check = [
+        'quiz.html',
+        'quiz_selector.html', 
+        'base.html',
+        'dashboard.html',
+        'home.html',
+        'login.html',
+        'register.html'
+    ]
+    
+    results = {}
+    for template in templates_to_check:
+        template_path = os.path.join(template_folder, template)
+        results[template] = {
+            'exists': os.path.exists(template_path),
+            'path': template_path
+        }
+        
+        # Also check file size
+        if results[template]['exists']:
+            try:
+                results[template]['size'] = os.path.getsize(template_path)
+            except:
+                results[template]['size'] = 'unknown'
+    
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Template Check - CPP Test Prep</title>
+        <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+    </head>
+    <body>
+        <div class="container mt-4">
+            <h1>Template Check</h1>
+            <p><strong>Template Folder:</strong> {}</p>
+            <div class="table-responsive">
+                <table class="table table-striped">
+                    <thead>
+                        <tr>
+                            <th>Template</th>
+                            <th>Status</th>
+                            <th>Size (bytes)</th>
+                            <th>Path</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+    """.format(template_folder)
+    
+    for template, info in results.items():
+        status_badge = "success" if info['exists'] else "danger"
+        status_text = "✅ EXISTS" if info['exists'] else "❌ MISSING"
+        size_text = str(info.get('size', 'N/A')) if info['exists'] else 'N/A'
+        
+        html += f"""
+                        <tr>
+                            <td><strong>{template}</strong></td>
+                            <td><span class="badge bg-{status_badge}">{status_text}</span></td>
+                            <td>{size_text}</td>
+                            <td><small>{info['path']}</small></td>
+                        </tr>
+        """
+    
+    html += """
+                    </tbody>
+                </table>
+            </div>
+            <div class="mt-4">
+                <a href="/" class="btn">Return Home</a>
+            </div>
+        </body>
+        </html>
+        '''
+        return html, 403
+
+# Database connection cleanup
+@app.teardown_appcontext
+def close_db_session(error):
+    """Clean up database connections"""
+    try:
+        db.session.remove()
+    except Exception as e:
+        print(f"Error closing database session: {e}")
+
+# -----------------------------
+# Context processors
+# -----------------------------
+@app.context_processor
+def inject_datetime_utils():
+    def format_datetime(dt, format_type='default'):
+        """Format datetime for templates"""
+        if not dt:
+            return 'Never'
+        
+        # Handle string timestamps (convert to datetime)
+        if isinstance(dt, str):
+            try:
+                # Try parsing ISO format first
+                dt = datetime.fromisoformat(dt.replace('Z', '+00:00'))
+            except (ValueError, AttributeError):
+                try:
+                    # Try parsing common formats
+                    dt = datetime.strptime(dt, '%Y-%m-%dT%H:%M:%S.%f')
+                except ValueError:
+                    try:
+                        dt = datetime.strptime(dt, '%Y-%m-%d %H:%M:%S')
+                    except ValueError:
+                        return dt  # Return as-is if we can't parse
+        
+        # Ensure dt is a datetime object
+        if not isinstance(dt, datetime):
+            return str(dt)
+        
+        if format_type == 'time_ago':
+            now = datetime.utcnow()
+            diff = now - dt
+            
+            if diff.days > 0:
+                return f"{diff.days} day{'s' if diff.days != 1 else ''} ago"
+            elif diff.seconds > 3600:
+                hours = diff.seconds // 3600
+                return f"{hours} hour{'s' if hours != 1 else ''} ago"
+            elif diff.seconds > 60:
+                minutes = diff.seconds // 60
+                return f"{minutes} minute{'s' if minutes != 1 else ''} ago"
+            else:
+                return "Just now"
+        elif format_type == 'date':
+            return dt.strftime('%Y-%m-%d')
+        elif format_type == 'datetime':
+            return dt.strftime('%Y-%m-%d %H:%M')
+        else:
+            return dt.strftime('%Y-%m-%d %H:%M:%S')
+    
+    return {
+        'now': datetime.utcnow(),
+        'format_datetime': format_datetime
+    }
+
+@app.context_processor
+def inject_quiz_types():
+    return {'quiz_types': QUIZ_TYPES, 'cpp_domains': CPP_DOMAINS}
+
+# -----------------------------
+# App factory and run
+# -----------------------------
+def create_app(config_name='default'):
+    return app
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    debug = os.environ.get('FLASK_DEBUG', 'False').lower() == 'true'
+    print(f"Starting CPP Test Prep Application on port {port}")
+    print(f"Debug mode: {debug}")
+    print(f"Database URL configured: {bool(app.config.get('SQLALCHEMY_DATABASE_URI'))}")
+    print(f"OpenAI API configured: {bool(OPENAI_API_KEY)}")
+    print(f"Stripe configured: {bool(stripe.api_key)}")
+    app.run(host='0.0.0.0', port=port, debug=debug)dashboard" class="btn btn-primary">Back to Dashboard</a>
+                <a href="/debug/quiz-test" class="btn btn-success">Test Quiz</a>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    
+    return html
+
+@app.route('/debug/quiz-data/<quiz_type>')
+@login_required
+def debug_quiz_data(quiz_type):
+    """Debug route to see raw quiz data"""
+    try:
+        domain = request.args.get('domain')
+        difficulty = request.args.get('difficulty', 'medium')
+        
+        quiz_data = generate_enhanced_quiz(quiz_type, domain, difficulty)
+        
+        return jsonify({
+            'success': True,
+            'quiz_data': quiz_data,
+            'quiz_type': quiz_type,
+            'domain': domain,
+            'difficulty': difficulty,
+            'questions_count': len(quiz_data.get('questions', [])) if quiz_data else 0
+        })
+        
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'quiz_type': quiz_type
+        }), 500
+
+# -----------------------------
+# Static Pages
+# -----------------------------
+@app.route('/terms')
+def terms():
+    return render_template('terms.html')
+
+@app.route('/privacy')
+def privacy():
+    return render_template('privacy.html')
+
+@app.route('/contact')
+def contact():
+    return render_template('contact.html')
+
+# -----------------------------
+# Diagnostics
+# -----------------------------
+@app.get("/diag/openai")
+def diag_openai():
+    has_key = bool(os.environ.get("OPENAI_API_KEY"))
+    model = os.environ.get("OPENAI_CHAT_MODEL", OPENAI_CHAT_MODEL)
+    try:
+        headers = {
+            'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY","")}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': model,
+            'messages': [{"role": "user", "content": "Say 'pong' if you can hear me."}],
+            'max_tokens': 10,
+            'temperature': 0
+        }
+        response = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=20)
+        success = (response.status_code == 200)
+        return jsonify({
+            "has_key": has_key,
+            "model": model,
+            "status_code": response.status_code,
+            "success": success,
+            "response_preview": response.text[:300],
+            "timestamp": datetime.utcnow().isoformat()
+        }), (200 if success else 500)
+    except Exception as e:
+        return jsonify({
+            "has_key": has_key,
+            "model": model,
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+@app.get("/diag/database")
+def diag_database():
+    try:
+        db.session.execute(db.text('SELECT 1'))
+        user_count = User.query.count()
+        quiz_count = QuizResult.query.count()
+        return jsonify({
+            "status": "healthy",
+            "user_count": user_count,
+            "quiz_count": quiz_count,
+            "timestamp": datetime.utcnow().isoformat()
+        }), 200
+    except Exception as e:
+        return jsonify({
+            "status": "unhealthy",
+            "error": str(e),
+            "timestamp": datetime.utcnow().isoformat()
+        }), 500
+
+# -----------------------------
+# Error Handlers
+# -----------------------------
+@app.errorhandler(404)
+def not_found_error(error):
+    try:
+        return render_template('404.html'), 404
+    except Exception:
+        html = '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Page Not Found - CPP Test Prep</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    text-align: center;
+                    padding: 50px;
+                    background: #f8f9fa;
+                }
+                .container {
+                    max-width: 600px;
+                    margin: 0 auto;
+                    background: white;
+                    padding: 40px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 {
+                    color: #dc3545;
+                    margin-bottom: 20px;
+                }
+                p {
+                    color: #6c757d;
+                    margin-bottom: 30px;
+                }
+                .btn {
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #007bff;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 4px;
+                }
+                .btn:hover {
+                    background: #0056b3;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>404 - Page Not Found</h1>
+                <p>The page you are looking for does not exist.</p>
+                <a href="/" class="btn">Return Home</a>
+            </div>
+        </body>
+        </html>
+        '''
+        return html, 404
+
+@app.errorhandler(500)
+def internal_error(error):
+    """Enhanced 500 error handler with logging"""
+    import traceback
+    
+    # Log the full error details
+    error_id = datetime.utcnow().strftime('%Y%m%d_%H%M%S')
+    print(f"Error ID {error_id}: 500 Internal Server Error")
+    print(f"Error details: {str(error)}")
+    print(f"Stack trace: {traceback.format_exc()}")
+    
+    # Try to rollback any pending database transactions
+    try:
+        db.session.rollback()
+    except Exception as rollback_error:
+        print(f"Error during rollback: {rollback_error}")
+    
+    # Log error to activity log if user is logged in
+    try:
+        if 'user_id' in session:
+            log_activity(session['user_id'], 'system_error', f'500 Error ID: {error_id}')
+    except Exception as log_error:
+        print(f"Could not log error activity: {log_error}")
+    
+    try:
+        return render_template('500.html', error_id=error_id), 500
+    except Exception:
+        # Fallback HTML response
+        return f'''
+        <!DOCTYPE html>
+        <html>
+        <head><title>Server Error</title></head>
+        <body>
+            <h1>500 - Internal Server Error</h1>
+            <p>An error occurred (ID: {error_id}). Please try again later.</p>
+            <a href="/">Return Home</a>
+        </body>
+        </html>
+        ''', 500
+
+@app.errorhandler(403)
+def forbidden_error(error):
+    try:
+        return render_template('403.html'), 403
+    except Exception:
+        html = '''
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Access Forbidden - CPP Test Prep</title>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <style>
+                body {
+                    font-family: Arial, sans-serif;
+                    text-align: center;
+                    padding: 50px;
+                    background: #f8f9fa;
+                }
+                .container {
+                    max-width: 600px;
+                    margin: 0 auto;
+                    background: white;
+                    padding: 40px;
+                    border-radius: 8px;
+                    box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                }
+                h1 {
+                    color: #dc3545;
+                    margin-bottom: 20px;
+                }
+                p {
+                    color: #6c757d;
+                    margin-bottom: 30px;
+                }
+                .btn {
+                    display: inline-block;
+                    padding: 12px 24px;
+                    background: #007bff;
+                    color: white;
+                    text-decoration: none;
+                    border-radius: 4px;
+                }
+                .btn:hover {
+                    background: #0056b3;
+                }
+            </style>
+        </head>
+        <body>
+            <div class="container">
+                <h1>403 - Access Forbidden</h1>
+                <p>You do not have permission to access this resource.</p>
+                <a href="/"
