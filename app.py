@@ -2169,13 +2169,6 @@ def debug_templates():
                 </table>
             </div>
             <div class="mt-4">
-                <a href="/" class="btn">Return Home</a>
-            </div>
-        </body>
-        </html>
-        '''
-        return html, 403
-
 # Database connection cleanup
 @app.teardown_appcontext
 def close_db_session(error):
