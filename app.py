@@ -10,6 +10,7 @@ import os
 import requests
 import stripe
 import time
+import hashlib
 
 # For SQL text/inspection helpers
 from sqlalchemy import text, inspect
@@ -1529,6 +1530,7 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
 
 
