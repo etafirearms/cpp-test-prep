@@ -10,7 +10,7 @@ import os
 import requests
 import stripe
 import time
-import hashlib  # <-- NEW
+import hashlib  # for question hashing
 
 # For SQL text/inspection helpers
 from sqlalchemy import text, inspect
@@ -265,12 +265,9 @@ def log_activity(user_id, activity, details=None):
         print(f"Activity logging error: {e}")
         db.session.rollback()
 
-# ---------- NEW: tracking helpers (hash, record event, update progress, seen) ----------
+# ---------- Tracking helpers (hash, record event, update progress, seen) ----------
 def _hash_question_payload(question_obj: dict) -> str:
-    """
-    Stable SHA256 hash for a question so we can detect repeats.
-    Uses question text + sorted options.
-    """
+    """Stable SHA256 hash for a question so we can detect repeats (text + sorted options)."""
     q_text = (question_obj or {}).get('question', '') or ''
     opts = (question_obj or {}).get('options', {}) or {}
     parts = [q_text.strip()]
@@ -325,10 +322,7 @@ def update_user_progress_on_answer(
     topic: str,
     is_correct: bool
 ) -> None:
-    """
-    Lightweight rolling update for UserProgress.
-    Call this per answer (wired in /submit-quiz).
-    """
+    """Lightweight rolling update for UserProgress. Call this per answer."""
     try:
         if not domain:
             return
@@ -367,10 +361,7 @@ def update_user_progress_on_answer(
         db.session.rollback()
 
 def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_days: int = 30) -> set:
-    """
-    Return a set of question_hash values the user has seen recently.
-    (Use this for non-repeating flashcards later.)
-    """
+    """Return a set of question_hash values the user has seen recently."""
     try:
         cutoff = datetime.utcnow() - timedelta(days=window_days)
         q = QuestionEvent.query.filter(
@@ -385,7 +376,7 @@ def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_
     except Exception as e:
         print(f"get_seen_hashes error: {e}")
         return set()
-# ---------- END NEW helpers ----------
+# ---------- End tracking helpers ----------
 
 def chat_with_ai(messages, user_id=None):
     """Thin wrapper to OpenAI Chat Completions with basic rate limiting and robust error handling."""
@@ -655,7 +646,7 @@ def register():
             return redirect(url_for('login'))
 
         try:
-            # Create Stripe customer (robust but simple)
+            # Create Stripe customer
             stripe_customer = stripe.Customer.create(
                 email=email,
                 name=f"{first_name} {last_name}",
@@ -813,7 +804,6 @@ def dashboard():
     if user.subscription_end_date:
         days_left = max(0, (user.subscription_end_date - datetime.utcnow()).days)
 
-    from string import Template
     tmpl = Template("""
     <div class="row">
       <div class="col-12"><h1>Welcome back, $first_name!</h1></div>
@@ -901,7 +891,10 @@ def study():
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card">
-          <div class="card-header"><h4 class="mb-0">AI Tutor</h4></div>
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h4 class="mb-0">AI Tutor</h4>
+            <button class="btn btn-outline-secondary btn-sm" onclick="endSession(true)">End Session</button>
+          </div>
           <div class="card-body">
             <div id="chat" style="height: 360px; overflow-y: auto; border: 1px solid #eee; padding: 10px; margin-bottom: 12px;"></div>
             <div class="input-group">
@@ -947,6 +940,37 @@ def study():
 
       sendBtn.addEventListener('click', send);
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+      // --- Automatic end-of-session capture ---
+      async function endSession(manual=false) {
+        try {
+          const res = await fetch('/end-study-session', { method: 'POST' });
+          if (manual) {
+            const data = await res.json();
+            alert(data.success ? ('Session saved (' + data.duration + ' min).') : 'No active session to end.');
+          }
+        } catch(e) { console.log('End session error:', e); }
+      }
+
+      // Try to record on tab close/navigation
+      window.addEventListener('beforeunload', function() {
+        try {
+          const blob = new Blob([], { type: 'application/x-www-form-urlencoded' });
+          navigator.sendBeacon('/end-study-session', blob);
+        } catch(e) {
+          fetch('/end-study-session', { method: 'POST', keepalive: true }).catch(()=>{});
+        }
+      });
+
+      // Also record when the tab becomes hidden (best-effort)
+      document.addEventListener('visibilitychange', function() {
+        if (document.visibilityState === 'hidden') {
+          try {
+            const blob = new Blob([], { type: 'application/x-www-form-urlencoded' });
+            navigator.sendBeacon('/end-study-session', blob);
+          } catch(e) {}
+        }
+      });
     </script>
     """
     return render_base_template("Study", content, user=user)
@@ -1075,7 +1099,7 @@ def quiz(quiz_type):
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        QUIZ_DATA.questions.forEach((q, idx) => {
+        (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1105,12 +1129,48 @@ def quiz(quiz_type):
         });
       }
 
+      function renderReview(data) {
+        const resultsDiv = document.getElementById('results');
+        let html = '';
+        html += '<div class="card mb-3"><div class="card-body">';
+        html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+        html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+        if (Array.isArray(data.performance_insights)) {
+          html += '<ul>';
+          data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+          html += '</ul>';
+        }
+        html += '</div></div>';
+
+        if (Array.isArray(data.results)) {
+          data.results.forEach(r => {
+            const cls = r.is_correct ? 'success' : 'danger';
+            html += '<div class="card mb-2 border-' + cls + '">';
+            html += '<div class="card-body">';
+            html += '<h6 class="mb-2">Q' + r.index + '. ' + r.question + '</h6>';
+            html += '<p class="mb-1"><strong>Your answer:</strong> ' +
+                    (r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '<em>no answer</em>') + '</p>';
+            html += '<p class="mb-1"><strong>Correct answer:</strong> ' +
+                    (r.correct_letter + ') ' + (r.correct_text || '')) + '</p>';
+            if (r.explanation) {
+              html += '<div class="mt-2 p-2 bg-light border rounded"><strong>Explanation:</strong> ' +
+                      r.explanation + '</div>';
+            }
+            html += '</div></div>';
+          });
+        }
+
+        resultsDiv.innerHTML = html;
+        window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+      }
+
       async function submitQuiz() {
         const answers = {};
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
+        const resultsDiv = document.getElementById('results');
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1123,22 +1183,11 @@ def quiz(quiz_type):
             })
           });
           const data = await res.json();
-          const resultsDiv = document.getElementById('results');
           if (data.error) {
             resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
             return;
           }
-          let html = '<div class="card"><div class="card-body">';
-          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
-          if (Array.isArray(data.performance_insights)) {
-            html += '<ul>';
-            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-            html += '</ul>';
-          }
-          html += '</div></div>';
-          resultsDiv.innerHTML = html;
-          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+          renderReview(data);
         } catch (e) {
           resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
@@ -1165,7 +1214,6 @@ def mock_exam():
     quiz_data = generate_fallback_quiz('mock-exam', domain=None, difficulty='medium', num_questions=num_questions)
     quiz_json = json.dumps(quiz_data)
 
-    from string import Template
     page = Template("""
     <div class="row">
       <div class="col-md-10 mx-auto">
@@ -1185,7 +1233,7 @@ def mock_exam():
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        QUIZ_DATA.questions.forEach((q, idx) => {
+        (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1215,12 +1263,48 @@ def mock_exam():
         });
       }
 
+      function renderReview(data) {
+        const resultsDiv = document.getElementById('results');
+        let html = '';
+        html += '<div class="card mb-3"><div class="card-body">';
+        html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+        html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+        if (Array.isArray(data.performance_insights)) {
+          html += '<ul>';
+          data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+          html += '</ul>';
+        }
+        html += '</div></div>';
+
+        if (Array.isArray(data.results)) {
+          data.results.forEach(r => {
+            const cls = r.is_correct ? 'success' : 'danger';
+            html += '<div class="card mb-2 border-' + cls + '">';
+            html += '<div class="card-body">';
+            html += '<h6 class="mb-2">Q' + r.index + '. ' + r.question + '</h6>';
+            html += '<p class="mb-1"><strong>Your answer:</strong> ' +
+                    (r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '<em>no answer</em>') + '</p>';
+            html += '<p class="mb-1"><strong>Correct answer:</strong> ' +
+                    (r.correct_letter + ') ' + (r.correct_text || '')) + '</p>';
+            if (r.explanation) {
+              html += '<div class="mt-2 p-2 bg-light border rounded"><strong>Explanation:</strong> ' +
+                      r.explanation + '</div>';
+            }
+            html += '</div></div>';
+          });
+        }
+
+        resultsDiv.innerHTML = html;
+        window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+      }
+
       async function submitQuiz() {
         const answers = {};
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
+        const resultsDiv = document.getElementById('results');
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1233,22 +1317,11 @@ def mock_exam():
             })
           });
           const data = await res.json();
-          const resultsDiv = document.getElementById('results');
           if (data.error) {
             resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
             return;
           }
-          let html = '<div class="card"><div class="card-body">';
-          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
-          if (Array.isArray(data.performance_insights)) {
-            html += '<ul>';
-            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-            html += '</ul>';
-          }
-          html += '</div></div>';
-          resultsDiv.innerHTML = html;
-          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+          renderReview(data);
         } catch (e) {
           resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
@@ -1261,7 +1334,7 @@ def mock_exam():
     content = page.substitute(num=num_questions, quiz_json=quiz_json)
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
-# ----------------- UPDATED: Submit quiz (records events & updates progress) ---
+# ----------------- Submit quiz (records events, updates progress, returns review)
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1294,6 +1367,26 @@ def submit_quiz():
             if is_correct:
                 correct_count += 1
 
+            # Use question-provided domain/topic when available; fall back to request domain
+            q_domain = q.get('domain') or domain or 'general'
+            q_topic = q.get('topic') if isinstance(q.get('topic'), str) else None
+
+            # Record per-question event and update progress
+            record_question_event(
+                user_id=session['user_id'],
+                question_obj=q,
+                domain=q_domain,
+                topic=q_topic,
+                is_correct=is_correct,
+                source=('mock' if quiz_type == 'mock-exam' else 'quiz')
+            )
+            update_user_progress_on_answer(
+                user_id=session['user_id'],
+                domain=q_domain,
+                topic=q_topic,
+                is_correct=is_correct
+            )
+
             detailed_results.append({
                 'index': i + 1,
                 'question': q.get('question', ''),
@@ -1303,12 +1396,12 @@ def submit_quiz():
                 'user_text': options.get(user_letter, '') if user_letter else None,
                 'explanation': q.get('explanation', ''),
                 'is_correct': bool(is_correct),
-                'domain': q.get('domain', 'general')
+                'domain': q_domain
             })
 
         score = (correct_count / total) * 100 if total else 0.0
 
-        # Save result
+        # Save overall result
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
@@ -1322,7 +1415,7 @@ def submit_quiz():
         db.session.add(qr)
         db.session.commit()
 
-        # Update user quiz score history
+        # Update user quiz score history (compact)
         user = User.query.get(session['user_id'])
         try:
             scores = json.loads(user.quiz_scores) if user.quiz_scores else []
@@ -1365,13 +1458,12 @@ def submit_quiz():
             'total': total,
             'time_taken': time_taken,
             'performance_insights': insights,
-            'results': detailed_results  # <-- NEW: per-question review payload
+            'results': detailed_results
         })
     except Exception as e:
         print(f"Submit quiz error: {e}")
         db.session.rollback()
         return jsonify({'error': 'Error processing quiz results.'}), 500
-
 
 # ----------------------------- Subscription & Stripe --------------------------
 @app.route('/subscribe')
@@ -1674,4 +1766,3 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
-
