@@ -525,102 +525,227 @@ def chat_with_ai(messages, user_id=None):
         return "I encountered a technical issue. Please try again, or contact support if this continues."
 
 def generate_enhanced_quiz(quiz_type, domain=None, difficulty='medium'):
-    user_id = session.get('user_id')
-    if quiz_type == 'mock-exam' and user_id:
-        try:
-            user_progress = UserProgress.query.filter_by(user_id=user_id).all()
-            ready_for_full_exam = len(user_progress) > 0
-            for progress in user_progress:
-                if progress.consecutive_good_scores < 3 or progress.average_score < 75:
-                    ready_for_full_exam = False
-                    break
-            if ready_for_full_exam:
-                num_questions = 125
-                flash('Full 125-question mock exam unlocked!', 'success')
-            else:
+    print(f"[QUIZ_GEN] Called with: quiz_type={quiz_type}, domain={domain}, difficulty={difficulty}")
+    
+    try:
+        user_id = session.get('user_id')
+        print(f"[QUIZ_GEN] User ID: {user_id}")
+        
+        # Determine number of questions
+        if quiz_type == 'mock-exam' and user_id:
+            try:
+                user_progress = UserProgress.query.filter_by(user_id=user_id).all()
+                ready_for_full_exam = len(user_progress) > 0
+                for progress in user_progress:
+                    if progress.consecutive_good_scores < 3 or progress.average_score < 75:
+                        ready_for_full_exam = False
+                        break
+                if ready_for_full_exam:
+                    num_questions = 125
+                    flash('Full 125-question mock exam unlocked!', 'success')
+                else:
+                    num_questions = 50
+                    flash('Starting with 50-question practice exam.', 'info')
+            except Exception as e:
+                print(f"[QUIZ_GEN] Error checking user progress: {e}")
                 num_questions = 50
-                flash('Starting with 50-question practice exam.', 'info')
-        except Exception:
-            num_questions = 50
-    else:
-        num_questions = QUIZ_TYPES.get(quiz_type, {}).get('questions', 10)
-    return generate_fallback_quiz(quiz_type, domain, difficulty, num_questions)
+        else:
+            num_questions = QUIZ_TYPES.get(quiz_type, {}).get('questions', 10)
+        
+        print(f"[QUIZ_GEN] Number of questions determined: {num_questions}")
+        
+        # Generate the quiz using fallback method
+        quiz_data = generate_fallback_quiz(quiz_type, domain, difficulty, num_questions)
+        print(f"[QUIZ_GEN] Fallback quiz generated: {bool(quiz_data)}")
+        
+        if quiz_data:
+            print(f"[QUIZ_GEN] Quiz data keys: {list(quiz_data.keys())}")
+            print(f"[QUIZ_GEN] Questions count: {len(quiz_data.get('questions', []))}")
+        
+        return quiz_data
+        
+    except Exception as e:
+        print(f"[QUIZ_GEN] ERROR in generate_enhanced_quiz: {e}")
+        import traceback
+        traceback.print_exc()
+        # Return fallback quiz on error
+        return generate_fallback_quiz(quiz_type, domain, difficulty, 10)
 
 def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
-    base_questions = [
-        {
-            "question": "What is the primary purpose of a comprehensive security risk assessment?",
-            "options": {
-                "A": "To identify all possible security threats",
-                "B": "To determine cost-effective risk mitigation strategies",
-                "C": "To eliminate all security risks completely",
-                "D": "To satisfy insurance requirements"
+    print(f"[FALLBACK_QUIZ] Called with: quiz_type={quiz_type}, domain={domain}, difficulty={difficulty}, num_questions={num_questions}")
+    
+    try:
+        base_questions = [
+            {
+                "question": "What is the primary purpose of a comprehensive security risk assessment?",
+                "options": {
+                    "A": "To identify all possible security threats",
+                    "B": "To determine cost-effective risk mitigation strategies",
+                    "C": "To eliminate all security risks completely",
+                    "D": "To satisfy insurance requirements"
+                },
+                "correct": "B",
+                "explanation": "Risk assessments help organizations identify risks and determine cost-effective mitigation strategies.",
+                "domain": "security-principles"
             },
-            "correct": "B",
-            "explanation": "Risk assessments help organizations identify risks and determine cost-effective mitigation strategies.",
-            "domain": "security-principles"
-        },
-        {
-            "question": "In CPTED principles, what does natural surveillance primarily accomplish?",
-            "options": {
-                "A": "Reduces the need for security guards",
-                "B": "Increases the likelihood that criminal activity will be observed",
-                "C": "Eliminates blind spots in camera coverage",
-                "D": "Provides legal liability protection"
+            {
+                "question": "In CPTED principles, what does natural surveillance primarily accomplish?",
+                "options": {
+                    "A": "Reduces the need for security guards",
+                    "B": "Increases the likelihood that criminal activity will be observed",
+                    "C": "Eliminates blind spots in camera coverage",
+                    "D": "Provides legal liability protection"
+                },
+                "correct": "B",
+                "explanation": "Natural surveillance increases visibility and deters criminal activity through observation.",
+                "domain": "physical-security"
             },
-            "correct": "B",
-            "explanation": "Natural surveillance increases visibility and deters criminal activity through observation.",
-            "domain": "physical-security"
-        },
-        {
-            "question": "What is the key difference between a vulnerability and a threat?",
-            "options": {
-                "A": "Vulnerabilities are external, threats are internal",
-                "B": "Threats are potential dangers, vulnerabilities are weaknesses",
-                "C": "Vulnerabilities cost money, threats do not",
-                "D": "There is no significant difference"
+            {
+                "question": "What is the key difference between a vulnerability and a threat?",
+                "options": {
+                    "A": "Vulnerabilities are external, threats are internal",
+                    "B": "Threats are potential dangers, vulnerabilities are weaknesses",
+                    "C": "Vulnerabilities cost money, threats do not",
+                    "D": "There is no significant difference"
+                },
+                "correct": "B",
+                "explanation": "Threats are potential dangers while vulnerabilities are weaknesses that could be exploited.",
+                "domain": domain or "general"
             },
-            "correct": "B",
-            "explanation": "Threats are potential dangers while vulnerabilities are weaknesses that could be exploited.",
-            "domain": domain or "general"
-        },
-        {
-            "question": "In security management, what does defense in depth mean?",
-            "options": {
-                "A": "Having the strongest possible perimeter security",
-                "B": "Multiple layers of security controls",
-                "C": "Deep background checks on all personnel",
-                "D": "Detailed incident response procedures"
+            {
+                "question": "In security management, what does defense in depth mean?",
+                "options": {
+                    "A": "Having the strongest possible perimeter security",
+                    "B": "Multiple layers of security controls",
+                    "C": "Deep background checks on all personnel",
+                    "D": "Detailed incident response procedures"
+                },
+                "correct": "B",
+                "explanation": "Defense in depth involves multiple layers of security controls for redundancy.",
+                "domain": domain or "general"
             },
-            "correct": "B",
-            "explanation": "Defense in depth involves multiple layers of security controls for redundancy.",
-            "domain": domain or "general"
-        },
-        {
-            "question": "What is the most critical first step in incident response?",
-            "options": {
-                "A": "Notify law enforcement",
-                "B": "Document everything immediately",
-                "C": "Contain the incident to prevent further damage",
-                "D": "Identify the root cause"
+            {
+                "question": "What is the most critical first step in incident response?",
+                "options": {
+                    "A": "Notify law enforcement",
+                    "B": "Document everything immediately",
+                    "C": "Contain the incident to prevent further damage",
+                    "D": "Identify the root cause"
+                },
+                "correct": "C",
+                "explanation": "Containment prevents further damage and limits the scope of the incident.",
+                "domain": "information-security"
             },
-            "correct": "C",
-            "explanation": "Containment prevents further damage and limits the scope of the incident.",
-            "domain": "information-security"
+            {
+                "question": "Which of the following is a key principle of physical security?",
+                "options": {
+                    "A": "Deterrence, Detection, Delay, Response",
+                    "B": "Prevent, Protect, Mitigate, Respond",
+                    "C": "Plan, Do, Check, Act",
+                    "D": "Identify, Protect, Detect, Respond, Recover"
+                },
+                "correct": "A",
+                "explanation": "The four key principles of physical security are Deterrence, Detection, Delay, and Response.",
+                "domain": "physical-security"
+            },
+            {
+                "question": "What is the primary goal of business continuity planning?",
+                "options": {
+                    "A": "To prevent all business disruptions",
+                    "B": "To maintain critical business functions during and after a disruption",
+                    "C": "To eliminate all business risks",
+                    "D": "To satisfy regulatory requirements"
+                },
+                "correct": "B",
+                "explanation": "Business continuity planning ensures critical functions can continue during disruptions.",
+                "domain": "crisis-management"
+            },
+            {
+                "question": "In personnel security, what is the principle of least privilege?",
+                "options": {
+                    "A": "Employees should have minimal contact with security staff",
+                    "B": "Grant only the minimum access rights needed to perform job functions",
+                    "C": "Security clearances should be kept to a minimum",
+                    "D": "Employees should have the least amount of training possible"
+                },
+                "correct": "B",
+                "explanation": "Least privilege means granting only the minimum access rights necessary for job performance.",
+                "domain": "personnel-security"
+            },
+            {
+                "question": "What is the first step in conducting a security investigation?",
+                "options": {
+                    "A": "Interview witnesses",
+                    "B": "Collect physical evidence",
+                    "C": "Secure the scene and preserve evidence",
+                    "D": "Notify law enforcement"
+                },
+                "correct": "C",
+                "explanation": "The first step is always to secure the scene and preserve evidence to maintain its integrity.",
+                "domain": "investigations"
+            },
+            {
+                "question": "Which document should outline the roles and responsibilities during a crisis?",
+                "options": {
+                    "A": "Security policy manual",
+                    "B": "Emergency response plan",
+                    "C": "Business continuity plan",
+                    "D": "All of the above"
+                },
+                "correct": "D",
+                "explanation": "All these documents should clearly outline roles and responsibilities during different types of crises.",
+                "domain": "crisis-management"
+            }
+        ]
+
+        print(f"[FALLBACK_QUIZ] Base questions count: {len(base_questions)}")
+        
+        # Create questions list by repeating base questions if needed
+        questions = []
+        question_index = 0
+        
+        while len(questions) < num_questions:
+            if question_index >= len(base_questions):
+                question_index = 0  # Reset to beginning
+            
+            # Create a copy of the question to avoid reference issues
+            question_copy = base_questions[question_index].copy()
+            questions.append(question_copy)
+            question_index += 1
+        
+        print(f"[FALLBACK_QUIZ] Final questions count: {len(questions)}")
+        
+        # Create quiz data structure
+        quiz_data = {
+            "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
+            "quiz_type": quiz_type,
+            "domain": domain or 'general',
+            "difficulty": difficulty,
+            "questions": questions[:num_questions]  # Ensure we don't exceed requested number
         }
-    ]
-    questions = []
-    while len(questions) < num_questions:
-        for q in base_questions:
-            if len(questions) < num_questions:
-                questions.append(q.copy())
-    return {
-        "title": f"CPP {quiz_type.title().replace('-', ' ')} Quiz",
-        "quiz_type": quiz_type,
-        "domain": domain or 'general',
-        "difficulty": difficulty,
-        "questions": questions[:num_questions]
-    }
+        
+        print(f"[FALLBACK_QUIZ] Quiz data created successfully:")
+        print(f"  - Title: {quiz_data['title']}")
+        print(f"  - Type: {quiz_data['quiz_type']}")
+        print(f"  - Domain: {quiz_data['domain']}")
+        print(f"  - Questions: {len(quiz_data['questions'])}")
+        
+        # Validate the quiz data
+        if not quiz_data.get('questions'):
+            print("[FALLBACK_QUIZ] ERROR: No questions in generated quiz data")
+            return None
+            
+        if len(quiz_data['questions']) == 0:
+            print("[FALLBACK_QUIZ] ERROR: Empty questions list")
+            return None
+        
+        return quiz_data
+        
+    except Exception as e:
+        print(f"[FALLBACK_QUIZ] ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 def update_user_progress(user_id, quiz_result):
     try:
@@ -1234,50 +1359,60 @@ def quiz_selector():
 @app.route('/quiz/<quiz_type>')
 @subscription_required
 def quiz(quiz_type):
+    print(f"[QUIZ] Route called with quiz_type: {quiz_type}")
+    
     if quiz_type not in QUIZ_TYPES:
+        print(f"[QUIZ] Invalid quiz type: {quiz_type}")
         flash('Invalid quiz type selected.', 'danger')
         return redirect(url_for('quiz_selector'))
     
     try:
         domain = request.args.get('domain')
         difficulty = request.args.get('difficulty', 'medium')
+        print(f"[QUIZ] Parameters - domain: {domain}, difficulty: {difficulty}")
 
         if domain and domain not in CPP_DOMAINS:
+            print(f"[QUIZ] Invalid domain: {domain}")
             flash('Invalid domain selected.', 'warning')
             domain = None
 
         session['quiz_start_time'] = datetime.utcnow().timestamp()
 
+        print(f"[QUIZ] Calling generate_enhanced_quiz...")
         quiz_data = generate_enhanced_quiz(quiz_type, domain, difficulty)
+        print(f"[QUIZ] generate_enhanced_quiz returned: {type(quiz_data)}")
         
-        # Enhanced validation
+        # Enhanced validation with detailed logging
         if not quiz_data:
-            print("ERROR: quiz_data is None")
+            print("[QUIZ] ERROR: quiz_data is None or False")
             flash('Error generating quiz. Please try again.', 'danger')
             return redirect(url_for('quiz_selector'))
             
+        print(f"[QUIZ] quiz_data keys: {list(quiz_data.keys()) if isinstance(quiz_data, dict) else 'Not a dict'}")
+            
         if not quiz_data.get('questions'):
-            print("ERROR: No questions in quiz_data")
+            print(f"[QUIZ] ERROR: No questions in quiz_data. Questions value: {quiz_data.get('questions')}")
             flash('Error: No questions generated. Please try again.', 'danger')
             return redirect(url_for('quiz_selector'))
             
         if not isinstance(quiz_data.get('questions'), list):
-            print("ERROR: Questions is not a list")
+            print(f"[QUIZ] ERROR: Questions is not a list. Type: {type(quiz_data.get('questions'))}")
             flash('Error: Invalid quiz format. Please try again.', 'danger')
             return redirect(url_for('quiz_selector'))
             
         if len(quiz_data.get('questions', [])) == 0:
-            print("ERROR: Empty questions list")
+            print("[QUIZ] ERROR: Empty questions list")
             flash('Error: No questions available. Please try again.', 'danger')
             return redirect(url_for('quiz_selector'))
 
-        # Debug logging
-        print(f"Quiz data successfully generated:")
+        # Success logging
+        print(f"[QUIZ] SUCCESS - Quiz data generated:")
         print(f"  - Title: {quiz_data.get('title', 'Unknown')}")
         print(f"  - Type: {quiz_data.get('quiz_type', 'Unknown')}")
         print(f"  - Domain: {quiz_data.get('domain', 'Unknown')}")
-        print(f"  - Questions: {len(quiz_data.get('questions', []))}")
-        print(f"  - First question: {quiz_data['questions'][0].get('question', 'No question text')[:50]}...")
+        print(f"  - Questions count: {len(quiz_data.get('questions', []))}")
+        if quiz_data.get('questions'):
+            print(f"  - First question preview: {quiz_data['questions'][0].get('question', 'No question text')[:50]}...")
 
         log_activity(
             session['user_id'],
@@ -1285,6 +1420,7 @@ def quiz(quiz_type):
             f'Type: {quiz_type}, Domain: {domain or "general"}, Difficulty: {difficulty}, Questions: {len(quiz_data["questions"])}'
         )
 
+        print(f"[QUIZ] Rendering template with quiz_data...")
         return render_template(
             'quiz.html', 
             quiz_data=quiz_data, 
@@ -1294,7 +1430,7 @@ def quiz(quiz_type):
         )
 
     except Exception as e:
-        print(f"Quiz generation error: {e}")
+        print(f"[QUIZ] EXCEPTION in quiz route: {e}")
         import traceback
         traceback.print_exc()
         flash('Error starting quiz. Please try again.', 'danger')
