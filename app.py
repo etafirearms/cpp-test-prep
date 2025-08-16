@@ -177,6 +177,25 @@ def _safe_json(obj) -> str:
     except Exception:
         return "null"
 
+def build_domain_suggestion_chips():
+    """Build suggestion chips safely without f-string backslashes"""
+    chip_items = []
+    for key, dom in CPP_DOMAINS.items():
+        chip_items.append({
+            "key": key,
+            "name": dom.get("name", key.replace("-", " ").title())
+        })
+    
+    suggestion_chips = []
+    for item in chip_items:
+        onclick_value = "Explain key topics in {}".format(item['name'])
+        chip_html = '<div class="sugg-chip" onclick="document.getElementById(\'userInput\').value=\'{}\';document.getElementById(\'userInput\').focus();">{}</div>'.format(
+            onclick_value, item['name']
+        )
+        suggestion_chips.append(chip_html)
+    
+    return "".join(suggestion_chips)
+
 # --------------------------------------------------------------------------------------
 # Base Template
 # --------------------------------------------------------------------------------------
@@ -233,7 +252,7 @@ def render_base_template(title, body_html, user=None):
 </body>
 </html>
     """)
-    welcome = f"Welcome, {session.get('user_name','Student')}"
+    welcome = "Welcome, {}".format(session.get('user_name','Student'))
     html = tpl.substitute(page_title=title, content=body_html, welcome=welcome)
     resp = make_response(html)
     # Tiny cache buster for scripts if needed: could set headers here.
@@ -275,22 +294,22 @@ def synthetic_seed(domain: str | None):
     # Very small seed set for fallback only (prefer DB content!)
     bank = [
         {
-            "question": f"Which statement best describes a core principle in {name}?",
+            "question": "Which statement best describes a core principle in {}?".format(name),
             "options": {"A": "Random policy enforcement", "B": "Risk-based approach", "C": "Ignoring context", "D": "Checklist-only thinking"},
             "correct": "B",
-            "explanation": f"In {name}, prioritizing controls based on risk is foundational."
+            "explanation": "In {}, prioritizing controls based on risk is foundational.".format(name)
         },
         {
-            "question": f"In {name}, what is the primary purpose of incident containment?",
+            "question": "In {}, what is the primary purpose of incident containment?".format(name),
             "options": {"A": "Attribution", "B": "Reduce ongoing impact", "C": "Punishment", "D": "Public relations"},
             "correct": "B",
             "explanation": "Containment limits harm and sets conditions for eradication and recovery."
         },
         {
-            "question": f"What is a common pitfall when implementing controls in {name}?",
+            "question": "What is a common pitfall when implementing controls in {}?".format(name),
             "options": {"A": "Continuous improvement", "B": "Overlooking change management", "C": "Documenting processes", "D": "Testing controls"},
             "correct": "B",
-            "explanation": "Controls fail if people/process changes aren’t managed."
+            "explanation": "Controls fail if people/process changes aren't managed."
         },
     ]
     return bank
@@ -320,6 +339,42 @@ def generate_fallback_quiz(quiz_type: str, domain: str | None, difficulty: str, 
 
 @app.route("/")
 def home():
+    return redirect(url_for("dashboard"))
+
+@app.route("/login")
+def login():
+    # Simple login page
+    body = """
+    <div class="row">
+      <div class="col-md-6 mx-auto">
+        <div class="card">
+          <div class="card-header"><h4 class="mb-0">Login</h4></div>
+          <div class="card-body">
+            <form method="post">
+              <div class="mb-3">
+                <label for="email" class="form-label">Email</label>
+                <input type="email" class="form-control" id="email" name="email" value="student@example.com" required>
+              </div>
+              <div class="mb-3">
+                <label for="password" class="form-label">Password</label>
+                <input type="password" class="form-control" id="password" name="password" value="demo" required>
+              </div>
+              <button type="submit" class="btn btn-primary">Login</button>
+            </form>
+            <hr>
+            <p class="text-muted mb-0">Demo credentials: student@example.com / demo</p>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_base_template("Login", body)
+
+@app.route("/login", methods=["POST"])
+def login_post():
+    # Simple login handler - auto-login for demo
+    session["user_id"] = 1
+    session["user_name"] = "CPP Student"
     return redirect(url_for("dashboard"))
 
 @app.route("/dashboard")
@@ -378,15 +433,15 @@ def subscribe():
       <div class="col-lg-8 mx-auto">
         <div class="card">
           <div class="card-body">
-            <h3>Trial Ended</h3>
-            <p>Your free trial is <strong>$days</strong> days (set to $trial_days). It appears your trial has ended.</p>
+            <h3>Trial Status</h3>
+            <p>Your free trial is <strong>$days</strong> days. Time remaining: <strong>$remaining</strong> days.</p>
             <p>Please contact support to activate your subscription and keep going!</p>
             <a href="/dashboard" class="btn btn-secondary">Back to Dashboard</a>
           </div>
         </div>
       </div>
     </div>
-    """).substitute(days=TRIAL_DAYS, trial_days=TRIAL_DAYS)
+    """).substitute(days=TRIAL_DAYS, remaining=remaining)
     return render_base_template("Subscribe", body, user=user)
 
 # --------------------------------------------------------------------------------------
@@ -399,7 +454,10 @@ def study():
     user = User.query.get(session["user_id"])
     session["study_start_time"] = datetime.utcnow().timestamp()
 
-    body = """
+    # Build dynamic domain suggestion chips safely
+    domain_chips = build_domain_suggestion_chips()
+
+    body_template = Template("""
     <style>
       .tutor-avatar { width: 56px; height: 56px; border-radius: 50%;
         background: linear-gradient(135deg,#a5d8ff,#eebefa);
@@ -441,6 +499,7 @@ def study():
             <div class="sugg-chip">Explain CPTED vs traditional access control with examples.</div>
             <div class="sugg-chip">Make a 1-week study plan for Investigations.</div>
             <div class="sugg-chip">What are common mistakes on the CPP exam?</div>
+            $domain_chips
           </div>
         </div>
       </div>
@@ -491,36 +550,80 @@ def study():
         });
       });
     </script>
-    """
+    """)
+    
+    body = body_template.substitute(domain_chips=domain_chips)
     return render_base_template("Study", body, user=user)
 
 @app.post("/chat")
 @subscription_required
 def chat_api():
-    # Placeholder tutor logic (format with paragraphs & bullets when possible)
+    # Enhanced tutor logic with better formatting
     data = request.get_json(silent=True) or {}
     msg = (data.get("message") or "").strip()
     if not msg:
         return jsonify({"error": "Empty message."})
 
-    # simple canned formatter that produces readable output
+    # Enhanced response logic
     response_lines = []
-    if "scenario" in msg.lower() or "real" in msg.lower():
-        response_lines.append("**Scenario:**")
+    msg_lower = msg.lower()
+    
+    if "scenario" in msg_lower or "real" in msg_lower or "situation" in msg_lower:
+        response_lines.append("**Scenario-Based Exercise:**")
+        response_lines.append("")
         response_lines.append("You are the security manager at a multi-tenant facility. A power outage has affected access control on two floors during a storm.")
         response_lines.append("")
-        response_lines.append("**Questions to consider:**")
+        response_lines.append("**Critical Questions:**")
         response_lines.append("1) What is your immediate containment step?")
         response_lines.append("2) Which stakeholders do you notify and in what order?")
         response_lines.append("3) How do you maintain physical access while systems are restored?")
         response_lines.append("4) What corrective actions will you log for the after-action review?")
-    else:
-        response_lines.append("Here’s a structured explanation:")
         response_lines.append("")
-        response_lines.append("• **Definition:** A brief, exam-focused definition of the topic.")
-        response_lines.append("• **Why it matters:** Connect to risk, cost, and operations.")
-        response_lines.append("• **How to apply:** Concrete steps or decision points.")
-        response_lines.append("• **Exam tip:** Look for keywords and elimination strategies.")
+        response_lines.append("**Key Principle:** In crisis situations, prioritize life safety, then asset protection, then business continuity.")
+    
+    elif "study plan" in msg_lower:
+        response_lines.append("**7-Day Study Plan Template:**")
+        response_lines.append("")
+        response_lines.append("**Days 1-2:** Foundation concepts and definitions")
+        response_lines.append("**Days 3-4:** Case studies and real-world applications") 
+        response_lines.append("**Days 5-6:** Practice questions and weak area review")
+        response_lines.append("**Day 7:** Comprehensive review and mock exam")
+        response_lines.append("")
+        response_lines.append("**Daily Goal:** 1-2 hours study time, aim for 80%+ on practice questions")
+    
+    elif "mistake" in msg_lower or "common" in msg_lower:
+        response_lines.append("**Common CPP Exam Mistakes:**")
+        response_lines.append("")
+        response_lines.append("• **Overthinking scenarios:** Choose the most direct, risk-based answer")
+        response_lines.append("• **Ignoring cost-benefit:** Security solutions must be proportional to risk")
+        response_lines.append("• **Missing stakeholder considerations:** Always consider business impact")
+        response_lines.append("• **Confusing standards:** Know the difference between NIST, ISO, and industry best practices")
+        response_lines.append("")
+        response_lines.append("**Success Strategy:** Focus on risk management principles, not just technical controls")
+    
+    else:
+        # Check if asking about specific domain
+        domain_mentioned = None
+        for key, domain_info in CPP_DOMAINS.items():
+            if domain_info["name"].lower() in msg_lower or key.replace("-", " ") in msg_lower:
+                domain_mentioned = domain_info["name"]
+                break
+        
+        if domain_mentioned:
+            response_lines.append("**{} - Key Concepts:**".format(domain_mentioned))
+            response_lines.append("")
+            response_lines.append("• **Core Principles:** Risk-based approach with cost-benefit analysis")
+            response_lines.append("• **Implementation:** Layered controls with clear policies and procedures")
+            response_lines.append("• **Measurement:** Regular assessment and continuous improvement")
+            response_lines.append("• **Integration:** Coordination with business objectives and compliance requirements")
+        else:
+            response_lines.append("**Structured Analysis:**")
+            response_lines.append("")
+            response_lines.append("• **Definition:** Clear, exam-focused explanation of the concept")
+            response_lines.append("• **Risk Context:** How this relates to threat mitigation and vulnerability management")
+            response_lines.append("• **Business Impact:** Connection to operational efficiency and cost considerations")
+            response_lines.append("• **Best Practices:** Industry-standard approaches and implementation guidelines")
+            response_lines.append("• **Exam Tips:** Keywords to look for and common distractors to avoid")
 
     return jsonify({"response": "\n".join(response_lines)})
 
@@ -554,7 +657,7 @@ def api_flashcards():
                 correct_text = _strip_choice_letter(str(opts.get(correct_letter, "")).strip())
                 back = correct_text
                 if r.get("explanation"):
-                    back = f"{back}\n\n{str(r.get('explanation')).strip()}"
+                    back = "{}\n\n{}".format(back, str(r.get('explanation')).strip())
                 cards.append({
                     "front": str(r.get("question", "")).strip(),
                     "back": back.strip(),
@@ -575,7 +678,7 @@ def api_flashcards():
                 correct_text = _strip_choice_letter(str(options.get(correct_letter, "")).strip())
                 back = correct_text
                 if q.get("explanation"):
-                    back = f"{back}\n\n{str(q.get('explanation')).strip()}"
+                    back = "{}\n\n{}".format(back, str(q.get('explanation')).strip())
                 cards.append({
                     "front": front,
                     "back": back.strip(),
@@ -584,7 +687,7 @@ def api_flashcards():
 
         return jsonify({"cards": cards})
     except Exception as e:
-        print(f"/api/flashcards error: {e}")
+        print("/api/flashcards error: {}".format(e))
         return jsonify({"cards": []})
 
 @app.route("/flashcards")
@@ -684,7 +787,7 @@ def flashcards_page():
 
       function loadDeck() {
         cardEl.textContent = 'Loading...';
-        fetch(`/api/flashcards?domain=${state.domain}&count=100`)
+        fetch('/api/flashcards?domain=' + state.domain + '&count=100')
           .then(r => r.json())
           .then(data => {
             state.deck = (data.cards || []);
@@ -728,7 +831,7 @@ def flashcards_page():
 
       function updateBuckets() {
         const el = document.getElementById('bucketCounts');
-        el.textContent = `New: ${state.buckets.new} • Learning: ${state.buckets.learning} • Review: ${state.buckets.review}`;
+        el.textContent = 'New: ' + state.buckets.new + ' • Learning: ' + state.buckets.learning + ' • Review: ' + state.buckets.review;
       }
 
       window.addEventListener('keydown', (e) => {
@@ -828,7 +931,7 @@ def quiz_selector():
       });
 
       document.getElementById('startPractice').addEventListener('click', () => {
-        window.location.href = `/quiz/practice?domain=${domain}&count=${count}&difficulty=${diff}`;
+        window.location.href = '/quiz/practice?domain=' + domain + '&count=' + count + '&difficulty=' + diff;
       });
     </script>
     """
@@ -912,6 +1015,20 @@ def quiz(quiz_type):
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
+        
+        // Check for unanswered questions
+        const unanswered = [];
+        Object.keys(answers).forEach(key => {
+          if (!answers[key]) {
+            unanswered.push(parseInt(key) + 1);
+          }
+        });
+        
+        if (unanswered.length > 0) {
+          alert('Please answer all questions before submitting. Missing: Q' + unanswered.join(', Q'));
+          return;
+        }
+        
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -947,13 +1064,16 @@ def quiz(quiz_type):
               html += '<div class="p-3 border rounded mb-2 ' + cls + '">';
               html += '<div><strong>Q' + r.index + '.</strong> ' + (r.question || '') + '</div>';
               if (ok) {
-                html += '<div class="mt-1 text-success"><strong>Correct:</strong> ' + (r.user_letter || '') + ') ' + (r.user_text || '') + '</div>';
+                html += '<div class="mt-1 text-success"><strong>✓ Correct:</strong> ' + (r.user_letter || '') + ') ' + (r.user_text || '') + '</div>';
               } else {
-                html += '<div class="mt-1 text-danger"><strong>Your answer:</strong> ' + ((r.user_letter || '—')) + (r.user_text ? (') ' + r.user_text) : '') + '</div>';
-                html += '<div class="mt-1 text-success"><strong>Correct:</strong> ' + (r.correct_letter || '') + ') ' + (r.correct_text || '') + '</div>';
+                html += '<div class="mt-1 text-danger"><strong>✗ Your answer:</strong> ' + ((r.user_letter || '—')) + (r.user_text ? (') ' + r.user_text) : '') + '</div>';
+                html += '<div class="mt-1 text-success"><strong>✓ Correct answer:</strong> ' + (r.correct_letter || '') + ') ' + (r.correct_text || '') + '</div>';
               }
               if (r.explanation) {
-                html += '<div class="mt-2"><em>' + r.explanation + '</em></div>';
+                html += '<div class="mt-2"><em><strong>Explanation:</strong> ' + r.explanation + '</em></div>';
+              }
+              if (r.source_name) {
+                html += '<div class="mt-1"><small class="text-muted"><strong>Source:</strong> ' + r.source_name + '</small></div>';
               }
               html += '</div>';
             });
@@ -1003,7 +1123,9 @@ def submit_quiz():
             "user_text": opts.get(user_ans) if user_ans else None,
             "correct_letter": correct_letter,
             "correct_text": opts.get(correct_letter),
-            "explanation": q.get("explanation")
+            "explanation": q.get("explanation"),
+            "source_name": q.get("source_name"),
+            "source_url": q.get("source_url")
         })
 
     score_pct = (correct / total * 100) if total else 0.0
@@ -1060,12 +1182,21 @@ def submit_quiz():
 
     db.session.commit()
 
-    # basic performance insights
+    # Enhanced performance insights
     insights = []
-    if score_pct < 80:
-        insights.append("Focus on your weaker options; review the explanations for each incorrect question.")
+    if score_pct >= 90:
+        insights.append("Excellent work! You're demonstrating mastery of this material.")
+    elif score_pct >= 80:
+        insights.append("Great job! Keep practicing to maintain this consistency.")
+    elif score_pct >= 70:
+        insights.append("Good progress. Review the explanations for missed questions to improve further.")
     else:
-        insights.append("Great job! Keep practicing to maintain >80% consistency.")
+        insights.append("Focus on fundamentals. Review the domain concepts and try again.")
+    
+    # Domain-specific feedback
+    wrong_count = total - correct
+    if wrong_count > 0:
+        insights.append("Review the {} explanations below to strengthen weak areas.".format(wrong_count))
 
     return jsonify({
         "score": score_pct,
@@ -1095,15 +1226,23 @@ def mock_exam():
             <div class="card">
               <div class="card-header"><h4 class="mb-0">Mock Exam</h4></div>
               <div class="card-body">
-                <p>Select the number of questions:</p>
-                <div class="d-flex gap-2 flex-wrap">
-                  <a class="btn btn-primary" href="/mock-exam?count=25">25</a>
-                  <a class="btn btn-primary" href="/mock-exam?count=50">50</a>
-                  <a class="btn btn-primary" href="/mock-exam?count=75">75</a>
-                  <a class="btn btn-primary" href="/mock-exam?count=100">100</a>
+                <p><strong>Choose your exam length:</strong></p>
+                <div class="d-grid gap-2 d-md-flex justify-content-md-start">
+                  <a class="btn btn-primary btn-lg" href="/mock-exam?count=25">25 Questions</a>
+                  <a class="btn btn-primary btn-lg" href="/mock-exam?count=50">50 Questions</a>
+                  <a class="btn btn-primary btn-lg" href="/mock-exam?count=75">75 Questions</a>
+                  <a class="btn btn-primary btn-lg" href="/mock-exam?count=100">100 Questions</a>
                 </div>
                 <hr/>
-                <p class="text-muted mb-0">Questions are randomized across all domains.</p>
+                <div class="alert alert-info">
+                  <strong>Exam Format:</strong>
+                  <ul class="mb-0">
+                    <li>Questions are randomized across all CPP domains</li>
+                    <li>You must answer all questions before submitting</li>
+                    <li>Detailed feedback provided after completion</li>
+                    <li>Aim for 80%+ to demonstrate exam readiness</li>
+                  </ul>
+                </div>
               </div>
             </div>
           </div>
@@ -1121,12 +1260,13 @@ def mock_exam():
       <div class="col-md-10 mx-auto">
         <div class="card">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">Mock Exam ($num Q)</h4>
-            <button id="submitBtnTop" class="btn btn-success">Submit</button>
+            <h4 class="mb-0">Mock Exam ($num Questions)</h4>
+            <button id="submitBtnTop" class="btn btn-success">Submit Exam</button>
           </div>
           <div class="card-body" id="quizContainer"></div>
-          <div class="card-footer text-end">
-            <button id="submitBtnBottom" class="btn btn-success">Submit</button>
+          <div class="card-footer d-flex justify-content-between">
+            <div class="text-muted">Answer all questions before submitting</div>
+            <button id="submitBtnBottom" class="btn btn-success">Submit Exam</button>
           </div>
         </div>
         <div class="mt-4" id="results"></div>
@@ -1141,6 +1281,7 @@ def mock_exam():
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
+          card.id = 'question-' + idx;
           const title = document.createElement('h5');
           title.textContent = 'Q' + (idx + 1) + '. ' + q.question;
           card.appendChild(title);
@@ -1170,10 +1311,34 @@ def mock_exam():
 
       async function submitQuiz() {
         const answers = {};
+        const unanswered = [];
+        
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
+          if (!selected) {
+            unanswered.push(idx + 1);
+          }
         });
+        
+        // Highlight unanswered questions
+        if (unanswered.length > 0) {
+          unanswered.forEach(qNum => {
+            const card = document.getElementById('question-' + (qNum - 1));
+            if (card) {
+              card.style.borderColor = '#dc3545';
+              card.style.backgroundColor = '#f8d7da';
+            }
+          });
+          alert('Please answer all questions before submitting. Missing: Q' + unanswered.join(', Q'));
+          // Scroll to first unanswered
+          const firstUnanswered = document.getElementById('question-' + (unanswered[0] - 1));
+          if (firstUnanswered) {
+            firstUnanswered.scrollIntoView({ behavior: 'smooth', block: 'center' });
+          }
+          return;
+        }
+        
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1193,29 +1358,38 @@ def mock_exam():
           }
 
           let html = '<div class="card"><div class="card-body">';
-          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+          html += '<h3 class="text-center">Mock Exam Results</h3>';
+          html += '<div class="row text-center mb-3">';
+          html += '<div class="col-md-4"><h4>' + data.score.toFixed(1) + '%</h4><p class="text-muted">Overall Score</p></div>';
+          html += '<div class="col-md-4"><h4>' + data.correct + '/' + data.total + '</h4><p class="text-muted">Questions Correct</p></div>';
+          html += '<div class="col-md-4"><h4>' + (data.score >= 80 ? '✓ Pass' : '✗ Review') + '</h4><p class="text-muted">Readiness</p></div>';
+          html += '</div>';
+          
           if (Array.isArray(data.performance_insights)) {
-            html += '<ul>';
+            html += '<div class="alert alert-info"><h5>Performance Summary</h5><ul class="mb-0">';
             data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-            html += '</ul>';
+            html += '</ul></div>';
           }
           html += '</div></div>';
 
           if (Array.isArray(data.results)) {
-            html += '<div class="mt-3">';
+            html += '<div class="mt-3"><h5>Question Review</h5>';
             data.results.forEach((r) => {
               const ok = !!r.is_correct;
               const cls = ok ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
               html += '<div class="p-3 border rounded mb-2 ' + cls + '">';
               html += '<div><strong>Q' + r.index + '.</strong> ' + (r.question || '') + '</div>';
               if (ok) {
-                html += '<div class="mt-1 text-success"><strong>Correct:</strong> ' + (r.user_letter || '') + ') ' + (r.user_text || '') + '</div>';
+                html += '<div class="mt-1 text-success"><strong>✓ Correct:</strong> ' + (r.user_letter || '') + ') ' + (r.user_text || '') + '</div>';
               } else {
-                html += '<div class="mt-1 text-danger"><strong>Your answer:</strong> ' + ((r.user_letter || '—')) + (r.user_text ? (') ' + r.user_text) : '') + '</div>';
-                html += '<div class="mt-1 text-success"><strong>Correct:</strong> ' + (r.correct_letter || '') + ') ' + (r.correct_text || '') + '</div>';
+                html += '<div class="mt-1 text-danger"><strong>✗ Your answer:</strong> ' + ((r.user_letter || '—')) + (r.user_text ? (') ' + r.user_text) : '') + '</div>';
+                html += '<div class="mt-1 text-success"><strong>✓ Correct answer:</strong> ' + (r.correct_letter || '') + ') ' + (r.correct_text || '') + '</div>';
               }
               if (r.explanation) {
-                html += '<div class="mt-2"><em>' + r.explanation + '</em></div>';
+                html += '<div class="mt-2"><em><strong>Explanation:</strong> ' + r.explanation + '</em></div>';
+              }
+              if (r.source_name) {
+                html += '<div class="mt-1"><small class="text-muted"><strong>Source:</strong> ' + r.source_name + '</small></div>';
               }
               html += '</div>';
             });
@@ -1270,14 +1444,37 @@ def progress_page():
         color_cls = mastery_color(r.mastery_level or "needs_practice")
         dom_name = CPP_DOMAINS.get(r.domain, {}).get("name", r.domain)
         tr_html.append(
-            f"<tr>"
-            f"<td>{dom_name}</td>"
-            f"<td><span class='badge {color_cls}'>{(r.mastery_level or 'needs_practice')}</span></td>"
-            f"<td>{(r.average_score or 0):.1f}%</td>"
-            f"<td>{int(r.question_count or 0)}</td>"
-            f"<td>{(r.last_updated or datetime.utcnow()).strftime('%Y-%m-%d')}</td>"
-            f"</tr>"
+            "<tr>"
+            "<td>{}</td>"
+            "<td><span class='badge {}'>{}</span></td>"
+            "<td>{:.1f}%</td>"
+            "<td>{}</td>"
+            "<td>{}</td>"
+            "</tr>".format(
+                dom_name,
+                color_cls,
+                (r.mastery_level or 'needs_practice'),
+                (r.average_score or 0),
+                int(r.question_count or 0),
+                (r.last_updated or datetime.utcnow()).strftime('%Y-%m-%d')
+            )
         )
+
+    # Performance summary
+    strengths = []
+    improvements = []
+    for r in rows:
+        dom_name = CPP_DOMAINS.get(r.domain, {}).get("name", r.domain)
+        if (r.average_score or 0) >= 85:
+            strengths.append(dom_name)
+        elif (r.average_score or 0) < 70:
+            improvements.append(dom_name)
+
+    summary_html = ""
+    if strengths:
+        summary_html += "<div class='alert alert-success'><strong>Strong Areas:</strong> {}</div>".format(", ".join(strengths))
+    if improvements:
+        summary_html += "<div class='alert alert-warning'><strong>Focus Areas:</strong> {}</div>".format(", ".join(improvements))
 
     gauge = Template("""
     <style>
@@ -1316,7 +1513,7 @@ def progress_page():
         orange_end=min(66, dial_pct) * 1.8,
         green_end=dial_deg,
         deg=(dial_deg - 90),  # needle
-        avg=f"{overall_avg:.1f}"
+        avg="{:.1f}".format(overall_avg)
     )
 
     table_html = """
@@ -1335,10 +1532,50 @@ def progress_page():
         </div>
       </div>
     </div>
-    """.format(rows=("".join(tr_html) if tr_html else "<tr><td colspan='5' class='text-muted'>No data yet. Take some quizzes!</td></tr>"))
+    """.format(rows=("".join(tr_html) if tr_html else "<tr><td colspan='5' class='text-muted text-center'>No data yet. Take some quizzes to see your progress!</td></tr>"))
 
-    content = gauge + table_html
+    content = gauge + summary_html + table_html
     return render_base_template("Progress", content, user=user)
+
+# --------------------------------------------------------------------------------------
+# Error Handlers
+# --------------------------------------------------------------------------------------
+
+@app.errorhandler(404)
+def not_found(error):
+    body = """
+    <div class="row">
+      <div class="col-md-6 mx-auto text-center">
+        <div class="card">
+          <div class="card-body">
+            <h1 class="display-1">404</h1>
+            <h4>Page Not Found</h4>
+            <p class="text-muted">The page you're looking for doesn't exist.</p>
+            <a href="/dashboard" class="btn btn-primary">Go to Dashboard</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_base_template("Not Found", body), 404
+
+@app.errorhandler(500)
+def server_error(error):
+    body = """
+    <div class="row">
+      <div class="col-md-6 mx-auto text-center">
+        <div class="card">
+          <div class="card-body">
+            <h1 class="display-1">500</h1>
+            <h4>Server Error</h4>
+            <p class="text-muted">Something went wrong on our end.</p>
+            <a href="/dashboard" class="btn btn-primary">Go to Dashboard</a>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_base_template("Server Error", body), 500
 
 # --------------------------------------------------------------------------------------
 # Run
@@ -1346,7 +1583,6 @@ def progress_page():
 
 if __name__ == "__main__":
     # For local testing; Render uses Gunicorn
-    init_db()
+    with app.app_context():
+        init_db()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
-
-
