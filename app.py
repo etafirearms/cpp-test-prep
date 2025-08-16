@@ -1196,8 +1196,24 @@ def api_flashcards():
             except Exception:
                 opts = {}
             if r.correct and opts.get(r.correct):
-                back = (back + ("\n\nCorrect: " + r.correct + ") " + str(opts.get(r.correct))) if back else ("Correct: " + r.correct + ") " + str(opts.get(r.correct)))
-            cards.append({"q": r.question, "a": back or "See reference materials.", "domain": r.domain})
+                back = r.explanation or ""
+try:
+    opts = json.loads(r.options_json) if r.options_json else {}
+except Exception:
+    opts = {}
+
+if r.correct and opts.get(r.correct):
+    if back:
+        back = back + "\n\nCorrect: " + r.correct + ") " + str(opts.get(r.correct))
+    else:
+        back = "Correct: " + r.correct + ") " + str(opts.get(r.correct))
+
+cards.append({
+    "q": r.question,
+    "a": back or "See reference materials.",
+    "domain": r.domain
+})
+
     except Exception as e:
         print(f"/api/flashcards error reading bank: {e}")
 
@@ -2077,3 +2093,4 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
