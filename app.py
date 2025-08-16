@@ -210,6 +210,32 @@ def init_database():
                 except Exception:
                     db.session.rollback()
 
+        # NEW: Ensure UserProgress has expected columns (topic & others)
+        if 'user_progress' in insp.get_table_names():
+            existing_cols = {c['name'] for c in insp.get_columns('user_progress')}
+            # Add columns if missing; keep null-friendly for safety
+            missing_alters = []
+            if 'topic' not in existing_cols:
+                missing_alters.append("ADD COLUMN topic VARCHAR(100)")
+            if 'mastery_level' not in existing_cols:
+                missing_alters.append("ADD COLUMN mastery_level VARCHAR(20)")
+            if 'average_score' not in existing_cols:
+                missing_alters.append("ADD COLUMN average_score DOUBLE PRECISION")
+            if 'question_count' not in existing_cols:
+                missing_alters.append("ADD COLUMN question_count INTEGER")
+            if 'last_updated' not in existing_cols:
+                missing_alters.append("ADD COLUMN last_updated TIMESTAMP")
+            if 'consecutive_good_scores' not in existing_cols:
+                missing_alters.append("ADD COLUMN consecutive_good_scores INTEGER")
+            if missing_alters:
+                try:
+                    sql = "ALTER TABLE user_progress " + ", ".join(missing_alters)
+                    db.session.execute(text(sql))
+                    db.session.commit()
+                except Exception as e:
+                    print(f"user_progress alter error: {e}")
+                    db.session.rollback()
+
         print("Database initialized successfully")
     except Exception as e:
         print(f"Database initialization error: {e}")
@@ -1095,7 +1121,7 @@ def quiz(quiz_type):
             data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
             html += '</ul>';
           }
-          // Optional: show per-question review
+          // Optional: per-question review
           if (Array.isArray(data.results)) {
             html += '<hr><h5>Review</h5>';
             data.results.forEach(r => {
@@ -1523,7 +1549,6 @@ def progress():
                 }
               });
             } else {
-              // If no data, show a friendly message
               const cv = document.getElementById('scoresChart');
               if (cv) {
                 const p = document.createElement('p');
