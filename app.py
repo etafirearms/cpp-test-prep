@@ -46,7 +46,7 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 db = SQLAlchemy(app)
 
 # Cache-buster (bump when changing front-end JS/HTML)
-APP_VERSION = os.environ.get('APP_VERSION', 'v2025-08-16-02')
+APP_VERSION = os.environ.get('APP_VERSION', 'v2025-08-16-03')
 
 # OpenAI config
 OPENAI_API_KEY = require_env('OPENAI_API_KEY')
@@ -80,6 +80,90 @@ CPP_DOMAINS = {
     'physical-security': {'name': 'Physical Security', 'topics': ['CPTED', 'Access Control']},
     'information-security': {'name': 'Information Security', 'topics': ['Data Protection', 'Cybersecurity']},
     'crisis-management': {'name': 'Crisis Management', 'topics': ['Business Continuity', 'Emergency Response']}
+}
+
+# Concise summaries + suggestion seeds for Study side panel
+DOMAIN_INFO = {
+    "general": {
+        "name": "General",
+        "summary": "Ask about any CPP domain. I can help you compare topics, plan your study path, or explain tricky concepts.",
+        "suggestions": [
+            "Give me a 2-week CPP study plan",
+            "What topics are most tested across domains?",
+            "Explain risk vs. threat vs. vulnerability",
+            "How should I approach the mock exam?"
+        ]
+    },
+    "security-principles": {
+        "name": "Security Principles & Practices",
+        "summary": "Covers governance, risk management, ethics, policies, standards, and holistic security strategy.",
+        "suggestions": [
+            "Walk me through a simple risk assessment",
+            "What’s the difference between policy, standard, and procedure?",
+            "How do I prioritize security controls?",
+            "Give examples of qualitative vs. quantitative risk"
+        ]
+    },
+    "business-principles": {
+        "name": "Business Principles & Practices",
+        "summary": "Focuses on budgeting, contracts, vendor management, and aligning security with business objectives.",
+        "suggestions": [
+            "How do I build a security budget?",
+            "CapEx vs. OpEx in security programs",
+            "What should be in an RFP for guards?",
+            "ROI and TCO examples for cameras"
+        ]
+    },
+    "investigations": {
+        "name": "Investigations",
+        "summary": "Planning, interviewing, evidence handling, reporting, and legal considerations in corporate investigations.",
+        "suggestions": [
+            "Steps of an internal investigation",
+            "Interviewing best practices",
+            "Chain of custody explained",
+            "Common report structure"
+        ]
+    },
+    "personnel-security": {
+        "name": "Personnel Security",
+        "summary": "Screening, insider threat indicators, training, and policies to reduce human-centric risks.",
+        "suggestions": [
+            "Background screening levels",
+            "Insider threat early warning signs",
+            "Progressive discipline and security",
+            "Onboarding/offboarding checklist"
+        ]
+    },
+    "physical-security": {
+        "name": "Physical Security",
+        "summary": "CPTED, perimeter protection, access control, barriers, lighting, and surveillance.",
+        "suggestions": [
+            "Explain CPTED layers with examples",
+            "Access control models and use cases",
+            "How to design a security perimeter",
+            "Lighting levels for parking lots"
+        ]
+    },
+    "information-security": {
+        "name": "Information Security",
+        "summary": "Policies, access management, incident response, data protection, and awareness training.",
+        "suggestions": [
+            "CIA triad vs. zero trust",
+            "Incident response lifecycle",
+            "Least privilege in practice",
+            "Encrypting data at rest vs. in transit"
+        ]
+    },
+    "crisis-management": {
+        "name": "Crisis Management",
+        "summary": "BCP/DR, emergency response, communication, and resilience under disruptive events.",
+        "suggestions": [
+            "Business impact analysis steps",
+            "Crisis communication templates",
+            "Tabletop exercise outline",
+            "Recovery time objectives vs. recovery point objectives"
+        ]
+    }
 }
 
 # -----------------------------------------------------------------------------
@@ -493,9 +577,9 @@ def build_flashcards_from_bank():
     for q in _base_bank():
         correct_letter = q.get('correct')
         correct_text = q.get('options', {}).get(correct_letter, '')
-        back = f"{correct_text}"
+        back = correct_text
         if q.get('explanation'):
-            back += f" — {q['explanation']}"
+            back += " — " + q['explanation']
         cards.append({
             "question": q.get('question', ''),
             "answer": back,
@@ -557,6 +641,7 @@ def render_base_template(title, content_html, user=None):
             '    <div class="navbar-nav ms-auto">'
             '      <a class="nav-link" href="/dashboard">Dashboard</a>'
             '      <a class="nav-link" href="/study">Study</a>'
+            '      <a class="nav-link" href="/flashcards">Flashcards</a>'
             '      <a class="nav-link" href="/quiz-selector">Quizzes</a>'
             '      <a class="nav-link" href="/mock-exam">Mock Exam</a>'
             '      <a class="nav-link" href="/progress">Progress</a>'
@@ -889,9 +974,11 @@ def study():
     session['study_start_time'] = datetime.utcnow().timestamp()
 
     domain_opts = ''.join([f'<option value="{slug}">{meta["name"]}</option>' for slug, meta in CPP_DOMAINS.items()])
+    domain_info_json = json.dumps(DOMAIN_INFO)
+
     content_tmpl = Template("""
     <div class="row">
-      <div class="col-md-8 mx-auto">
+      <div class="col-lg-8">
         <div class="card">
           <div class="card-header d-flex justify-content-between align-items-center">
             <h4 class="mb-0">AI Tutor</h4>
@@ -912,12 +999,26 @@ def study():
           </div>
         </div>
       </div>
+
+      <div class="col-lg-4 mt-3 mt-lg-0">
+        <div class="card h-100">
+          <div class="card-header"><strong>Suggested questions</strong></div>
+          <div class="card-body">
+            <div id="suggestions" class="list-group small"></div>
+            <div class="mt-3 text-muted small">Click a suggestion to fill the question box.</div>
+          </div>
+        </div>
+      </div>
     </div>
+
     <script>
+      const DOMAIN_INFO = $domain_info_json;
+
       const chatDiv = document.getElementById('chat');
       const input = document.getElementById('userInput');
       const sendBtn = document.getElementById('sendBtn');
       const domainSelect = document.getElementById('domainSelect');
+      const suggestionsDiv = document.getElementById('suggestions');
 
       function append(role, text) {
         const el = document.createElement('div');
@@ -926,6 +1027,27 @@ def study():
                        '<div class="mt-1 p-2 border rounded">' + text.replace(/</g,'&lt;') + '</div>';
         chatDiv.appendChild(el);
         chatDiv.scrollTop = chatDiv.scrollHeight;
+      }
+
+      function showDomainIntro(slug) {
+        const key = slug || 'general';
+        const info = DOMAIN_INFO[key] || DOMAIN_INFO['general'];
+        const intro = '<strong>' + info.name + ':</strong> ' + info.summary + '<br/><em>What would you like to learn next?</em>';
+        append('assistant', intro);
+      }
+
+      function fillSuggestions(slug) {
+        const key = slug || 'general';
+        const info = DOMAIN_INFO[key] || DOMAIN_INFO['general'];
+        suggestionsDiv.innerHTML = '';
+        (info.suggestions || []).forEach(function(s) {
+          const a = document.createElement('button');
+          a.className = 'list-group-item list-group-item-action';
+          a.type = 'button';
+          a.textContent = s;
+          a.addEventListener('click', function() { input.value = s; input.focus(); });
+          suggestionsDiv.appendChild(a);
+        });
       }
 
       async function send() {
@@ -947,11 +1069,21 @@ def study():
         }
       }
 
+      // events
       sendBtn.addEventListener('click', send);
       input.addEventListener('keydown', function(e) { if (e.key === 'Enter') send(); });
+      domainSelect.addEventListener('change', function() {
+        chatDiv.innerHTML = '';
+        showDomainIntro(domainSelect.value);
+        fillSuggestions(domainSelect.value);
+      });
+
+      // initial
+      showDomainIntro('');
+      fillSuggestions('');
     </script>
     """)
-    content = content_tmpl.substitute(domain_options=domain_opts)
+    content = content_tmpl.substitute(domain_options=domain_opts, domain_info_json=domain_info_json)
     return render_base_template("Study", content, user=user)
 
 @app.route('/chat', methods=['POST'])
@@ -984,7 +1116,7 @@ def chat():
 
         # If a domain is selected, gently steer the tutor
         domain_name = CPP_DOMAINS.get(selected_domain, {'name': 'General'})['name'] if selected_domain else 'General'
-        prefixed = f"[Domain: {domain_name}] {user_message}"
+        prefixed = "[Domain: " + domain_name + "] " + user_message
 
         messages.append({'role': 'user', 'content': prefixed, 'timestamp': datetime.utcnow().isoformat()})
         openai_messages = [{'role': m['role'], 'content': m['content']} for m in messages]
@@ -1008,41 +1140,93 @@ def chat():
 def flashcards_page():
     user = User.query.get(session['user_id'])
 
-    # Domain options
-    options_html = '<option value="">Random</option>' + ''.join(
-        f'<option value="{slug}">{meta["name"]}</option>' for slug, meta in CPP_DOMAINS.items()
-    )
+    # Sidebar items: Random + all domains
+    side_items = ['<button class="list-group-item list-group-item-action active" data-slug="">Random</button>']
+    for slug, meta in CPP_DOMAINS.items():
+        side_items.append(f'<button class="list-group-item list-group-item-action" data-slug="{slug}">{meta["name"]}</button>')
 
     deck = build_flashcards_from_bank()
     deck_json = json.dumps(deck)
 
     content = Template("""
+    <style>
+      /* Flashcard look & flip */
+      .fc-wrap { perspective: 1200px; }
+      .fc-card {
+        width: 100%;
+        min-height: 220px;
+        border: none;
+        background: transparent;
+      }
+      .fc-inner {
+        position: relative;
+        width: 100%;
+        min-height: 220px;
+        transition: transform 0.5s ease;
+        transform-style: preserve-3d;
+      }
+      .fc-inner.flipped { transform: rotateY(180deg); }
+      .fc-face {
+        position: absolute;
+        inset: 0;
+        backface-visibility: hidden;
+        border: 1px solid #e5e5e5;
+        border-radius: .5rem;
+        padding: 1.25rem;
+        background: #fff;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        text-align: center;
+        font-size: 1.05rem;
+      }
+      .fc-back {
+        transform: rotateY(180deg);
+        color: #0d6efd;
+      }
+      .fc-controls .btn { min-width: 110px; }
+      .list-group-item.active { background-color: #0d6efd; border-color: #0d6efd; }
+    </style>
+
     <div class="row">
-      <div class="col-md-8 mx-auto">
+      <div class="col-md-3 mb-3">
+        <div class="card h-100">
+          <div class="card-header"><strong>Domains</strong></div>
+          <div id="fcSidebar" class="list-group list-group-flush">
+            $side_buttons
+          </div>
+        </div>
+      </div>
+
+      <div class="col-md-9">
         <div class="card">
           <div class="card-header d-flex justify-content-between align-items-center">
             <h4 class="mb-0">Flashcards</h4>
-            <div class="d-flex gap-2 align-items-center">
-              <label>Domain</label>
-              <select id="fcDomain" class="form-select form-select-sm">
-                $domain_options
-              </select>
-              <button id="startDeck" class="btn btn-sm btn-primary">Start</button>
-            </div>
+            <div id="fcStats" class="text-muted small">Pick a domain to begin (Random uses all domains)</div>
           </div>
+
           <div class="card-body">
-            <div id="fcStats" class="mb-2 text-muted small">No deck yet.</div>
-            <div id="fcCard" class="p-4 border rounded text-center" style="min-height: 160px; display:none;">
-              <div id="fcFront"></div>
-              <div id="fcBack" class="mt-2 text-muted" style="display:none;"></div>
+            <div class="fc-wrap">
+              <div id="fcCard" class="fc-card">
+                <div id="fcInner" class="fc-inner">
+                  <div id="fcFront" class="fc-face">
+                    Click a domain on the left, then click the card to flip.
+                  </div>
+                  <div id="fcBack" class="fc-face fc-back">
+                    <em>Answer will appear here.</em>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="d-flex gap-2 mt-3">
+
+            <div class="fc-controls d-flex flex-wrap gap-2 mt-3">
               <button id="btnPrev" class="btn btn-outline-secondary" disabled>Previous</button>
               <button id="btnFlip" class="btn btn-secondary" disabled>Flip</button>
               <button id="btnDontKnow" class="btn btn-warning ms-auto" disabled>Don’t Know</button>
               <button id="btnKnow" class="btn btn-success" disabled>Know</button>
               <button id="btnNext" class="btn btn-outline-primary" disabled>Next</button>
             </div>
+
             <div class="mt-3">
               <a href="/dashboard" class="btn btn-outline-secondary btn-sm">Back to Dashboard</a>
             </div>
@@ -1050,53 +1234,43 @@ def flashcards_page():
         </div>
       </div>
     </div>
+
     <script>
       const ALL_CARDS = $deck_json;
-      const domainSelect = document.getElementById('fcDomain');
-      const startBtn = document.getElementById('startDeck');
+
+      const sidebar = document.getElementById('fcSidebar');
       const front = document.getElementById('fcFront');
       const back = document.getElementById('fcBack');
-      const cardBox = document.getElementById('fcCard');
+      const inner = document.getElementById('fcInner');
+      const stats = document.getElementById('fcStats');
+
       const btnFlip = document.getElementById('btnFlip');
       const btnKnow = document.getElementById('btnKnow');
       const btnDont = document.getElementById('btnDontKnow');
       const btnPrev = document.getElementById('btnPrev');
       const btnNext = document.getElementById('btnNext');
-      const stats = document.getElementById('fcStats');
 
       let deck = [];
       let idx = -1;
-      let seen = new Set(); // no repeats within session
       let knowCount = 0, dontCount = 0;
 
       function shuffle(arr) {
         for (let i = arr.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
-          [arr[i], arr[j]] = [arr[j], arr[i]];
+          const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
         }
         return arr;
       }
 
-      function hashCard(c) {
-        const raw = (c.question || '') + '||' + (c.answer || '') + '||' + (c.domain || '');
-        let h = 0;
-        for (let i = 0; i < raw.length; i++) { h = (Math.imul(31, h) + raw.charCodeAt(i)) | 0; }
-        return String(h);
-      }
-
-      function buildDeck() {
-        const sel = domainSelect.value;
+      function buildDeck(slug) {
         let src = ALL_CARDS;
-        if (sel) src = ALL_CARDS.filter(c => c.domain === sel);
-        if (src.length === 0) src = ALL_CARDS;
+        if (slug) src = ALL_CARDS.filter(function(c) { return c.domain === slug; });
+        if (src.length === 0) src = ALL_CARDS.slice();
         deck = shuffle(src.slice());
-        idx = -1;
-        seen.clear();
+        idx = 0;
         knowCount = 0; dontCount = 0;
-        stats.textContent = 'Deck ready: ' + deck.length + ' cards';
-        enableControls(false);
-        cardBox.style.display = 'none';
-        back.style.display = 'none';
+        renderCard();
+        enableControls(true);
       }
 
       function enableControls(active) {
@@ -1104,74 +1278,67 @@ def flashcards_page():
         btnKnow.disabled = !active;
         btnDont.disabled = !active;
         btnPrev.disabled = !active || idx <= 0;
-        btnNext.disabled = !active;
+        btnNext.disabled = !active || deck.length === 0;
+      }
+
+      function setFrontBack(q, a) {
+        front.textContent = q || '';
+        back.textContent = a || '';
+        inner.classList.remove('flipped');
       }
 
       function renderCard() {
         if (idx < 0 || idx >= deck.length) {
-          stats.textContent = 'Deck finished. Great job! Choose a domain and press Start to go again.';
+          setFrontBack('Deck finished. Choose a domain to go again.', '');
           enableControls(false);
-          cardBox.style.display = 'none';
           return;
         }
         const c = deck[idx];
-        front.textContent = c.question;
-        back.textContent = c.answer;
-        back.style.display = 'none';
-        cardBox.style.display = 'block';
-        btnPrev.disabled = (idx <= 0);
+        setFrontBack(c.question, c.answer);
         stats.textContent = 'Card ' + (idx+1) + ' of ' + deck.length + ' — Known: ' + knowCount + ', Don’t know: ' + dontCount;
+        btnPrev.disabled = (idx <= 0);
       }
 
-      function nextCard() {
-        while (true) {
-          idx++;
-          if (idx >= deck.length) break;
-          const h = hashCard(deck[idx]);
-          if (!seen.has(h)) {
-            seen.add(h);
-            break;
-          }
-        }
-        renderCard();
-        enableControls(idx >= 0 && idx < deck.length);
-      }
-
-      function prevCard() {
-        if (idx > 0) {
-          idx--;
-          renderCard();
-          enableControls(true);
-        }
-      }
-
-      async function mark(known) {
+      function mark(known) {
         if (idx < 0 || idx >= deck.length) return;
         const c = deck[idx];
-        try {
-          await fetch('/flashcards/event', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              question: c.question,
-              answer: c.answer,
-              domain: c.domain,
-              known: !!known
-            })
-          });
-        } catch(e) { /* non-blocking */ }
+        fetch('/flashcards/event', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            question: c.question,
+            answer: c.answer,
+            domain: c.domain,
+            known: !!known
+          })
+        }).catch(function(){});
         if (known) knowCount++; else dontCount++;
-        nextCard();
+        idx++;
+        if (idx >= deck.length) {
+          renderCard();
+        } else {
+          renderCard();
+        }
       }
 
-      startBtn.addEventListener('click', function() { buildDeck(); nextCard(); });
-      btnFlip.addEventListener('click', function() { back.style.display = (back.style.display === 'none') ? '' : 'none'; });
-      btnKnow.addEventListener('click', function() { mark(true); });
-      btnDont.addEventListener('click', function() { mark(false); });
-      btnNext.addEventListener('click', nextCard);
-      btnPrev.addEventListener('click', prevCard);
+      // interactions
+      btnFlip.addEventListener('click', function(){ inner.classList.toggle('flipped'); });
+      document.getElementById('fcCard').addEventListener('click', function(){ inner.classList.toggle('flipped'); });
+      btnKnow.addEventListener('click', function(){ mark(true); });
+      btnDont.addEventListener('click', function(){ mark(false); });
+      btnNext.addEventListener('click', function(){ idx = Math.min(deck.length, idx + 1); renderCard(); });
+      btnPrev.addEventListener('click', function(){ if (idx > 0) { idx -= 1; renderCard(); } });
+
+      sidebar.querySelectorAll('.list-group-item').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          sidebar.querySelectorAll('.list-group-item').forEach(function(b){ b.classList.remove('active'); });
+          btn.classList.add('active');
+          const slug = btn.getAttribute('data-slug');
+          buildDeck(slug);
+        });
+      });
     </script>
-    """).substitute(domain_options=options_html, deck_json=deck_json)
+    """).substitute(side_buttons=''.join(side_items), deck_json=deck_json)
     return render_base_template("Flashcards", content, user=user)
 
 @app.post('/flashcards/event')
