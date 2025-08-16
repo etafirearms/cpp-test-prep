@@ -5,7 +5,6 @@ scores.append({
             'domain': domain,
             'time_taken': time_taken
         })
-        user.quiz_scores = json.dumps(scores[-50:])  # Keep last 50 scores
         db.session.commit()
 
         # Enhanced performance insights
@@ -2958,3 +2957,4 @@ def chat():
         messages.append({'role': 'assistant', 'content': ai_response, 'timestamp': datetime.utcnow().isoformat()})
 
         ch.messages = json.dumps(messages)
+
