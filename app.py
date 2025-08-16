@@ -28,6 +28,24 @@ app.config["SQLALCHEMY_DATABASE_URI"] = db_url
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 db = SQLAlchemy(app)
 
+# --------------------------------------------------------------------------------------
+# Flask 3.x safe: Initialize DB at import time (idempotent)
+# --------------------------------------------------------------------------------------
+def init_db_safe():
+    from sqlalchemy.exc import SQLAlchemyError
+    try:
+        with app.app_context():
+            db.create_all()
+            # If you have seed functions, you can call them here safely (idempotent only)
+            # seed_initial_data()
+            app.logger.info("Database initialized successfully")
+    except SQLAlchemyError as e:
+        app.logger.error("Database init error (SQLAlchemy): %s", e)
+    except Exception as e:
+        app.logger.error("Database init unexpected error: %s", e)
+
+init_db_safe()
+
 TRIAL_DAYS = 3  # strictly 3 days
 
 # --------------------------------------------------------------------------------------
@@ -1330,4 +1348,5 @@ if __name__ == "__main__":
     # For local testing; Render uses Gunicorn
     init_db()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+
 
