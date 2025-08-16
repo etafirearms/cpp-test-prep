@@ -1225,8 +1225,21 @@ cards.append({
             opts = q.get('options', {})
             corr = q.get('correct')
             if corr and opts.get(corr):
-                back = (back + ("\n\nCorrect: " + corr + ") " + str(opts.get(corr)))) if back else ("Correct: " + corr + ") " + str(opts.get(corr)))
-            cards.append({"q": q.get('question',''), "a": back or "See reference materials.", "domain": q.get('domain','general')})
+                fb = generate_fallback_quiz('practice', domain=None, difficulty='medium', num_questions=count)
+for q in fb['questions']:
+    back = q.get('explanation', '')
+    opts = q.get('options', {}) or {}
+    corr = q.get('correct')
+    if corr and opts.get(corr):
+        if back:
+            back = back + "\n\nCorrect: " + corr + ") " + str(opts.get(corr))
+        else:
+            back = "Correct: " + corr + ") " + str(opts.get(corr))
+    cards.append({
+        "q": q.get('question', ''),
+        "a": back or "See reference materials.",
+        "domain": q.get('domain', 'general')
+    })
 
     return jsonify({"cards": cards})
 
@@ -2093,4 +2106,5 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug)
+
 
