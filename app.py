@@ -258,7 +258,6 @@ def init_database():
             db.create_all()
         else:
             qb_cols = {c['name'] for c in insp.get_columns('question_bank')}
-            # Add any missing columns
             ddl = []
             if 'domain' not in qb_cols:
                 ddl.append("ADD COLUMN domain VARCHAR(50)")
@@ -487,12 +486,7 @@ def _fallback_bank():
     ]
 
 def fetch_questions_from_db(quiz_type, domain, difficulty, num_questions):
-    """
-    Try to fetch from DB 'question_bank' if table exists & verified items are present.
-    Falls back to empty list if not enough (caller fills with fallback).
-    """
     try:
-        # Basic selection rules
         q = QuestionBank.query.filter_by(is_verified=True)
         if difficulty:
             q = q.filter(QuestionBank.difficulty == difficulty)
@@ -519,30 +513,21 @@ def fetch_questions_from_db(quiz_type, domain, difficulty, num_questions):
         return []
 
 def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
-    """
-    Compose a quiz using DB if available; otherwise fallback statics.
-    Ensures we avoid immediate duplicates; if bank smaller than requested, duplicates
-    are spaced out as much as possible.
-    """
     final_questions = []
 
-    # Prefer DB content
     db_questions = fetch_questions_from_db(quiz_type, domain, difficulty, num_questions)
     if db_questions:
         final_questions.extend(db_questions)
 
-    # Top off with fallback if short
     if len(final_questions) < num_questions:
         base = _fallback_bank()
         random.shuffle(base)
-        # Expand by cycling base while spacing duplicates
         seen_hashes = set()
         idx = 0
         while len(final_questions) < num_questions:
             q = base[idx % len(base)]
             idx += 1
             qh = _hash_question_payload(q)
-            # Allow duplicates only when necessary to reach target
             if qh in seen_hashes and len(seen_hashes) < len(base):
                 continue
             seen_hashes.add(qh)
@@ -605,7 +590,6 @@ def render_base_template(title, content_html, user=None):
             '</nav>'
         )
 
-    # Light theme accents
     style = """
     <style>
       .theme-secpri { background: #E8F0FE; }
@@ -746,7 +730,7 @@ def register():
             log_activity(user.id, 'user_registered', f'New user: {first_name} {last_name}')
 
             session['user_id'] = user.id
-            session['user_name'] = f"{first_name} {last_name}"`
+            session['user_name'] = f"{first_name} {last_name}"
             flash(f'Welcome {first_name}! You have a 7-day free trial.', 'success')
             return redirect(url_for('dashboard'))
         except Exception as e:
@@ -1237,7 +1221,6 @@ def quiz(quiz_type):
             html += '</ul>';
           }
 
-          // Per-question review
           if (Array.isArray(data.results)) {
             html += '<hr/><h5>Review your answers</h5>';
             data.results.forEach(r => {
@@ -1355,7 +1338,6 @@ def mock_exam():
       }
 
       async function submitQuizMock() {
-        // Require all answered; highlight first missing (mock-exam only)
         const idx = findFirstUnansweredIndex();
         if (idx !== -1) {
           const cards = document.querySelectorAll('#quizContainer > div');
@@ -1454,7 +1436,6 @@ def submit_quiz():
         if not quiz_type or not questions:
             return jsonify({'error': 'Invalid quiz data'}), 400
 
-        # Duration
         time_taken = 0
         if 'quiz_start_time' in session:
             start = datetime.fromtimestamp(session['quiz_start_time'])
@@ -1464,8 +1445,7 @@ def submit_quiz():
         correct_count = 0
         total = len(questions)
 
-        # Per-domain tallies for feedback
-        domain_stats = {}  # domain -> [correct, total]
+        domain_stats = {}
 
         detailed_results = []
         for i, q in enumerate(questions):
@@ -1483,7 +1463,6 @@ def submit_quiz():
             if is_correct:
                 domain_stats[dom][0] += 1
 
-            # update progress per-answer (lightweight)
             try:
                 update_user_progress_on_answer(session['user_id'], dom, None, is_correct)
             except Exception as e:
@@ -1503,7 +1482,6 @@ def submit_quiz():
 
         score = (correct_count / total) * 100 if total else 0.0
 
-        # Save result
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
@@ -1517,7 +1495,6 @@ def submit_quiz():
         db.session.add(qr)
         db.session.commit()
 
-        # Update user quiz score history
         user = User.query.get(session['user_id'])
         try:
             scores = json.loads(user.quiz_scores) if user.quiz_scores else []
@@ -1533,7 +1510,6 @@ def submit_quiz():
         user.quiz_scores = json.dumps(scores[-50:])
         db.session.commit()
 
-        # Insights
         insights = []
         if score >= 90:
             insights.append("Excellent performance. You're well-prepared for this topic.")
@@ -1550,7 +1526,6 @@ def submit_quiz():
             elif avg > 3:
                 insights.append("Consider practicing to improve your speed.")
 
-        # Domain feedback summaries
         domain_feedback = []
         for dom, (c_ok, t_all) in domain_stats.items():
             pct = 0 if t_all == 0 else round((c_ok / t_all) * 100)
