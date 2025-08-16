@@ -12,7 +12,7 @@ import stripe
 import time
 import hashlib
 
-# For SQL text/inspection helpers
+# SQL helper
 from sqlalchemy import text, inspect
 
 # -----------------------------------------------------------------------------
@@ -45,9 +45,6 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 }
 db = SQLAlchemy(app)
 
-# Cache-buster (bump when changing front-end JS/HTML)
-APP_VERSION = os.environ.get('APP_VERSION', 'v2025-08-16-03')
-
 # OpenAI config
 OPENAI_API_KEY = require_env('OPENAI_API_KEY')
 OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini')
@@ -72,6 +69,7 @@ QUIZ_TYPES = {
     'difficult': {'name': 'Advanced Challenge', 'description': 'Challenging questions', 'questions': 20}
 }
 
+# Slugs and nice names
 CPP_DOMAINS = {
     'security-principles': {'name': 'Security Principles & Practices', 'topics': ['Risk Management', 'Security Governance']},
     'business-principles': {'name': 'Business Principles & Practices', 'topics': ['Budgeting', 'Contracts']},
@@ -82,88 +80,52 @@ CPP_DOMAINS = {
     'crisis-management': {'name': 'Crisis Management', 'topics': ['Business Continuity', 'Emergency Response']}
 }
 
-# Concise summaries + suggestion seeds for Study side panel
-DOMAIN_INFO = {
-    "general": {
-        "name": "General",
-        "summary": "Ask about any CPP domain. I can help you compare topics, plan your study path, or explain tricky concepts.",
-        "suggestions": [
-            "Give me a 2-week CPP study plan",
-            "What topics are most tested across domains?",
-            "Explain risk vs. threat vs. vulnerability",
-            "How should I approach the mock exam?"
-        ]
-    },
-    "security-principles": {
-        "name": "Security Principles & Practices",
-        "summary": "Covers governance, risk management, ethics, policies, standards, and holistic security strategy.",
-        "suggestions": [
-            "Walk me through a simple risk assessment",
-            "What’s the difference between policy, standard, and procedure?",
-            "How do I prioritize security controls?",
-            "Give examples of qualitative vs. quantitative risk"
-        ]
-    },
-    "business-principles": {
-        "name": "Business Principles & Practices",
-        "summary": "Focuses on budgeting, contracts, vendor management, and aligning security with business objectives.",
-        "suggestions": [
-            "How do I build a security budget?",
-            "CapEx vs. OpEx in security programs",
-            "What should be in an RFP for guards?",
-            "ROI and TCO examples for cameras"
-        ]
-    },
-    "investigations": {
-        "name": "Investigations",
-        "summary": "Planning, interviewing, evidence handling, reporting, and legal considerations in corporate investigations.",
-        "suggestions": [
-            "Steps of an internal investigation",
-            "Interviewing best practices",
-            "Chain of custody explained",
-            "Common report structure"
-        ]
-    },
-    "personnel-security": {
-        "name": "Personnel Security",
-        "summary": "Screening, insider threat indicators, training, and policies to reduce human-centric risks.",
-        "suggestions": [
-            "Background screening levels",
-            "Insider threat early warning signs",
-            "Progressive discipline and security",
-            "Onboarding/offboarding checklist"
-        ]
-    },
-    "physical-security": {
-        "name": "Physical Security",
-        "summary": "CPTED, perimeter protection, access control, barriers, lighting, and surveillance.",
-        "suggestions": [
-            "Explain CPTED layers with examples",
-            "Access control models and use cases",
-            "How to design a security perimeter",
-            "Lighting levels for parking lots"
-        ]
-    },
-    "information-security": {
-        "name": "Information Security",
-        "summary": "Policies, access management, incident response, data protection, and awareness training.",
-        "suggestions": [
-            "CIA triad vs. zero trust",
-            "Incident response lifecycle",
-            "Least privilege in practice",
-            "Encrypting data at rest vs. in transit"
-        ]
-    },
-    "crisis-management": {
-        "name": "Crisis Management",
-        "summary": "BCP/DR, emergency response, communication, and resilience under disruptive events.",
-        "suggestions": [
-            "Business impact analysis steps",
-            "Crisis communication templates",
-            "Tabletop exercise outline",
-            "Recovery time objectives vs. recovery point objectives"
-        ]
-    }
+# Simple blurbs for study intro + example prompts
+DOMAIN_BLURBS = {
+    'security-principles': "Covers governance, risk, policy frameworks, and layered controls (defense in depth).",
+    'business-principles': "Focuses on budgeting, contracts, procurement, and aligning security with business goals.",
+    'investigations': "Planning, evidence handling, interviewing, reporting, and legal considerations.",
+    'personnel-security': "Screening, insider threat, training & awareness, and role-based access considerations.",
+    'physical-security': "Barriers, locks, access control, alarms, CCTV, and CPTED fundamentals.",
+    'information-security': "Confidentiality, integrity, availability, incident response, and security architecture.",
+    'crisis-management': "BC/DR, emergency response, crisis communications, and resilience planning."
+}
+DOMAIN_SUGGESTED_QUESTIONS = {
+    'security-principles': [
+        "Explain defense in depth with a quick example.",
+        "How do I prioritize risks from a risk assessment?",
+        "What’s the difference between policies and standards?"
+    ],
+    'business-principles': [
+        "How do I justify a security budget to executives?",
+        "Key clauses to watch in security contracts?",
+        "Capex vs Opex for a camera upgrade—pros/cons?"
+    ],
+    'investigations': [
+        "Chain of custody: what are the essential steps?",
+        "What makes a good interview question?",
+        "How do I structure an investigation report?"
+    ],
+    'personnel-security': [
+        "What background checks are most effective?",
+        "Early signs of insider threat to watch?",
+        "Training ideas to reduce social engineering risk?"
+    ],
+    'physical-security': [
+        "CPTED examples for office lobbies?",
+        "Choosing between turnstiles vs full-height portals?",
+        "Pros/cons of badge+PIN vs badge+biometric?"
+    ],
+    'information-security': [
+        "Incident response phases—give me a 60-second overview.",
+        "Zero Trust vs perimeter-based security?",
+        "When to use symmetric vs asymmetric encryption?"
+    ],
+    'crisis-management': [
+        "What should be in a crisis comms plan?",
+        "Top 5 pitfalls in BCP/DR exercises?",
+        "RTO vs RPO—quick comparison with examples?"
+    ]
 }
 
 # -----------------------------------------------------------------------------
@@ -262,7 +224,6 @@ class QuestionEvent(db.Model):
 def init_database():
     try:
         db.create_all()
-
         insp = inspect(db.engine)
 
         # Ensure QuizResult has 'domain' and 'time_taken'
@@ -297,50 +258,18 @@ def init_database():
                 except Exception:
                     db.session.rollback()
 
-        # Ensure UserProgress columns exist (handles older tables)
+        # Ensure UserProgress has 'topic' and 'consecutive_good_scores'
         if 'user_progress' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('user_progress')}
-            add_ops = []
-            if 'topic' not in cols:
-                add_ops.append('ADD COLUMN topic VARCHAR(100)')
-            if 'mastery_level' not in cols:
-                add_ops.append("ADD COLUMN mastery_level VARCHAR(20) DEFAULT 'needs_practice'")
-            if 'average_score' not in cols:
-                add_ops.append('ADD COLUMN average_score FLOAT DEFAULT 0')
-            if 'question_count' not in cols:
-                add_ops.append('ADD COLUMN question_count INTEGER DEFAULT 0')
-            if 'last_updated' not in cols:
-                add_ops.append('ADD COLUMN last_updated TIMESTAMP')
-            if 'consecutive_good_scores' not in cols:
-                add_ops.append('ADD COLUMN consecutive_good_scores INTEGER DEFAULT 0')
-            if add_ops:
+            existing_cols = {c['name'] for c in insp.get_columns('user_progress')}
+            if 'topic' not in existing_cols:
                 try:
-                    db.session.execute(text(f'ALTER TABLE user_progress {", ".join(add_ops)}'))
+                    db.session.execute(text('ALTER TABLE user_progress ADD COLUMN topic VARCHAR(100)'))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
-
-        # Ensure QuestionEvent columns exist
-        if 'question_event' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('question_event')}
-            add_ops = []
-            if 'question_hash' not in cols:
-                add_ops.append('ADD COLUMN question_hash VARCHAR(64)')
-            if 'domain' not in cols:
-                add_ops.append('ADD COLUMN domain VARCHAR(50)')
-            if 'topic' not in cols:
-                add_ops.append('ADD COLUMN topic VARCHAR(100)')
-            if 'source' not in cols:
-                add_ops.append('ADD COLUMN source VARCHAR(20)')
-            if 'is_correct' not in cols:
-                add_ops.append('ADD COLUMN is_correct BOOLEAN')
-            if 'response_time_s' not in cols:
-                add_ops.append('ADD COLUMN response_time_s INTEGER')
-            if 'created_at' not in cols:
-                add_ops.append('ADD COLUMN created_at TIMESTAMP')
-            if add_ops:
+            if 'consecutive_good_scores' not in existing_cols:
                 try:
-                    db.session.execute(text(f'ALTER TABLE question_event {", ".join(add_ops)}'))
+                    db.session.execute(text('ALTER TABLE user_progress ADD COLUMN consecutive_good_scores INTEGER DEFAULT 0'))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
@@ -400,18 +329,11 @@ def log_activity(user_id, activity, details=None):
         print(f"Activity logging error: {e}")
         db.session.rollback()
 
-# ---------- tracking helpers (hash, record event, update progress, seen) ----------
+# ---------- Tracking helpers (hash, record event, update progress, seen) ------
 def _hash_question_payload(question_obj: dict) -> str:
-    """
-    Stable SHA256 hash for a question so we can detect repeats.
-    Uses question text + sorted options (or answer for flashcards).
-    """
     q_text = (question_obj or {}).get('question', '') or ''
     opts = (question_obj or {}).get('options', {}) or {}
-    answer_text = (question_obj or {}).get('answer')
     parts = [q_text.strip()]
-    if answer_text:
-        parts.append(f"ANS:{str(answer_text).strip()}")
     for key in sorted(opts.keys()):
         parts.append(f"{key}:{str(opts.get(key, '')).strip()}")
     raw = "||".join(parts)
@@ -426,7 +348,6 @@ def record_question_event(
     response_time_s: int = None,
     source: str = 'quiz'
 ) -> None:
-    """Insert one QuestionEvent row safely."""
     try:
         qhash = _hash_question_payload(question_obj)
         evt = QuestionEvent(
@@ -445,12 +366,6 @@ def record_question_event(
         db.session.rollback()
 
 def _mastery_from_stats(avg: float, streak: int) -> str:
-    """
-    Mastery banding:
-    - mastered: avg >= 90 and streak >= 3
-    - good:     avg >= 75 and streak >= 2
-    - needs_practice: otherwise
-    """
     if (avg or 0) >= 90 and (streak or 0) >= 3:
         return 'mastered'
     if (avg or 0) >= 75 and (streak or 0) >= 2:
@@ -463,14 +378,9 @@ def update_user_progress_on_answer(
     topic: str,
     is_correct: bool
 ) -> None:
-    """
-    Lightweight rolling update for UserProgress.
-    Call this per answer (quiz/mock/flashcard).
-    """
     try:
         if not domain:
             return
-
         row = UserProgress.query.filter_by(user_id=user_id, domain=domain, topic=topic).first()
         if not row:
             row = UserProgress(
@@ -490,25 +400,15 @@ def update_user_progress_on_answer(
 
         row.average_score = ((row.average_score or 0.0) * old_count + earned) / new_count
         row.question_count = new_count
-
-        if earned >= 75.0:
-            row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1
-        else:
-            row.consecutive_good_scores = 0
-
+        row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1 if earned >= 75.0 else 0
         row.mastery_level = _mastery_from_stats(row.average_score, row.consecutive_good_scores)
         row.last_updated = datetime.utcnow()
-
         db.session.commit()
     except Exception as e:
         print(f"update_user_progress_on_answer error: {e}")
         db.session.rollback()
 
 def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_days: int = 30) -> set:
-    """
-    Return a set of question_hash values the user has seen recently.
-    (Use this for non-repeating flashcards later.)
-    """
     try:
         cutoff = datetime.utcnow() - timedelta(days=window_days)
         q = QuestionEvent.query.filter(
@@ -524,80 +424,172 @@ def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_
         print(f"get_seen_hashes error: {e}")
         return set()
 
+def compute_domain_feedback(user_id: int, min_samples: int = 5):
+    """
+    Build strengths / focus lists from UserProgress for this user.
+    Only include domains with enough questions to be meaningful.
+    """
+    try:
+        rows = UserProgress.query.filter_by(user_id=user_id).all()
+        if not rows:
+            return {"strengths": [], "focus": []}
+
+        def score_row(r):
+            return {
+                "domain": r.domain or "general",
+                "avg": round(float(r.average_score or 0.0), 1),
+                "count": int(r.question_count or 0),
+                "mastery": r.mastery_level or "needs_practice",
+            }
+
+        data = [score_row(r) for r in rows if (r.question_count or 0) >= min_samples and r.domain != "general"]
+
+        mastered = [d for d in data if d["mastery"] == "mastered"]
+        good = [d for d in data if d["mastery"] == "good"]
+        needs = [d for d in data if d["mastery"] == "needs_practice"]
+
+        mastered.sort(key=lambda d: (-d["avg"], -d["count"]))
+        good.sort(key=lambda d: (-d["avg"], -d["count"]))
+        needs.sort(key=lambda d: (d["avg"], -d["count"]))
+
+        strengths = (mastered + good)[:3]
+        focus = needs[:3]
+        return {"strengths": strengths, "focus": focus}
+    except Exception as e:
+        print(f"compute_domain_feedback error: {e}")
+        return {"strengths": [], "focus": []}
+
 # -----------------------------------------------------------------------------
-# Question bank helpers (shared by quiz + flashcards)
+# AI helper
+# -----------------------------------------------------------------------------
+def chat_with_ai(messages, user_id=None):
+    global last_api_call
+    try:
+        if last_api_call:
+            delta = datetime.utcnow() - last_api_call
+            if delta.total_seconds() < 2:
+                time.sleep(2 - delta.total_seconds())
+
+        system_message = {
+            "role": "system",
+            "content": (
+                "You are an expert tutor for the ASIS Certified Protection Professional (CPP) exam. "
+                "Focus on the seven CPP domains: Security Principles & Practices, Business Principles & Practices, "
+                "Investigations, Personnel Security, Physical Security, Information Security, and Crisis Management. "
+                "Provide clear explanations, practical examples, and do not claim affiliation with ASIS."
+            )
+        }
+        if not messages or messages[0].get('role') != 'system':
+            messages.insert(0, system_message)
+
+        headers = {
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
+        data = {
+            'model': OPENAI_CHAT_MODEL,
+            'messages': messages,
+            'max_tokens': 1500,
+            'temperature': 0.7
+        }
+
+        last_api_call = datetime.utcnow()
+        resp = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=45)
+        if resp.status_code == 200:
+            payload = resp.json()
+            return payload['choices'][0]['message']['content']
+        elif resp.status_code in (401, 403):
+            return "I’m having trouble authenticating to my knowledge base right now. Please try again."
+        elif resp.status_code == 429:
+            return "I’m receiving a lot of requests at the moment. Please try again shortly."
+        elif resp.status_code >= 500:
+            return "The AI service is experiencing issues. Please try again in a bit."
+        else:
+            print(f"[OpenAI] Unexpected status: {resp.status_code} body={resp.text[:300]}")
+            return "I hit an unexpected issue. Please rephrase and try again."
+    except Exception as e:
+        print(f"AI chat error: {e}")
+        return "I encountered a technical issue. Please try again."
+
+# -----------------------------------------------------------------------------
+# Static fallback questions (also power flashcards)
 # -----------------------------------------------------------------------------
 def _base_bank():
-    """Small static bank (expand later or replace with AI)."""
     return [
         {
             "question": "What is the primary purpose of a security risk assessment?",
-            "options": {"A": "Identify all threats", "B": "Determine cost-effective mitigation", "C": "Eliminate all risks", "D": "Satisfy compliance"},
+            "options": {
+                "A": "Identify all threats",
+                "B": "Determine cost-effective mitigation",
+                "C": "Eliminate all risks",
+                "D": "Satisfy compliance"
+            },
             "correct": "B",
             "explanation": "Risk assessments help determine cost-effective mitigation strategies.",
             "domain": "security-principles"
         },
         {
             "question": "In CPTED, natural surveillance primarily accomplishes what?",
-            "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
+            "options": {
+                "A": "Reduces guard costs",
+                "B": "Increases observation likelihood",
+                "C": "Eliminates cameras",
+                "D": "Provides legal protection"
+            },
             "correct": "B",
             "explanation": "Natural surveillance increases the likelihood that criminal activity will be observed.",
             "domain": "physical-security"
         },
         {
             "question": "Which concept means applying multiple security layers so if one fails others still protect?",
-            "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
+            "options": {
+                "A": "Security by Obscurity",
+                "B": "Defense in Depth",
+                "C": "Zero Trust",
+                "D": "Least Privilege"
+            },
             "correct": "B",
             "explanation": "Defense in Depth uses layered controls to maintain protection despite single-point failures.",
             "domain": "security-principles"
         },
         {
             "question": "In incident response, what is usually the FIRST priority?",
-            "options": {"A": "Notify law enforcement", "B": "Contain the incident", "C": "Eradicate malware", "D": "Perform lessons learned"},
+            "options": {
+                "A": "Notify law enforcement",
+                "B": "Contain the incident",
+                "C": "Eradicate malware",
+                "D": "Perform lessons learned"
+            },
             "correct": "B",
             "explanation": "Containment prevents further damage before eradication and recovery.",
             "domain": "information-security"
         },
         {
             "question": "Background investigations primarily support which objective?",
-            "options": {"A": "Regulatory compliance only", "B": "Improving marketing outcomes", "C": "Personnel Security risk reduction", "D": "Disaster response coordination"},
+            "options": {
+                "A": "Regulatory compliance only",
+                "B": "Improving marketing outcomes",
+                "C": "Personnel Security risk reduction",
+                "D": "Disaster response coordination"
+            },
             "correct": "C",
             "explanation": "They help reduce personnel security risks such as insider threat.",
             "domain": "personnel-security"
         }
     ]
 
-def build_flashcards_from_bank():
-    """
-    Turn MCQ bank into flashcard-style Q/A.
-    front = question
-    back = 'Correct: <text> — <explanation>'
-    """
-    cards = []
-    for q in _base_bank():
-        correct_letter = q.get('correct')
-        correct_text = q.get('options', {}).get(correct_letter, '')
-        back = correct_text
-        if q.get('explanation'):
-            back += " — " + q['explanation']
-        cards.append({
-            "question": q.get('question', ''),
-            "answer": back,
-            "domain": q.get('domain', 'general')
-        })
-    return cards
-
-# -----------------------------------------------------------------------------
-# Quiz generation
-# -----------------------------------------------------------------------------
 def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
-    """Static bank fallback (repeat/trim to desired length)."""
-    base = _base_bank()
-    if domain and domain in CPP_DOMAINS:
-        base = [q for q in base if q.get('domain') == domain] or base
+    base_questions = _base_bank()
     questions = []
+    # allow domain filter
+    if domain and domain in CPP_DOMAINS:
+        pool = [q for q in base_questions if q.get("domain") == domain]
+        if not pool:
+            pool = base_questions
+    else:
+        pool = base_questions
     while len(questions) < num_questions:
-        for q in base:
+        for q in pool:
             if len(questions) < num_questions:
                 questions.append(q.copy())
     return {
@@ -638,15 +630,20 @@ def render_base_template(title, content_html, user=None):
             '<nav class="navbar navbar-expand-lg navbar-dark bg-primary">'
             '  <div class="container">'
             '    <a class="navbar-brand" href="/dashboard">CPP Test Prep</a>'
-            '    <div class="navbar-nav ms-auto">'
-            '      <a class="nav-link" href="/dashboard">Dashboard</a>'
-            '      <a class="nav-link" href="/study">Study</a>'
-            '      <a class="nav-link" href="/flashcards">Flashcards</a>'
-            '      <a class="nav-link" href="/quiz-selector">Quizzes</a>'
-            '      <a class="nav-link" href="/mock-exam">Mock Exam</a>'
-            '      <a class="nav-link" href="/progress">Progress</a>'
-            '      <a class="nav-link" href="/subscribe">Subscribe</a>'
-            '      <a class="nav-link" href="/logout">Logout</a>'
+            '    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navCollapse">'
+            '      <span class="navbar-toggler-icon"></span>'
+            '    </button>'
+            '    <div class="collapse navbar-collapse" id="navCollapse">'
+            '      <div class="navbar-nav ms-auto">'
+            '        <a class="nav-link" href="/dashboard">Dashboard</a>'
+            '        <a class="nav-link" href="/study">Study</a>'
+            '        <a class="nav-link" href="/flashcards">Flashcards</a>'
+            '        <a class="nav-link" href="/quiz-selector">Quizzes</a>'
+            '        <a class="nav-link" href="/mock-exam">Mock Exam</a>'
+            '        <a class="nav-link" href="/progress">Progress</a>'
+            '        <a class="nav-link" href="/subscribe">Subscribe</a>'
+            '        <a class="nav-link" href="/logout">Logout</a>'
+            '      </div>'
             '    </div>'
             '  </div>'
             '</nav>'
@@ -659,9 +656,37 @@ def render_base_template(title, content_html, user=None):
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>$title - CPP Test Prep</title>
-  <meta name="app-version" content="$app_version"/>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css?v=$app_version" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js?v=$app_version"></script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    /* Small helpers */
+    .chip { display:inline-block; padding:8px 12px; border-radius:999px; background:#0d6efd; color:white; margin:4px; cursor:pointer; }
+    .chip-outline { background:#fff; border:1px solid #0d6efd; color:#0d6efd; }
+    .card-flash {
+      width:100%; max-width:640px; min-height:160px; cursor:pointer;
+      perspective:1000px; margin:auto;
+    }
+    .card-face {
+      transition: transform 0.6s; transform-style:preserve-3d; position:relative;
+    }
+    .card-face.flip { transform: rotateY(180deg); }
+    .card-side {
+      position:absolute; width:100%; backface-visibility:hidden; top:0; left:0;
+      border:1px solid #eee; border-radius:12px; padding:20px; background:white;
+      box-shadow:0 4px 12px rgba(0,0,0,0.06); min-height:160px;
+    }
+    .card-back { transform: rotateY(180deg); }
+    .kbd {border:1px solid #ccc;border-bottom-width:2px;padding:2px 6px;border-radius:6px;background:#f8f9fa;margin-left:4px;margin-right:4px;}
+    .dom-good { background:#28a745 !important; color:white !important; }
+    .dom-ok { background:#fd7e14 !important; color:white !important; }
+    .dom-bad { background:#dc3545 !important; color:white !important; }
+    /* simple radial dial */
+    .dial { --p:0; width:120px; height:120px; border-radius:50%;
+      background:conic-gradient(#0d6efd calc(var(--p)*1%), #e9ecef 0);
+      display:flex; align-items:center; justify-content:center; font-weight:700; color:#0d6efd;
+    }
+    .dial inner { background:white; width:84px; height:84px; border-radius:50%; display:flex; align-items:center; justify-content:center; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
 </head>
 <body>
   $nav
@@ -672,7 +697,7 @@ def render_base_template(title, content_html, user=None):
 </body>
 </html>
 """)
-    return page.substitute(title=title, nav=nav_html, content=content_html, disclaimer=disclaimer, app_version=APP_VERSION)
+    return page.substitute(title=title, nav=nav_html, content=content_html, disclaimer=disclaimer)
 
 # -----------------------------------------------------------------------------
 # Routes
@@ -693,7 +718,6 @@ def healthz():
 def home():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
-
     content = """
     <div class="row justify-content-center">
       <div class="col-md-8">
@@ -701,7 +725,7 @@ def home():
           <h1 class="display-4">CPP Test Prep</h1>
           <p class="lead">AI-powered study platform for the Certified Protection Professional exam</p>
         </div>
-        <div class="row">
+        <div class="row g-3">
           <div class="col-md-6">
             <div class="card h-100">
               <div class="card-body">
@@ -752,13 +776,11 @@ def register():
             return redirect(url_for('login'))
 
         try:
-            # Create Stripe customer
             stripe_customer = stripe.Customer.create(
                 email=email,
                 name=f"{first_name} {last_name}",
                 metadata={'source': 'cpp_test_prep'}
             )
-
             user = User(
                 email=email,
                 password_hash=generate_password_hash(password),
@@ -775,7 +797,6 @@ def register():
             db.session.commit()
 
             log_activity(user.id, 'user_registered', f'New user: {first_name} {last_name}')
-
             session['user_id'] = user.id
             session['user_name'] = f"{first_name} {last_name}"
             flash(f'Welcome {first_name}! You have a 7-day free trial.', 'success')
@@ -785,7 +806,6 @@ def register():
             db.session.rollback()
             flash('Registration error. Please try again.', 'danger')
 
-    # GET form
     content = """
     <div class="row justify-content-center">
       <div class="col-md-6">
@@ -910,56 +930,104 @@ def dashboard():
     if user.subscription_end_date:
         days_left = max(0, (user.subscription_end_date - datetime.utcnow()).days)
 
+    # Small encouraging line
+    last_visit = user.created_at.strftime('%b %d, %Y')
+    msg = "Keep going—small daily sessions compound into big results!"
+
     tmpl = Template("""
     <div class="row">
-      <div class="col-12"><h1>Welcome back, $first_name!</h1></div>
-
+      <div class="col-12 d-flex justify-content-between align-items-center">
+        <h1 class="mb-0">Welcome back, $first_name!</h1>
+        <div class="text-muted">Member since $last_visit</div>
+      </div>
       <div class="col-12">
-        <div class="row mt-4 g-3">
+        <div class="alert alert-primary mt-3 mb-3">$msg</div>
+        <div class="row g-3">
           <div class="col-md-3">
             <div class="card bg-primary text-white h-100">
               <div class="card-body">
-                <h6 class="mb-1">Plan Status</h6>
-                <div class="d-flex align-items-baseline justify-content-between">
-                  <h3 class="mb-0">$days_left</h3>
-                  <span>days left</span>
-                </div>
+                <h6 class="text-uppercase">Trial/Plan Status</h6>
+                <h3 class="mb-0">$days_left days left</h3>
               </div>
             </div>
           </div>
           <div class="col-md-3">
             <div class="card bg-success text-white h-100">
               <div class="card-body">
-                <h6 class="mb-1">Study Time</h6>
-                <div class="d-flex align-items-baseline justify-content-between">
-                  <h3 class="mb-0">$study_time</h3>
-                  <span>mins</span>
-                </div>
+                <h6 class="text-uppercase">Study Time</h6>
+                <h3 class="mb-0">$study_time mins</h3>
               </div>
             </div>
           </div>
-          <div class="col-md-6">
-            <div class="card h-100">
-              <div class="card-body">
-                <h5 class="mb-2">Quick Start</h5>
-                <div class="row g-2">
-                  <div class="col-6 col-lg-3"><a href="/study" class="btn btn-primary w-100">🤖 AI Tutor</a></div>
-                  <div class="col-6 col-lg-3"><a href="/flashcards" class="btn btn-secondary w-100">🃏 Flashcards</a></div>
-                  <div class="col-6 col-lg-3"><a href="/quiz-selector" class="btn btn-success w-100">📝 Quizzes</a></div>
-                  <div class="col-6 col-lg-3"><a href="/mock-exam" class="btn btn-warning w-100">🏁 Mock Exam</a></div>
+          <div class="col-md-6 d-flex align-items-stretch">
+            <div class="card w-100">
+              <div class="card-body d-flex flex-column flex-md-row align-items-center">
+                <div class="me-md-4 mb-3 mb-md-0">
+                  <div class="dial" style="--p:65;">
+                    <inner>65%</inner>
+                  </div>
                 </div>
-                <div class="mt-3">
-                  <a href="/progress" class="btn btn-outline-dark btn-sm">View Progress</a>
+                <div>
+                  <h5 class="mb-1">Your next best step</h5>
+                  <p class="mb-2 text-muted">Start with the Tutor, then reinforce with a 10-question quiz.</p>
+                  <div class="d-flex flex-wrap">
+                    <a href="/study" class="btn btn-primary me-2 mb-2">Start Tutor</a>
+                    <a href="/quiz-selector" class="btn btn-outline-primary me-2 mb-2">Take a Quick Quiz</a>
+                    <a href="/flashcards" class="btn btn-outline-secondary mb-2">Warm up with Flashcards</a>
+                  </div>
                 </div>
               </div>
             </div>
           </div>
         </div>
-      </div>      
+
+        <h4 class="mt-4">Explore</h4>
+        <div class="row mt-1 g-3">
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">🤖 Tutor</h5>
+                <p class="text-muted flex-grow-1">Ask questions & get explanations.</p>
+                <a href="/study" class="btn btn-primary mt-auto">Open AI Tutor</a>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">🃏 Flashcards</h5>
+                <p class="text-muted flex-grow-1">Quick recall on key CPP topics.</p>
+                <a href="/flashcards" class="btn btn-secondary mt-auto">Open Flashcards</a>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">📝 Quizzes</h5>
+                <p class="text-muted flex-grow-1">Domain-specific & practice quizzes.</p>
+                <a href="/quiz-selector" class="btn btn-success mt-auto">Choose a Quiz</a>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body d-flex flex-column text-center">
+                <h5 class="mb-2">🏁 Mock Exam</h5>
+                <p class="text-muted flex-grow-1">Up to 100 questions in one go.</p>
+                <a href="/mock-exam" class="btn btn-warning mt-auto">Start Mock Exam</a>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
     </div>
     """)
     content = tmpl.substitute(
         first_name=user.first_name,
+        last_visit=last_visit,
+        msg=msg,
         days_left=days_left,
         study_time=(user.study_time or 0)
     )
@@ -970,27 +1038,38 @@ def dashboard():
 @subscription_required
 def study():
     user = User.query.get(session['user_id'])
-    # Start study timer
     session['study_start_time'] = datetime.utcnow().timestamp()
 
-    domain_opts = ''.join([f'<option value="{slug}">{meta["name"]}</option>' for slug, meta in CPP_DOMAINS.items()])
-    domain_info_json = json.dumps(DOMAIN_INFO)
+    # Build domain chips
+    chips = []
+    for slug, meta in CPP_DOMAINS.items():
+        chips.append(f'<span class="chip" data-domain="{slug}">{meta["name"]}</span>')
+    chips_html = "".join(chips)
 
-    content_tmpl = Template("""
+    # left suggestions area (filled by JS when domain selected)
+    content = Template("""
     <div class="row">
-      <div class="col-lg-8">
+      <div class="col-lg-3 mb-3">
         <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">AI Tutor</h4>
-            <div class="d-flex align-items-center gap-2">
-              <label class="me-2">Domain</label>
-              <select id="domainSelect" class="form-select form-select-sm">
-                <option value="">General</option>
-                $domain_options
-              </select>
-            </div>
-          </div>
+          <div class="card-header"><strong>Pick a domain</strong></div>
           <div class="card-body">
+            <div id="domainChips">$chips</div>
+            <hr/>
+            <div class="small text-muted">Click a domain to see a short intro and suggested questions.</div>
+          </div>
+        </div>
+        <div class="card mt-3">
+          <div class="card-header"><strong>Suggestions</strong></div>
+          <div class="card-body" id="suggestions">
+            <div class="text-muted small">Select a domain above to see suggested prompts.</div>
+          </div>
+        </div>
+      </div>
+      <div class="col-lg-9">
+        <div class="card mb-3">
+          <div class="card-header"><h4 class="mb-0">AI Tutor</h4></div>
+          <div class="card-body">
+            <div id="domainIntro" class="alert alert-info" style="display:none;"></div>
             <div id="chat" style="height: 360px; overflow-y: auto; border: 1px solid #eee; padding: 10px; margin-bottom: 12px;"></div>
             <div class="input-group">
               <input type="text" id="userInput" class="form-control" placeholder="Ask about any CPP topic..." />
@@ -999,55 +1078,26 @@ def study():
           </div>
         </div>
       </div>
-
-      <div class="col-lg-4 mt-3 mt-lg-0">
-        <div class="card h-100">
-          <div class="card-header"><strong>Suggested questions</strong></div>
-          <div class="card-body">
-            <div id="suggestions" class="list-group small"></div>
-            <div class="mt-3 text-muted small">Click a suggestion to fill the question box.</div>
-          </div>
-        </div>
-      </div>
     </div>
-
     <script>
-      const DOMAIN_INFO = $domain_info_json;
-
       const chatDiv = document.getElementById('chat');
       const input = document.getElementById('userInput');
       const sendBtn = document.getElementById('sendBtn');
-      const domainSelect = document.getElementById('domainSelect');
-      const suggestionsDiv = document.getElementById('suggestions');
+      const domainIntro = document.getElementById('domainIntro');
+      const suggestions = document.getElementById('suggestions');
+
+      const BLURBS = $blurbs_json;
+      const SUGGEST = $suggest_json;
 
       function append(role, text) {
         const el = document.createElement('div');
-        el.className = (role === 'user') ? 'text-end mb-2' : 'text-start mb-2';
-        el.innerHTML = '<span class="badge bg-' + ((role === 'user') ? 'primary' : 'secondary') + '">' + ((role === 'user') ? 'You' : 'Tutor') + '</span> ' +
-                       '<div class="mt-1 p-2 border rounded">' + text.replace(/</g,'&lt;') + '</div>';
+        el.className = role === 'user' ? 'text-end mb-2' : 'text-start mb-2';
+        el.innerHTML =
+          '<span class="badge bg-' + (role === 'user' ? 'primary' : 'secondary') + '">' +
+          (role === 'user' ? 'You' : 'Tutor') + '</span> ' +
+          '<div class="mt-1 p-2 border rounded">' + text.replace(/</g,'&lt;') + '</div>';
         chatDiv.appendChild(el);
         chatDiv.scrollTop = chatDiv.scrollHeight;
-      }
-
-      function showDomainIntro(slug) {
-        const key = slug || 'general';
-        const info = DOMAIN_INFO[key] || DOMAIN_INFO['general'];
-        const intro = '<strong>' + info.name + ':</strong> ' + info.summary + '<br/><em>What would you like to learn next?</em>';
-        append('assistant', intro);
-      }
-
-      function fillSuggestions(slug) {
-        const key = slug || 'general';
-        const info = DOMAIN_INFO[key] || DOMAIN_INFO['general'];
-        suggestionsDiv.innerHTML = '';
-        (info.suggestions || []).forEach(function(s) {
-          const a = document.createElement('button');
-          a.className = 'list-group-item list-group-item-action';
-          a.type = 'button';
-          a.textContent = s;
-          a.addEventListener('click', function() { input.value = s; input.focus(); });
-          suggestionsDiv.appendChild(a);
-        });
       }
 
       async function send() {
@@ -1059,7 +1109,7 @@ def study():
           const res = await fetch('/chat', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({message: q, domain: domainSelect.value})
+            body: JSON.stringify({message: q})
           });
           const data = await res.json();
           if (data.response) append('assistant', data.response);
@@ -1069,21 +1119,38 @@ def study():
         }
       }
 
-      // events
       sendBtn.addEventListener('click', send);
-      input.addEventListener('keydown', function(e) { if (e.key === 'Enter') send(); });
-      domainSelect.addEventListener('change', function() {
-        chatDiv.innerHTML = '';
-        showDomainIntro(domainSelect.value);
-        fillSuggestions(domainSelect.value);
-      });
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
 
-      // initial
-      showDomainIntro('');
-      fillSuggestions('');
+      // Domain chips -> intro + suggestions
+      document.querySelectorAll('#domainChips .chip').forEach(ch => {
+        ch.addEventListener('click', () => {
+          const slug = ch.getAttribute('data-domain');
+          const intro = BLURBS[slug] || '';
+          if (intro) {
+            domainIntro.style.display = 'block';
+            domainIntro.innerHTML = '<strong>' + ch.textContent + ':</strong> ' + intro + '<br/><em>What would you like to learn next?</em>';
+          }
+          const items = (SUGGEST[slug] || []).map(s => {
+            return '<div class="mb-2"><button class="btn btn-sm btn-outline-primary fill-suggest" data-q="' +
+              s.replace(/"/g,'&quot;') + '">' + s + '</button></div>';
+          }).join('');
+          suggestions.innerHTML = items || '<div class="text-muted small">No suggestions available.</div>';
+          suggestions.querySelectorAll('.fill-suggest').forEach(btn => {
+            btn.addEventListener('click', () => {
+              input.value = btn.getAttribute('data-q');
+              input.focus();
+            });
+          });
+        });
+      });
     </script>
     """)
-    content = content_tmpl.substitute(domain_options=domain_opts, domain_info_json=domain_info_json)
+    content = content.substitute(
+        chips=chips_html,
+        blurbs_json=json.dumps(DOMAIN_BLURBS),
+        suggest_json=json.dumps(DOMAIN_SUGGESTED_QUESTIONS),
+    )
     return render_base_template("Study", content, user=user)
 
 @app.route('/chat', methods=['POST'])
@@ -1092,13 +1159,11 @@ def chat():
     try:
         data = request.get_json() or {}
         user_message = (data.get('message') or '').strip()
-        selected_domain = (data.get('domain') or '').strip()
         if not user_message:
             return jsonify({'error': 'Empty message'}), 400
 
         user_id = session['user_id']
 
-        # Load or create chat history
         ch = ChatHistory.query.filter_by(user_id=user_id).first()
         if not ch:
             ch = ChatHistory(user_id=user_id, messages='[]')
@@ -1110,15 +1175,10 @@ def chat():
         except json.JSONDecodeError:
             messages = []
 
-        # Trim history
         if len(messages) > 20:
             messages = messages[-20:]
 
-        # If a domain is selected, gently steer the tutor
-        domain_name = CPP_DOMAINS.get(selected_domain, {'name': 'General'})['name'] if selected_domain else 'General'
-        prefixed = "[Domain: " + domain_name + "] " + user_message
-
-        messages.append({'role': 'user', 'content': prefixed, 'timestamp': datetime.utcnow().isoformat()})
+        messages.append({'role': 'user', 'content': user_message, 'timestamp': datetime.utcnow().isoformat()})
         openai_messages = [{'role': m['role'], 'content': m['content']} for m in messages]
 
         ai_response = chat_with_ai(openai_messages, user_id=user_id)
@@ -1134,101 +1194,90 @@ def chat():
         print(f"Chat error: {e}")
         return jsonify({'error': 'Sorry, I encountered an error processing your message.'}), 500
 
-# ------------------------------ Flashcards ------------------------------------
+# -------------------------------- Flashcards ----------------------------------
+def flashcard_pool():
+    """
+    Convert base bank to front/back flashcards.
+    Front: question
+    Back: correct answer + explanation
+    """
+    cards = []
+    for q in _base_bank():
+        correct_letter = q.get('correct')
+        ans_text = (q.get('options') or {}).get(correct_letter, '')
+        back = f"Correct: {correct_letter}) {ans_text}\n\nExplanation: {q.get('explanation','')}"
+        cards.append({
+            "domain": q.get("domain", "general"),
+            "front": q.get("question",""),
+            "back": back
+        })
+    return cards
+
 @app.route('/flashcards')
 @subscription_required
 def flashcards_page():
     user = User.query.get(session['user_id'])
+    cards = flashcard_pool()
 
-    # Sidebar items: Random + all domains
-    side_items = ['<button class="list-group-item list-group-item-action active" data-slug="">Random</button>']
+    # Domain counts
+    counts = {}
+    for c in cards:
+        counts[c["domain"]] = counts.get(c["domain"], 0) + 1
+
+    # Build domain buttons
+    dom_btns = ['<button class="btn btn-primary w-100 mb-2 domain-btn" data-domain="random">Random (All)</button>']
     for slug, meta in CPP_DOMAINS.items():
-        side_items.append(f'<button class="list-group-item list-group-item-action" data-slug="{slug}">{meta["name"]}</button>')
+        n = counts.get(slug, 0)
+        dom_btns.append(
+            f'<button class="btn btn-outline-primary w-100 mb-2 domain-btn" data-domain="{slug}">{meta["name"]} <span class="badge bg-secondary ms-1">{n}</span></button>'
+        )
+    dom_html = "".join(dom_btns)
 
-    deck = build_flashcards_from_bank()
-    deck_json = json.dumps(deck)
-
-    content = Template("""
-    <style>
-      /* Flashcard look & flip */
-      .fc-wrap { perspective: 1200px; }
-      .fc-card {
-        width: 100%;
-        min-height: 220px;
-        border: none;
-        background: transparent;
-      }
-      .fc-inner {
-        position: relative;
-        width: 100%;
-        min-height: 220px;
-        transition: transform 0.5s ease;
-        transform-style: preserve-3d;
-      }
-      .fc-inner.flipped { transform: rotateY(180deg); }
-      .fc-face {
-        position: absolute;
-        inset: 0;
-        backface-visibility: hidden;
-        border: 1px solid #e5e5e5;
-        border-radius: .5rem;
-        padding: 1.25rem;
-        background: #fff;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        text-align: center;
-        font-size: 1.05rem;
-      }
-      .fc-back {
-        transform: rotateY(180deg);
-        color: #0d6efd;
-      }
-      .fc-controls .btn { min-width: 110px; }
-      .list-group-item.active { background-color: #0d6efd; border-color: #0d6efd; }
-    </style>
-
+    page = Template("""
     <div class="row">
-      <div class="col-md-3 mb-3">
-        <div class="card h-100">
-          <div class="card-header"><strong>Domains</strong></div>
-          <div id="fcSidebar" class="list-group list-group-flush">
-            $side_buttons
+      <div class="col-lg-3">
+        <div class="card mb-3">
+          <div class="card-header"><strong>Pick a domain</strong></div>
+          <div class="card-body">$doms</div>
+        </div>
+        <div class="card">
+          <div class="card-header"><strong>How to use</strong></div>
+          <div class="card-body small">
+            <ul class="mb-2">
+              <li>Click the card to <strong>flip</strong> (front/back), or press <span class="kbd">J</span> / <span class="kbd">Space</span>.</li>
+              <li>Use <span class="kbd">K</span> or the <em>Next</em> button for the next card.</li>
+              <li>Mark <strong>Don't know</strong> to see the card more often; <strong>Know</strong> to see it less often.</li>
+            </ul>
+            <div class="text-muted">Cards never repeat within a run until you finish the deck.</div>
           </div>
         </div>
       </div>
-
-      <div class="col-md-9">
-        <div class="card">
+      <div class="col-lg-9">
+        <div class="card mb-3">
           <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">Flashcards</h4>
-            <div id="fcStats" class="text-muted small">Pick a domain to begin (Random uses all domains)</div>
+            <strong>Flashcards</strong>
+            <div id="deckInfo" class="small text-muted">0 / 0</div>
           </div>
-
           <div class="card-body">
-            <div class="fc-wrap">
-              <div id="fcCard" class="fc-card">
-                <div id="fcInner" class="fc-inner">
-                  <div id="fcFront" class="fc-face">
-                    Click a domain on the left, then click the card to flip.
-                  </div>
-                  <div id="fcBack" class="fc-face fc-back">
-                    <em>Answer will appear here.</em>
-                  </div>
+            <div class="card-flash">
+              <div id="flipWrap" class="card-face">
+                <div class="card-side card-front d-flex align-items-center">
+                  <div id="frontText"></div>
+                </div>
+                <div class="card-side card-back d-flex align-items-center">
+                  <div id="backText"></div>
                 </div>
               </div>
             </div>
-
-            <div class="fc-controls d-flex flex-wrap gap-2 mt-3">
-              <button id="btnPrev" class="btn btn-outline-secondary" disabled>Previous</button>
-              <button id="btnFlip" class="btn btn-secondary" disabled>Flip</button>
-              <button id="btnDontKnow" class="btn btn-warning ms-auto" disabled>Don’t Know</button>
-              <button id="btnKnow" class="btn btn-success" disabled>Know</button>
-              <button id="btnNext" class="btn btn-outline-primary" disabled>Next</button>
-            </div>
-
-            <div class="mt-3">
-              <a href="/dashboard" class="btn btn-outline-secondary btn-sm">Back to Dashboard</a>
+            <div class="d-flex justify-content-between mt-3">
+              <div>
+                <button id="btnDontKnow" class="btn btn-outline-danger me-2">Don't know</button>
+                <button id="btnKnow" class="btn btn-outline-success">Know</button>
+              </div>
+              <div>
+                <button id="btnFlip" class="btn btn-secondary me-2">Flip (J/Space)</button>
+                <button id="btnNext" class="btn btn-primary">Next (K)</button>
+              </div>
             </div>
           </div>
         </div>
@@ -1236,194 +1285,148 @@ def flashcards_page():
     </div>
 
     <script>
-      const ALL_CARDS = $deck_json;
-
-      const sidebar = document.getElementById('fcSidebar');
-      const front = document.getElementById('fcFront');
-      const back = document.getElementById('fcBack');
-      const inner = document.getElementById('fcInner');
-      const stats = document.getElementById('fcStats');
-
+      const ALL_CARDS = $cards_json;
+      const domButtons = document.querySelectorAll('.domain-btn');
+      const flipWrap = document.getElementById('flipWrap');
+      const frontText = document.getElementById('frontText');
+      const backText = document.getElementById('backText');
+      const deckInfo = document.getElementById('deckInfo');
       const btnFlip = document.getElementById('btnFlip');
-      const btnKnow = document.getElementById('btnKnow');
-      const btnDont = document.getElementById('btnDontKnow');
-      const btnPrev = document.getElementById('btnPrev');
       const btnNext = document.getElementById('btnNext');
+      const btnKnow = document.getElementById('btnKnow');
+      const btnDontKnow = document.getElementById('btnDontKnow');
 
       let deck = [];
-      let idx = -1;
-      let knowCount = 0, dontCount = 0;
+      let idx = 0;
+      let buckets = { hard: [], easy: [] };
 
-      function shuffle(arr) {
-        for (let i = arr.length - 1; i > 0; i--) {
+      function shuffle(a) {
+        for (let i = a.length - 1; i > 0; i--) {
           const j = Math.floor(Math.random() * (i + 1));
-          const t = arr[i]; arr[i] = arr[j]; arr[j] = t;
+          [a[i], a[j]] = [a[j], a[i]];
         }
-        return arr;
       }
 
-      function buildDeck(slug) {
-        let src = ALL_CARDS;
-        if (slug) src = ALL_CARDS.filter(function(c) { return c.domain === slug; });
-        if (src.length === 0) src = ALL_CARDS.slice();
-        deck = shuffle(src.slice());
+      function buildDeck(domain) {
+        let pool = [];
+        if (domain === 'random') {
+          pool = [...ALL_CARDS];
+        } else {
+          pool = ALL_CARDS.filter(c => c.domain === domain);
+          if (pool.length === 0) pool = [...ALL_CARDS];
+        }
+        shuffle(pool);
+        deck = pool;
+        buckets = { hard: [], easy: [] };
         idx = 0;
-        knowCount = 0; dontCount = 0;
-        renderCard();
-        enableControls(true);
+        render();
       }
 
-      function enableControls(active) {
-        btnFlip.disabled = !active;
-        btnKnow.disabled = !active;
-        btnDont.disabled = !active;
-        btnPrev.disabled = !active || idx <= 0;
-        btnNext.disabled = !active || deck.length === 0;
-      }
-
-      function setFrontBack(q, a) {
-        front.textContent = q || '';
-        back.textContent = a || '';
-        inner.classList.remove('flipped');
-      }
-
-      function renderCard() {
-        if (idx < 0 || idx >= deck.length) {
-          setFrontBack('Deck finished. Choose a domain to go again.', '');
-          enableControls(false);
+      function render() {
+        if (!deck.length) {
+          frontText.innerHTML = '<em>No cards available for this selection.</em>';
+          backText.innerHTML = '';
+          deckInfo.textContent = '0 / 0';
           return;
         }
-        const c = deck[idx];
-        setFrontBack(c.question, c.answer);
-        stats.textContent = 'Card ' + (idx+1) + ' of ' + deck.length + ' — Known: ' + knowCount + ', Don’t know: ' + dontCount;
-        btnPrev.disabled = (idx <= 0);
+        flipWrap.classList.remove('flip');
+        const card = deck[idx];
+        frontText.textContent = card.front;
+        backText.textContent = card.back;
+        deckInfo.textContent = (idx + 1) + ' / ' + deck.length;
       }
 
-      function mark(known) {
-        if (idx < 0 || idx >= deck.length) return;
-        const c = deck[idx];
-        fetch('/flashcards/event', {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            question: c.question,
-            answer: c.answer,
-            domain: c.domain,
-            known: !!known
-          })
-        }).catch(function(){});
-        if (known) knowCount++; else dontCount++;
+      function flip() {
+        flipWrap.classList.toggle('flip');
+      }
+
+      function next() {
+        // integrate basic spaced repetition: prioritize 'hard' bucket, then remaining
+        if (buckets.hard.length) {
+          const c = buckets.hard.shift();
+          deck.splice(idx + 1, 0, c);
+        }
         idx++;
         if (idx >= deck.length) {
-          renderCard();
-        } else {
-          renderCard();
+          idx = deck.length - 1;
+          // finished: reshuffle easy for a new round if desired (not auto here)
         }
+        render();
       }
 
-      // interactions
-      btnFlip.addEventListener('click', function(){ inner.classList.toggle('flipped'); });
-      document.getElementById('fcCard').addEventListener('click', function(){ inner.classList.toggle('flipped'); });
-      btnKnow.addEventListener('click', function(){ mark(true); });
-      btnDont.addEventListener('click', function(){ mark(false); });
-      btnNext.addEventListener('click', function(){ idx = Math.min(deck.length, idx + 1); renderCard(); });
-      btnPrev.addEventListener('click', function(){ if (idx > 0) { idx -= 1; renderCard(); } });
+      btnFlip.addEventListener('click', flip);
+      btnNext.addEventListener('click', next);
+      btnDontKnow.addEventListener('click', () => {
+        buckets.hard.push(deck[idx]);
+        next();
+      });
+      btnKnow.addEventListener('click', () => {
+        buckets.easy.push(deck[idx]);
+        next();
+      });
 
-      sidebar.querySelectorAll('.list-group-item').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-          sidebar.querySelectorAll('.list-group-item').forEach(function(b){ b.classList.remove('active'); });
-          btn.classList.add('active');
-          const slug = btn.getAttribute('data-slug');
-          buildDeck(slug);
+      // keyboard shortcuts
+      document.addEventListener('keydown', (e) => {
+        if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return;
+        if (e.code === 'KeyJ' || e.code === 'Space') { e.preventDefault(); flip(); }
+        if (e.code === 'KeyK') { e.preventDefault(); next(); }
+      });
+
+      // click card to flip
+      flipWrap.addEventListener('click', flip);
+
+      domButtons.forEach(b => {
+        b.addEventListener('click', () => {
+          domButtons.forEach(x => x.classList.remove('btn-primary'));
+          domButtons.forEach(x => x.classList.add('btn-outline-primary'));
+          b.classList.add('btn-primary');
+          b.classList.remove('btn-outline-primary');
+          buildDeck(b.getAttribute('data-domain'));
         });
       });
+
+      // default random
+      const first = document.querySelector('.domain-btn[data-domain="random"]');
+      if (first) first.click();
     </script>
-    """).substitute(side_buttons=''.join(side_items), deck_json=deck_json)
+    """)
+
+    content = page.substitute(
+        doms=dom_html,
+        cards_json=json.dumps(cards)
+    )
     return render_base_template("Flashcards", content, user=user)
 
-@app.post('/flashcards/event')
-@subscription_required
-def flashcards_event():
-    try:
-        data = request.get_json() or {}
-        question = (data.get('question') or '').strip()
-        answer = (data.get('answer') or '').strip()
-        domain = (data.get('domain') or '').strip() or 'general'
-        known = bool(data.get('known'))
-
-        qobj = {"question": question, "answer": answer}
-        record_question_event(
-            user_id=session['user_id'],
-            question_obj=qobj,
-            domain=domain,
-            topic=None,
-            is_correct=known,
-            source='flashcard'
-        )
-        update_user_progress_on_answer(session['user_id'], domain, None, known)
-        return jsonify({'success': True})
-    except Exception as e:
-        print(f"/flashcards/event error: {e}")
-        return jsonify({'success': False}), 500
-
 # ------------------------------ Quizzes ---------------------------------------
-@app.route('/api/domains')
-@login_required
-def api_domains():
-    items = [{'slug': slug, 'name': meta['name']} for slug, meta in CPP_DOMAINS.items()]
-    return jsonify({'domains': items})
-
 @app.route('/quiz-selector')
 @subscription_required
 def quiz_selector():
     user = User.query.get(session['user_id'])
 
-    quiz_cards = []
+    # Domain buttons
+    dom_btns = ['<a class="chip chip-outline" href="/quiz/practice">Random (All Domains)</a>']
+    for slug, meta in CPP_DOMAINS.items():
+        dom_btns.append(f'<a class="chip" href="/quiz/domain-specific?domain={slug}">{meta["name"]}</a>')
+    dom_html = "".join(dom_btns)
+
+    items_html = []
     for key, meta in QUIZ_TYPES.items():
-        if key == 'mock-exam':
-            start_btn = '<a class="btn btn-outline-warning" href="/mock-exam">Open Mock Exam</a>'
-        else:
-            start_btn = f'<button class="btn btn-primary start-quiz" data-type="{key}">Start</button>'
-        quiz_cards.append(
+        items_html.append(
             f'<div class="col-md-6"><div class="card h-100 mb-3">'
             f'<div class="card-body">'
             f'<h5 class="card-title">{meta["name"]}</h5>'
             f'<p class="card-text">{meta["description"]}</p>'
-            f'{start_btn}'
+            f'<a class="btn btn-primary" href="/quiz/{key}">Start</a>'
             f'</div></div></div>'
         )
-
-    domain_opts = ''.join([f'<option value="{slug}">{meta["name"]}</option>' for slug, meta in CPP_DOMAINS.items()])
-    tmpl = Template("""
+    content = f"""
     <div class="row">
-      <div class="col-12 d-flex align-items-center justify-content-between">
-        <div>
-          <h2>Select a Quiz</h2>
-          <p>Pick a mode, choose a domain (optional), and start practicing.</p>
-        </div>
-        <div class="d-flex align-items-center gap-2">
-          <label class="me-2">Domain</label>
-          <select id="quizDomain" class="form-select">
-            <option value="">All (random)</option>
-            $domain_options
-          </select>
-        </div>
-      </div>
+      <div class="col-12"><h2>Pick a Quiz</h2></div>
+      <div class="col-12 mb-2"><div>{dom_html}</div></div>
+      <div class="col-12"><p class="text-muted">Choose a mode or click a domain to focus your practice. You can select the number of questions on the quiz page.</p></div>
     </div>
-    <div class="row">$quiz_cards</div>
-
-    <script>
-      document.querySelectorAll('.start-quiz').forEach(function(btn) {
-        btn.addEventListener('click', function() {
-          const type = btn.getAttribute('data-type');
-          const domain = document.getElementById('quizDomain').value;
-          const qs = domain ? ('?domain=' + encodeURIComponent(domain)) : '';
-          window.location.href = '/quiz/' + type + qs;
-        });
-      });
-    </script>
-    """)
-    content = tmpl.substitute(domain_options=domain_opts, quiz_cards=''.join(quiz_cards))
+    <div class="row">{''.join(items_html)}</div>
+    """
     return render_base_template("Quizzes", content, user=user)
 
 @app.route('/quiz/<quiz_type>')
@@ -1438,21 +1441,29 @@ def quiz(quiz_type):
     difficulty = request.args.get('difficulty', 'medium')
 
     session['quiz_start_time'] = datetime.utcnow().timestamp()
-
     quiz_data = generate_quiz(quiz_type, domain, difficulty)
     quiz_json = json.dumps(quiz_data)
 
-    domain_name = CPP_DOMAINS.get(domain, {'name': 'General'})['name'] if domain else 'General'
+    # allow selectable number of questions on page (5/10/15/20)
+    qcount_html = """
+      <div class="btn-group" role="group" aria-label="Question count">
+        <button class="btn btn-outline-secondary qc" data-c="5">5</button>
+        <button class="btn btn-outline-secondary qc" data-c="10">10</button>
+        <button class="btn btn-outline-secondary qc" data-c="15">15</button>
+        <button class="btn btn-outline-secondary qc" data-c="20">20</button>
+      </div>
+    """
+
     page = Template("""
     <div class="row">
       <div class="col-md-10 mx-auto">
         <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <div>
-              <h4 class="mb-0">$title</h4>
-              <div class="text-muted small">Domain: $domain_name</div>
+          <div class="card-header d-flex flex-wrap justify-content-between align-items-center">
+            <h4 class="mb-2 mb-md-0">$title</h4>
+            <div class="d-flex align-items-center">
+              <div class="me-3"><small class="text-muted">Questions:</small> $qcount</div>
+              <button id="submitBtn" class="btn btn-success">Submit</button>
             </div>
-            <button id="submitBtn" class="btn btn-success">Submit</button>
           </div>
           <div class="card-body" id="quizContainer"></div>
         </div>
@@ -1460,12 +1471,16 @@ def quiz(quiz_type):
       </div>
     </div>
     <script>
-      const QUIZ_DATA = $quiz_json;
+      let QUIZ_DATA = $quiz_json;
+      let ACTIVE_COUNT = (QUIZ_DATA?.questions?.length) || 10;
+
+      function takeFirstN(arr, n){ return (arr||[]).slice(0, n); }
 
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        QUIZ_DATA.questions.forEach((q, idx) => {
+        const questions = takeFirstN(QUIZ_DATA.questions, ACTIVE_COUNT);
+        questions.forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1495,35 +1510,10 @@ def quiz(quiz_type):
         });
       }
 
-      function buildReviewHTML(data) {
-        if (!Array.isArray(data.results)) return '';
-        let html = '<div class="accordion mt-3" id="reviewAcc">';
-        data.results.forEach(function(r, i) {
-          const id = 'itm' + i;
-          const badge = r.is_correct ? '<span class="badge bg-success ms-2">Correct</span>' : '<span class="badge bg-danger ms-2">Incorrect</span>';
-          html += ''
-            + '<div class="accordion-item">'
-            +   '<h2 class="accordion-header" id="h' + id + '">'
-            +     '<button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#c' + id + '">'
-            +       'Q' + r.index + '. ' + r.question + ' ' + badge
-            +     '</button>'
-            +   '</h2>'
-            +   '<div id="c' + id + '" class="accordion-collapse collapse" data-bs-parent="#reviewAcc">'
-            +     '<div class="accordion-body">'
-            +       '<div><strong>Your answer:</strong> ' + (r.user_letter || '-') + (r.user_text ? (' - ' + r.user_text) : '') + '</div>'
-            +       '<div><strong>Correct answer:</strong> ' + r.correct_letter + ' - ' + r.correct_text + '</div>'
-            +       (r.explanation ? ('<div class="mt-2"><em>' + r.explanation + '</em></div>') : '')
-            +     '</div>'
-            +   '</div>'
-            + '</div>';
-        });
-        html += '</div>';
-        return html;
-      }
-
       async function submitQuiz() {
         const answers = {};
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
+        const questions = (QUIZ_DATA.questions || []).slice(0, ACTIVE_COUNT);
+        questions.forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
@@ -1534,7 +1524,7 @@ def quiz(quiz_type):
             body: JSON.stringify({
               quiz_type: QUIZ_DATA.quiz_type,
               domain: QUIZ_DATA.domain,
-              questions: QUIZ_DATA.questions,
+              questions: questions,
               answers: answers
             })
           });
@@ -1549,49 +1539,107 @@ def quiz(quiz_type):
           html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
           if (Array.isArray(data.performance_insights)) {
             html += '<ul>';
-            data.performance_insights.forEach(function(p) { html += '<li>' + p + '</li>'; });
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
             html += '</ul>';
           }
-          html += buildReviewHTML(data);
+
+          // NEW: strengths / focus sections
+          if (data.feedback) {
+            const fb = data.feedback;
+            const chip = (label, avg, count, cls) =>
+              '<span class="badge ' + cls + ' me-2 mb-2">' + label + ' · ' + avg + '% · ' + count + ' q</span>';
+
+            if (Array.isArray(fb.strengths) && fb.strengths.length) {
+              html += '<h5 class="mt-3">What you did well</h5><div>';
+              fb.strengths.forEach(d => { html += chip(d.domain, d.avg, d.count, 'bg-success'); });
+              html += '</div>';
+            }
+            if (Array.isArray(fb.focus) && fb.focus.length) {
+              html += '<h5 class="mt-3">What to focus next</h5><div>';
+              fb.focus.forEach(d => { html += chip(d.domain, d.avg, d.count, 'bg-danger'); });
+              html += '</div>';
+            }
+          }
+
+          // Detailed answers toggle
+          if (Array.isArray(data.results)) {
+            html += '<hr/><details><summary><strong>Review answers (click to expand)</strong></summary>';
+            html += '<ol>';
+            data.results.forEach(r => {
+              const cls = r.is_correct ? 'text-success' : 'text-danger';
+              html += '<li class="' + cls + '"><div><strong>Q' + r.index + ':</strong> ' + r.question + '</div>';
+              html += '<div>Your answer: ' + (r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '<em>None</em>') + '</div>';
+              html += '<div>Correct: ' + r.correct_letter + ') ' + (r.correct_text || '') + '</div>';
+              if (r.explanation) html += '<div class="text-muted"><em>' + r.explanation + '</em></div>';
+              html += '</li>';
+            });
+            html += '</ol></details>';
+          }
+
           html += '</div></div>';
           resultsDiv.innerHTML = html;
           window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
         } catch (e) {
-          resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
+          document.getElementById('results').innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
       }
 
       document.getElementById('submitBtn').addEventListener('click', submitQuiz);
+
+      // Handle question count buttons
+      document.querySelectorAll('.qc').forEach(btn => {
+        btn.addEventListener('click', () => {
+          document.querySelectorAll('.qc').forEach(b => b.classList.remove('btn-secondary'));
+          document.querySelectorAll('.qc').forEach(b => b.classList.add('btn-outline-secondary'));
+          btn.classList.remove('btn-outline-secondary');
+          btn.classList.add('btn-secondary');
+          ACTIVE_COUNT = parseInt(btn.getAttribute('data-c')) || (QUIZ_DATA?.questions?.length || 10);
+          renderQuiz();
+        });
+      });
+
       renderQuiz();
     </script>
     """)
-    content = page.substitute(title=quiz_data['title'], quiz_json=quiz_json, domain_name=domain_name)
+    content = page.substitute(
+        title=quiz_data['title'],
+        quiz_json=quiz_json,
+        qcount=qcount_html
+    )
     return render_base_template("Quiz", content, user=user)
 
 @app.route('/mock-exam')
 @subscription_required
 def mock_exam():
-    domain = request.args.get('domain')
+    # Allow ?count= up to 100 (UI will encourage 25/50/75/100)
     try:
         requested = int(request.args.get('count', 100))
     except ValueError:
         requested = 100
     num_questions = max(25, min(100, requested))
 
-    quiz_data = generate_fallback_quiz('mock-exam', domain=domain, difficulty='medium', num_questions=num_questions)
+    quiz_data = generate_fallback_quiz('mock-exam', domain=None, difficulty='medium', num_questions=num_questions)
     quiz_json = json.dumps(quiz_data)
-    domain_name = CPP_DOMAINS.get(domain, {'name': 'General'})['name'] if domain else 'General'
+
+    count_buttons = """
+      <div class="btn-group" role="group">
+        <a class="btn btn-outline-secondary" href="/mock-exam?count=25">25</a>
+        <a class="btn btn-outline-secondary" href="/mock-exam?count=50">50</a>
+        <a class="btn btn-outline-secondary" href="/mock-exam?count=75">75</a>
+        <a class="btn btn-outline-secondary" href="/mock-exam?count=100">100</a>
+      </div>
+    """
 
     page = Template("""
     <div class="row">
       <div class="col-md-10 mx-auto">
         <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <div>
-              <h4 class="mb-0">Mock Exam ($num Q)</h4>
-              <div class="text-muted small">Domain: $domain_name</div>
+          <div class="card-header d-flex flex-wrap justify-content-between align-items-center">
+            <h4 class="mb-2 mb-md-0">Mock Exam ($num Q)</h4>
+            <div class="d-flex align-items-center">
+              <div class="me-3"><small class="text-muted">Choose count:</small> $count_buttons</div>
+              <button id="submitBtn" class="btn btn-success">Submit</button>
             </div>
-            <button id="submitBtn" class="btn btn-success">Submit</button>
           </div>
           <div class="card-body" id="quizContainer"></div>
         </div>
@@ -1634,45 +1682,30 @@ def mock_exam():
         });
       }
 
-      function buildReviewHTML(data) {
-        if (!Array.isArray(data.results)) return '';
-        let html = '<div class="accordion mt-3" id="reviewAcc">';
-        data.results.forEach(function(r, i) {
-          const id = 'itm' + i;
-          const badge = r.is_correct ? '<span class="badge bg-success ms-2">Correct</span>' : '<span class="badge bg-danger ms-2">Incorrect</span>';
-          html += ''
-            + '<div class="accordion-item">'
-            +   '<h2 class="accordion-header" id="h' + id + '">'
-            +     '<button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#c' + id + '">'
-            +       'Q' + r.index + '. ' + r.question + ' ' + badge
-            +     '</button>'
-            +   '</h2>'
-            +   '<div id="c' + id + '" class="accordion-collapse collapse" data-bs-parent="#reviewAcc">'
-            +     '<div class="accordion-body">'
-            +       '<div><strong>Your answer:</strong> ' + (r.user_letter || '-') + (r.user_text ? (' - ' + r.user_text) : '') + '</div>'
-            +       '<div><strong>Correct answer:</strong> ' + r.correct_letter + ' - ' + r.correct_text + '</div>'
-            +       (r.explanation ? ('<div class="mt-2"><em>' + r.explanation + '</em></div>') : '')
-            +     '</div>'
-            +   '</div>'
-            + '</div>';
-        });
-        html += '</div>';
-        return html;
-      }
-
       async function submitQuiz() {
         const answers = {};
+        let firstUnanswered = -1;
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
+          if (!selected && firstUnanswered === -1) firstUnanswered = idx;
           answers[String(idx)] = selected ? selected.value : null;
         });
+
+        // Highlight unanswered (mock-only UX)
+        if (firstUnanswered !== -1) {
+          const cardList = document.querySelectorAll('#quizContainer .border');
+          cardList[firstUnanswered].scrollIntoView({behavior:'smooth', block:'center'});
+          cardList[firstUnanswered].classList.add('border','border-2','border-danger');
+          return; // stop submit until everything answered
+        }
+
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({
               quiz_type: 'mock-exam',
-              domain: QUIZ_DATA.domain || 'general',
+              domain: 'general',
               questions: QUIZ_DATA.questions,
               answers: answers
             })
@@ -1688,15 +1721,48 @@ def mock_exam():
           html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
           if (Array.isArray(data.performance_insights)) {
             html += '<ul>';
-            data.performance_insights.forEach(function(p) { html += '<li>' + p + '</li>'; });
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
             html += '</ul>';
           }
-          html += buildReviewHTML(data);
+
+          // strengths / focus sections
+          if (data.feedback) {
+            const fb = data.feedback;
+            const chip = (label, avg, count, cls) =>
+              '<span class="badge ' + cls + ' me-2 mb-2">' + label + ' · ' + avg + '% · ' + count + ' q</span>';
+
+            if (Array.isArray(fb.strengths) && fb.strengths.length) {
+              html += '<h5 class="mt-3">What you did well</h5><div>';
+              fb.strengths.forEach(d => { html += chip(d.domain, d.avg, d.count, 'bg-success'); });
+              html += '</div>';
+            }
+            if (Array.isArray(fb.focus) && fb.focus.length) {
+              html += '<h5 class="mt-3">What to focus next</h5><div>';
+              fb.focus.forEach(d => { html += chip(d.domain, d.avg, d.count, 'bg-danger'); });
+              html += '</div>';
+            }
+          }
+
+          // detailed answers
+          if (Array.isArray(data.results)) {
+            html += '<hr/><details open><summary><strong>Review answers</strong></summary>';
+            html += '<ol>';
+            data.results.forEach(r => {
+              const cls = r.is_correct ? 'text-success' : 'text-danger';
+              html += '<li class="' + cls + '"><div><strong>Q' + r.index + ':</strong> ' + r.question + '</div>';
+              html += '<div>Your answer: ' + (r.user_letter ? (r.user_letter + ') ' + (r.user_text || '')) : '<em>None</em>') + '</div>';
+              html += '<div>Correct: ' + r.correct_letter + ') ' + (r.correct_text || '') + '</div>';
+              if (r.explanation) html += '<div class="text-muted"><em>' + r.explanation + '</em></div>';
+              html += '</li>';
+            });
+            html += '</ol></details>';
+          }
+
           html += '</div></div>';
           resultsDiv.innerHTML = html;
           window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
         } catch (e) {
-          resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
+          document.getElementById('results').innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
       }
 
@@ -1704,10 +1770,14 @@ def mock_exam():
       renderQuiz();
     </script>
     """)
-    content = page.substitute(num=num_questions, quiz_json=quiz_json, domain_name=domain_name)
+    content = page.substitute(
+        num=num_questions,
+        quiz_json=quiz_json,
+        count_buttons=count_buttons
+    )
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
-# ----------------- Submit quiz (records events & updates progress) ------------
+# --------------- Submit quiz (records events, updates progress, feedback) ----
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1716,11 +1786,12 @@ def submit_quiz():
         quiz_type = data.get('quiz_type')
         answers = data.get('answers', {})
         questions = data.get('questions', [])
-        overall_domain = data.get('domain', 'general')
+        domain = data.get('domain', 'general')
 
         if not quiz_type or not questions:
             return jsonify({'error': 'Invalid quiz data'}), 400
 
+        # Duration
         time_taken = 0
         if 'quiz_start_time' in session:
             start = datetime.fromtimestamp(session['quiz_start_time'])
@@ -1729,8 +1800,8 @@ def submit_quiz():
 
         correct_count = 0
         total = len(questions)
-
         detailed_results = []
+
         for i, q in enumerate(questions):
             user_letter = answers.get(str(i))
             correct_letter = q.get('correct')
@@ -1739,17 +1810,26 @@ def submit_quiz():
             if is_correct:
                 correct_count += 1
 
-            q_domain = q.get('domain') or overall_domain or 'general'
-
-            record_question_event(
-                user_id=session['user_id'],
-                question_obj=q,
-                domain=q_domain,
-                topic=None,
-                is_correct=is_correct,
-                source=('mock' if quiz_type == 'mock-exam' else 'quiz')
-            )
-            update_user_progress_on_answer(session['user_id'], q_domain, None, is_correct)
+            # Record per-question telemetry + progress
+            try:
+                q_domain = q.get('domain') or domain or 'general'
+                record_question_event(
+                    user_id=session['user_id'],
+                    question_obj=q,
+                    domain=q_domain,
+                    topic=None,
+                    is_correct=is_correct,
+                    response_time_s=None,
+                    source='mock' if quiz_type == 'mock-exam' else 'quiz'
+                )
+                update_user_progress_on_answer(
+                    user_id=session['user_id'],
+                    domain=q_domain,
+                    topic=None,
+                    is_correct=is_correct
+                )
+            except Exception as ee:
+                print(f"/submit-quiz per-q update error: {ee}")
 
             detailed_results.append({
                 'index': i + 1,
@@ -1760,15 +1840,16 @@ def submit_quiz():
                 'user_text': options.get(user_letter, '') if user_letter else None,
                 'explanation': q.get('explanation', ''),
                 'is_correct': bool(is_correct),
-                'domain': q_domain
+                'domain': q.get('domain', 'general')
             })
 
         score = (correct_count / total) * 100 if total else 0.0
 
+        # Save result row
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
-            domain=overall_domain,
+            domain=domain,
             questions=json.dumps(questions),
             answers=json.dumps(answers),
             score=score,
@@ -1778,6 +1859,7 @@ def submit_quiz():
         db.session.add(qr)
         db.session.commit()
 
+        # Update user aggregate score history
         user = User.query.get(session['user_id'])
         try:
             scores = json.loads(user.quiz_scores) if user.quiz_scores else []
@@ -1787,12 +1869,13 @@ def submit_quiz():
             'score': score,
             'date': datetime.utcnow().isoformat(),
             'type': quiz_type,
-            'domain': overall_domain,
+            'domain': domain,
             'time_taken': time_taken
         })
         user.quiz_scores = json.dumps(scores[-50:])
         db.session.commit()
 
+        # Insights
         insights = []
         if score >= 90:
             insights.append("Excellent performance. You're well-prepared for this topic.")
@@ -1809,6 +1892,9 @@ def submit_quiz():
             elif avg > 3:
                 insights.append("Consider practicing to improve your speed.")
 
+        # NEW: strengths/weaknesses feedback
+        feedback = compute_domain_feedback(session['user_id'])
+
         log_activity(session['user_id'], 'quiz_completed',
                      f'{quiz_type}: {correct_count}/{total} in {time_taken} min')
 
@@ -1819,71 +1905,13 @@ def submit_quiz():
             'total': total,
             'time_taken': time_taken,
             'performance_insights': insights,
-            'results': detailed_results
+            'results': detailed_results,
+            'feedback': feedback
         })
     except Exception as e:
         print(f"Submit quiz error: {e}")
         db.session.rollback()
         return jsonify({'error': 'Error processing quiz results.'}), 500
-
-# ----------------------------- Progress ---------------------------------------
-@app.route('/progress')
-@subscription_required
-def progress():
-    try:
-        user_id = session['user_id']
-        rows = UserProgress.query.filter_by(user_id=user_id).all()
-
-        cards = []
-        existing_by_domain = {}
-        for r in rows:
-            existing_by_domain.setdefault(r.domain, []).append(r)
-
-        for slug, meta in CPP_DOMAINS.items():
-            rlist = existing_by_domain.get(slug, [])
-            if rlist:
-                avg = sum((r.average_score or 0) for r in rlist) / len(rlist)
-                cnt = sum((r.question_count or 0) for r in rlist)
-                mastery = sorted(rlist, key=lambda x: ['needs_practice', 'good', 'mastered'].index(x.mastery_level or 'needs_practice'))[-1].mastery_level
-            else:
-                avg, cnt, mastery = 0, 0, 'needs_practice'
-
-            bar = f"""
-            <div class="progress" role="progressbar" aria-valuenow="{avg:.1f}" aria-valuemin="0" aria-valuemax="100" style="height: 10px;">
-              <div class="progress-bar {'bg-success' if avg>=75 else ('bg-warning' if avg>=50 else 'bg-danger')}" style="width: {avg:.1f}%"></div>
-            </div>
-            """
-            cards.append(
-                f'<div class="col-md-6 col-lg-4 mb-3"><div class="card h-100">'
-                f'<div class="card-body">'
-                f'<h5 class="card-title">{meta["name"]}</h5>'
-                f'<div class="mb-2">Average score: <strong>{avg:.1f}%</strong></div>'
-                f'{bar}'
-                f'<div class="mt-2 text-muted small">Questions answered: {cnt} · Mastery: {mastery.title()}</div>'
-                f'</div></div></div>'
-            )
-
-        content = f"""
-        <div class="row">
-          <div class="col-12">
-            <h2>Your Progress</h2>
-            <p class="text-muted">This dashboard updates as you complete quizzes and mark flashcards.</p>
-          </div>
-        </div>
-        <div class="row">
-          {''.join(cards)}
-        </div>
-        <div class="mt-3">
-          <a href="/dashboard" class="btn btn-outline-secondary btn-sm">Back to Dashboard</a>
-        </div>
-        """
-        return render_base_template("Progress", content, user=User.query.get(user_id))
-    except Exception as e:
-        print(f"/progress error: {e}")
-        content = """
-        <div class="alert alert-warning">We couldn't load your progress just now. Please try again later.</div>
-        """
-        return render_base_template("Progress", content, user=User.query.get(session['user_id']))
 
 # ----------------------------- Subscription & Stripe --------------------------
 @app.route('/subscribe')
@@ -2091,7 +2119,7 @@ def stripe_webhook():
 
     return 'Success', 200
 
-# ----------------------------- Study Session Tracking -------------------------
+# --------------------------- Study Session Tracking ---------------------------
 @app.route('/end-study-session', methods=['POST'])
 @login_required
 def end_study_session():
@@ -2118,6 +2146,68 @@ def end_study_session():
         print(f"Error ending study session: {e}")
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Session end error'})
+
+# --------------------------------- Progress -----------------------------------
+@app.route('/progress')
+@subscription_required
+def progress():
+    user_id = session['user_id']
+    rows = UserProgress.query.filter_by(user_id=user_id).all() or []
+
+    # map domain -> stats
+    stats = {}
+    for slug in CPP_DOMAINS.keys():
+        stats[slug] = {
+            "name": CPP_DOMAINS[slug]['name'],
+            "avg": 0.0,
+            "count": 0,
+            "mastery": 'needs_practice'
+        }
+    for r in rows:
+        if r.domain in stats and (r.topic is None):
+            stats[r.domain]['avg'] = round(float(r.average_score or 0.0), 1)
+            stats[r.domain]['count'] = int(r.question_count or 0)
+            stats[r.domain]['mastery'] = r.mastery_level or 'needs_practice'
+
+    def cls_for(m):
+        return 'dom-good' if m == 'mastered' else ('dom-ok' if m == 'good' else 'dom-bad')
+
+    # overall dial = weighted avg
+    total_q = sum(v['count'] for v in stats.values())
+    if total_q > 0:
+        weighted_sum = sum(v['avg'] * v['count'] for v in stats.values())
+        overall = round(weighted_sum / total_q, 1)
+    else:
+        overall = 0.0
+
+    cards = []
+    for slug, v in stats.items():
+        cards.append(
+            f'<div class="col-md-4 col-lg-3">'
+            f'  <div class="card h-100">'
+            f'    <div class="card-body">'
+            f'      <h6 class="mb-2">{v["name"]}</h6>'
+            f'      <div class="mb-2"><span class="badge {cls_for(v["mastery"])}">{v["mastery"].replace("_"," ").title()}</span></div>'
+            f'      <div class="small text-muted">Average: {v["avg"]}% · Questions: {v["count"]}</div>'
+            f'    </div>'
+            f'  </div>'
+            f'</div>'
+        )
+    grid_html = "".join(cards)
+
+    content = f"""
+    <div class="row">
+      <div class="col-12 d-flex justify-content-between align-items-center">
+        <h2 class="mb-0">Your Progress</h2>
+        <div class="dial" style="--p:{int(overall)};"><inner>{overall}%</inner></div>
+      </div>
+      <div class="col-12 text-muted mb-3">Green = strong, Orange = good, Red = needs practice.</div>
+    </div>
+    <div class="row g-3">
+      {grid_html}
+    </div>
+    """
+    return render_base_template("Progress", content, user=User.query.get(user_id))
 
 # --------------------------------- Diag ---------------------------------------
 @app.get("/diag/openai")
@@ -2171,57 +2261,6 @@ def diag_database():
             "error": str(e),
             "timestamp": datetime.utcnow().isoformat()
         }), 500
-
-# ----------------------------- OpenAI wrapper ---------------------------------
-def chat_with_ai(messages, user_id=None):
-    """Thin wrapper to OpenAI Chat Completions with basic rate limiting and robust error handling."""
-    global last_api_call
-    try:
-        if last_api_call:
-            delta = datetime.utcnow() - last_api_call
-            if delta.total_seconds() < 2:
-                time.sleep(2 - delta.total_seconds())
-
-        system_message = {
-            "role": "system",
-            "content": (
-                "You are an expert tutor for the ASIS Certified Protection Professional (CPP) exam. "
-                "Focus on the seven CPP domains: Security Principles & Practices, Business Principles & Practices, "
-                "Investigations, Personnel Security, Physical Security, Information Security, and Crisis Management. "
-                "Provide clear explanations, practical examples, and do not claim affiliation with ASIS."
-            )
-        }
-        if not messages or messages[0].get('role') != 'system':
-            messages.insert(0, system_message)
-
-        headers = {
-            'Authorization': f'Bearer {OPENAI_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        data = {
-            'model': OPENAI_CHAT_MODEL,
-            'messages': messages,
-            'max_tokens': 1500,
-            'temperature': 0.7
-        }
-
-        last_api_call = datetime.utcnow()
-        resp = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=45)
-        if resp.status_code == 200:
-            payload = resp.json()
-            return payload['choices'][0]['message']['content']
-        elif resp.status_code in (401, 403):
-            return "I’m having trouble authenticating to my knowledge base right now. Please try again."
-        elif resp.status_code == 429:
-            return "I’m receiving a lot of requests at the moment. Please try again shortly."
-        elif resp.status_code >= 500:
-            return "The AI service is experiencing issues. Please try again in a bit."
-        else:
-            print(f"[OpenAI] Unexpected status: {resp.status_code} body={resp.text[:300]}")
-            return "I hit an unexpected issue. Please rephrase and try again."
-    except Exception as e:
-        print(f"AI chat error: {e}")
-        return "I encountered a technical issue. Please try again."
 
 # ----------------------------- App Factory / Run ------------------------------
 def create_app(config_name='default'):
