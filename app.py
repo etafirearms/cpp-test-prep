@@ -304,12 +304,7 @@ def record_question_event(
         db.session.rollback()
 
 def _mastery_from_stats(avg: float, streak: int) -> str:
-    """
-    Mastery banding:
-    - mastered: avg >= 90 and streak >= 3
-    - good:     avg >= 75 and streak >= 2
-    - needs_practice: otherwise
-    """
+    """Mastery banding."""
     if (avg or 0) >= 90 and (streak or 0) >= 3:
         return 'mastered'
     if (avg or 0) >= 75 and (streak or 0) >= 2:
@@ -317,7 +312,7 @@ def _mastery_from_stats(avg: float, streak: int) -> str:
     return 'needs_practice'
 
 def update_user_progress_on_answer(user_id: int, domain: str, topic: str, is_correct: bool) -> None:
-    """Lightweight rolling update for UserProgress. Call this per answer."""
+    """Lightweight rolling update for UserProgress. Call per answer."""
     try:
         if not domain:
             return
@@ -337,18 +332,14 @@ def update_user_progress_on_answer(user_id: int, domain: str, topic: str, is_cor
         earned = 100.0 if bool(is_correct) else 0.0
         old_count = row.question_count or 0
         new_count = old_count + 1
-
         row.average_score = ((row.average_score or 0.0) * old_count + earned) / new_count
         row.question_count = new_count
-
         if earned >= 75.0:
             row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1
         else:
             row.consecutive_good_scores = 0
-
         row.mastery_level = _mastery_from_stats(row.average_score, row.consecutive_good_scores)
         row.last_updated = datetime.utcnow()
-
         db.session.commit()
     except Exception as e:
         print(f"update_user_progress_on_answer error: {e}")
@@ -370,13 +361,12 @@ def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_
     except Exception as e:
         print(f"get_seen_hashes error: {e}")
         return set()
-# ---------- End tracking helpers ----------
+# ---------- END helpers ----------
 
 def chat_with_ai(messages, user_id=None):
     """Thin wrapper to OpenAI Chat Completions with basic rate limiting and robust error handling."""
     global last_api_call
     try:
-        # Friendly rate limit to avoid hammering API
         if last_api_call:
             delta = datetime.utcnow() - last_api_call
             if delta.total_seconds() < 2:
@@ -394,16 +384,8 @@ def chat_with_ai(messages, user_id=None):
         if not messages or messages[0].get('role') != 'system':
             messages.insert(0, system_message)
 
-        headers = {
-            'Authorization': f'Bearer {OPENAI_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        data = {
-            'model': OPENAI_CHAT_MODEL,
-            'messages': messages,
-            'max_tokens': 1500,
-            'temperature': 0.7
-        }
+        headers = {'Authorization': f'Bearer {OPENAI_API_KEY}','Content-Type': 'application/json'}
+        data = {'model': OPENAI_CHAT_MODEL,'messages': messages,'max_tokens': 1500,'temperature': 0.7}
 
         last_api_call = datetime.utcnow()
         resp = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=45)
@@ -428,60 +410,35 @@ def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
     base_questions = [
         {
             "question": "What is the primary purpose of a security risk assessment?",
-            "options": {
-                "A": "Identify all threats",
-                "B": "Determine cost-effective mitigation",
-                "C": "Eliminate all risks",
-                "D": "Satisfy compliance"
-            },
+            "options": {"A": "Identify all threats","B": "Determine cost-effective mitigation","C": "Eliminate all risks","D": "Satisfy compliance"},
             "correct": "B",
             "explanation": "Risk assessments help determine cost-effective mitigation strategies.",
             "domain": "security-principles"
         },
         {
             "question": "In CPTED, natural surveillance primarily accomplishes what?",
-            "options": {
-                "A": "Reduces guard costs",
-                "B": "Increases observation likelihood",
-                "C": "Eliminates cameras",
-                "D": "Provides legal protection"
-            },
+            "options": {"A": "Reduces guard costs","B": "Increases observation likelihood","C": "Eliminates cameras","D": "Provides legal protection"},
             "correct": "B",
             "explanation": "Natural surveillance increases the likelihood that criminal activity will be observed.",
             "domain": "physical-security"
         },
         {
             "question": "Which concept means applying multiple security layers so if one fails others still protect?",
-            "options": {
-                "A": "Security by Obscurity",
-                "B": "Defense in Depth",
-                "C": "Zero Trust",
-                "D": "Least Privilege"
-            },
+            "options": {"A": "Security by Obscurity","B": "Defense in Depth","C": "Zero Trust","D": "Least Privilege"},
             "correct": "B",
             "explanation": "Defense in Depth uses layered controls to maintain protection despite single-point failures.",
             "domain": "security-principles"
         },
         {
             "question": "In incident response, what is usually the FIRST priority?",
-            "options": {
-                "A": "Notify law enforcement",
-                "B": "Contain the incident",
-                "C": "Eradicate malware",
-                "D": "Perform lessons learned"
-            },
+            "options": {"A": "Notify law enforcement","B": "Contain the incident","C": "Eradicate malware","D": "Perform lessons learned"},
             "correct": "B",
             "explanation": "Containment prevents further damage before eradication and recovery.",
             "domain": "information-security"
         },
         {
             "question": "Background investigations primarily support which objective?",
-            "options": {
-                "A": "Regulatory compliance only",
-                "B": "Improving marketing outcomes",
-                "C": "Personnel Security risk reduction",
-                "D": "Disaster response coordination"
-            },
+            "options": {"A": "Regulatory compliance only","B": "Improving marketing outcomes","C": "Personnel Security risk reduction","D": "Disaster response coordination"},
             "correct": "C",
             "explanation": "They help reduce personnel security risks such as insider threat.",
             "domain": "personnel-security"
@@ -505,7 +462,7 @@ def generate_quiz(quiz_type, domain=None, difficulty='medium'):
     return generate_fallback_quiz(quiz_type, domain, difficulty, config['questions'])
 
 # -----------------------------------------------------------------------------
-# HTML Base Template (no f-strings; safe for braces via string.Template)
+# HTML Base Template
 # -----------------------------------------------------------------------------
 def render_base_template(title, content_html, user=None):
     disclaimer = """
@@ -530,13 +487,19 @@ def render_base_template(title, content_html, user=None):
             '<nav class="navbar navbar-expand-lg navbar-dark bg-primary">'
             '  <div class="container">'
             '    <a class="navbar-brand" href="/dashboard">CPP Test Prep</a>'
-            '    <div class="navbar-nav ms-auto">'
-            '      <a class="nav-link" href="/dashboard">Dashboard</a>'
-            '      <a class="nav-link" href="/study">Study</a>'
-            '      <a class="nav-link" href="/quiz-selector">Quizzes</a>'
-            '      <a class="nav-link" href="/progress">Progress</a>'
-            '      <a class="nav-link" href="/subscribe">Subscribe</a>'
-            '      <a class="nav-link" href="/logout">Logout</a>'
+            '    <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarsExample" aria-controls="navbarsExample" aria-expanded="false" aria-label="Toggle navigation">'
+            '      <span class="navbar-toggler-icon"></span>'
+            '    </button>'
+            '    <div class="collapse navbar-collapse" id="navbarsExample">'
+            '      <div class="navbar-nav ms-auto">'
+            '        <a class="nav-link" href="/dashboard">Dashboard</a>'
+            '        <a class="nav-link" href="/study">Study</a>'
+            '        <a class="nav-link" href="/quiz-selector">Quizzes</a>'
+            '        <a class="nav-link" href="/mock-exam">Mock Exam</a>'
+            '        <a class="nav-link" href="/progress">Progress</a>'
+            '        <a class="nav-link" href="/subscribe">Subscribe</a>'
+            '        <a class="nav-link" href="/logout">Logout</a>'
+            '      </div>'
             '    </div>'
             '  </div>'
             '</nav>'
@@ -799,19 +762,11 @@ def dashboard():
     if user.subscription_end_date:
         days_left = max(0, (user.subscription_end_date - datetime.utcnow()).days)
 
-    # Snapshot: avg score (last 5)
-    last5 = (QuizResult.query
-             .filter_by(user_id=user.id)
-             .order_by(QuizResult.completed_at.desc())
-             .limit(5)
-             .all())
-    avg5 = round(sum(q.score for q in last5) / len(last5), 1) if last5 else 0.0
-
     tmpl = Template("""
     <div class="row">
       <div class="col-12"><h1>Welcome back, $first_name!</h1></div>
       <div class="col-12">
-        <div class="row mt-4 g-3">
+        <div class="row mt-4">
           <div class="col-md-3">
             <div class="card bg-primary text-white">
               <div class="card-body">
@@ -830,9 +785,10 @@ def dashboard():
           </div>
           <div class="col-md-3">
             <div class="card bg-info text-white">
-              <div class="card-body">
-                <h5>Avg Score (last 5)</h5>
-                <h3>$avg5%</h3>
+              <div class="card-body text-center">
+                <h5 class="mb-2">📊 Progress</h5>
+                <p class="text-white-50 mb-3">See your trends & mastery.</p>
+                <a href="/progress" class="btn btn-light">View Progress</a>
               </div>
             </div>
           </div>
@@ -872,18 +828,6 @@ def dashboard():
           <div class="col-md-3">
             <div class="card h-100">
               <div class="card-body d-flex flex-column text-center">
-                <h5 class="mb-2">📈 Your Progress</h5>
-                <p class="text-muted flex-grow-1">Strengths, weaknesses, and trends.</p>
-                <a href="/progress" class="btn btn-outline-primary mt-auto">View Progress</a>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div class="row mt-4 g-3">
-          <div class="col-md-3">
-            <div class="card h-100">
-              <div class="card-body d-flex flex-column text-center">
                 <h5 class="mb-2">🏁 Mock Exam</h5>
                 <p class="text-muted flex-grow-1">Up to 100 questions in one go.</p>
                 <a href="/mock-exam" class="btn btn-warning mt-auto">Start Mock Exam</a>
@@ -898,8 +842,7 @@ def dashboard():
     content = tmpl.substitute(
         first_name=user.first_name,
         days_left=days_left,
-        study_time=(user.study_time or 0),
-        avg5=f"{avg5:.1f}"
+        study_time=(user.study_time or 0)
     )
     return render_base_template("Dashboard", content, user=user)
 
@@ -961,6 +904,9 @@ def study():
 
       sendBtn.addEventListener('click', send);
       input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+      window.addEventListener('beforeunload', () => {
+        navigator.sendBeacon('/end-study-session');
+      });
     </script>
     """
     return render_base_template("Study", content, user=user)
@@ -988,7 +934,7 @@ def chat():
         except json.JSONDecodeError:
             messages = []
 
-        # Trim history for safety
+        # Trim history
         if len(messages) > 20:
             messages = messages[-20:]
 
@@ -1088,7 +1034,7 @@ def quiz(quiz_type):
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
+        QUIZ_DATA.questions.forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1118,38 +1064,12 @@ def quiz(quiz_type):
         });
       }
 
-      function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
-
-      function renderReview(results) {
-        const resultsDiv = document.getElementById('results');
-        if (!Array.isArray(results)) return;
-        let html = '<div class="mt-3">';
-        results.forEach(r => {
-          const border = r.is_correct ? 'border-success' : 'border-danger';
-          const badge = r.is_correct ? '<span class="badge bg-success">Correct</span>' : '<span class="badge bg-danger">Incorrect</span>';
-          html += '<div class="mb-3 p-3 border rounded ' + border + '">';
-          html += '<div class="d-flex justify-content-between align-items-center">';
-          html += '<h5 class="mb-0">Q' + r.index + '.</h5>' + badge + '</div>';
-          html += '<p class="mt-2">' + esc(r.question) + '</p>';
-          html += '<p class="mb-1"><strong>Your answer:</strong> ' + (r.user_letter ? esc(r.user_letter + ') ' + (r.user_text || '')) : '<em>No answer</em>') + '</p>';
-          html += '<p class="mb-1"><strong>Correct answer:</strong> ' + esc(r.correct_letter + ') ' + (r.correct_text || '')) + '</p>';
-          if (r.explanation) {
-            html += '<div class="mt-2"><strong>Explanation:</strong><br>' + esc(r.explanation) + '</div>';
-          }
-          html += '</div>';
-        });
-        html += '</div>';
-        resultsDiv.insertAdjacentHTML('beforeend', html);
-        window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
-      }
-
       async function submitQuiz() {
         const answers = {};
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
-        const resultsDiv = document.getElementById('results');
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1162,21 +1082,41 @@ def quiz(quiz_type):
             })
           });
           const data = await res.json();
+          const resultsDiv = document.getElementById('results');
           if (data.error) {
             resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
             return;
           }
-          let summary = '<div class="card"><div class="card-body">';
-          summary += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-          summary += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+          let html = '<div class="card"><div class="card-body">';
+          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
           if (Array.isArray(data.performance_insights)) {
-            summary += '<ul>';
-            data.performance_insights.forEach(p => { summary += '<li>' + p + '</li>'; });
-            summary += '</ul>';
+            html += '<ul>';
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
           }
-          summary += '</div></div>';
-          resultsDiv.innerHTML = summary;
-          renderReview(data.results);
+          // Optional: show per-question review
+          if (Array.isArray(data.results)) {
+            html += '<hr><h5>Review</h5>';
+            data.results.forEach(r => {
+              html += '<div class="mb-2 p-2 border rounded">';
+              html += '<div><strong>Q' + r.index + '.</strong> ' + r.question + '</div>';
+              html += '<div class="mt-1"><span class="badge ' + (r.is_correct ? 'bg-success' : 'bg-danger') + '">' + (r.is_correct ? 'Correct' : 'Incorrect') + '</span></div>';
+              if (r.user_letter) {
+                html += '<div>Your answer: ' + r.user_letter + ') ' + (r.user_text || '') + '</div>';
+              } else {
+                html += '<div>Your answer: <em>No selection</em></div>';
+              }
+              html += '<div>Correct answer: ' + r.correct_letter + ') ' + (r.correct_text || '') + '</div>';
+              if (r.explanation) {
+                html += '<div class="text-muted mt-1"><em>' + r.explanation + '</em></div>';
+              }
+              html += '</div>';
+            });
+          }
+          html += '</div></div>';
+          resultsDiv.innerHTML = html;
+          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
         } catch (e) {
           resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
@@ -1221,7 +1161,7 @@ def mock_exam():
       function renderQuiz() {
         const container = document.getElementById('quizContainer');
         container.innerHTML = '';
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
+        QUIZ_DATA.questions.forEach((q, idx) => {
           const card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           const title = document.createElement('h5');
@@ -1251,38 +1191,12 @@ def mock_exam():
         });
       }
 
-      function esc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;'); }
-
-      function renderReview(results) {
-        const resultsDiv = document.getElementById('results');
-        if (!Array.isArray(results)) return;
-        let html = '<div class="mt-3">';
-        results.forEach(r => {
-          const border = r.is_correct ? 'border-success' : 'border-danger';
-          const badge = r.is_correct ? '<span class="badge bg-success">Correct</span>' : '<span class="badge bg-danger">Incorrect</span>';
-          html += '<div class="mb-3 p-3 border rounded ' + border + '">';
-          html += '<div class="d-flex justify-content-between align-items-center">';
-          html += '<h5 class="mb-0">Q' + r.index + '.</h5>' + badge + '</div>';
-          html += '<p class="mt-2">' + esc(r.question) + '</p>';
-          html += '<p class="mb-1"><strong>Your answer:</strong> ' + (r.user_letter ? esc(r.user_letter + ') ' + (r.user_text || '')) : '<em>No answer</em>') + '</p>';
-          html += '<p class="mb-1"><strong>Correct answer:</strong> ' + esc(r.correct_letter + ') ' + (r.correct_text || '')) + '</p>';
-          if (r.explanation) {
-            html += '<div class="mt-2"><strong>Explanation:</strong><br>' + esc(r.explanation) + '</div>';
-          }
-          html += '</div>';
-        });
-        html += '</div>';
-        resultsDiv.insertAdjacentHTML('beforeend', html);
-        window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
-      }
-
       async function submitQuiz() {
         const answers = {};
         (QUIZ_DATA.questions || []).forEach((q, idx) => {
           const selected = document.querySelector('input[name="q' + idx + '"]:checked');
           answers[String(idx)] = selected ? selected.value : null;
         });
-        const resultsDiv = document.getElementById('results');
         try {
           const res = await fetch('/submit-quiz', {
             method: 'POST',
@@ -1295,23 +1209,42 @@ def mock_exam():
             })
           });
           const data = await res.json();
+          const resultsDiv = document.getElementById('results');
           if (data.error) {
             resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
             return;
           }
-          let summary = '<div class="card"><div class="card-body">';
-          summary += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-          summary += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+          let html = '<div class="card"><div class="card-body">';
+          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
           if (Array.isArray(data.performance_insights)) {
-            summary += '<ul>';
-            data.performance_insights.forEach(p => { summary += '<li>' + p + '</li>'; });
-            summary += '</ul>';
+            html += '<ul>';
+            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+            html += '</ul>';
           }
-          summary += '</div></div>';
-          resultsDiv.innerHTML = summary;
-          renderReview(data.results);
+          if (Array.isArray(data.results)) {
+            html += '<hr><h5>Review</h5>';
+            data.results.forEach(r => {
+              html += '<div class="mb-2 p-2 border rounded">';
+              html += '<div><strong>Q' + r.index + '.</strong> ' + r.question + '</div>';
+              html += '<div class="mt-1"><span class="badge ' + (r.is_correct ? 'bg-success' : 'bg-danger') + '">' + (r.is_correct ? 'Correct' : 'Incorrect') + '</span></div>';
+              if (r.user_letter) {
+                html += '<div>Your answer: ' + r.user_letter + ') ' + (r.user_text || '') + '</div>';
+              } else {
+                html += '<div>Your answer: <em>No selection</em></div>';
+              }
+              html += '<div>Correct answer: ' + r.correct_letter + ') ' + (r.correct_text || '') + '</div>';
+              if (r.explanation) {
+                html += '<div class="text-muted mt-1"><em>' + r.explanation + '</em></div>';
+              }
+              html += '</div>';
+            });
+          }
+          html += '</div></div>';
+          resultsDiv.innerHTML = html;
+          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
         } catch (e) {
-          resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
+            resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
         }
       }
 
@@ -1322,7 +1255,7 @@ def mock_exam():
     content = page.substitute(num=num_questions, quiz_json=quiz_json)
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
-# ----------------- Submit quiz (records results; returns detailed review) -----
+# ----------------- Submit quiz (records events & updates progress) ------------
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1347,8 +1280,6 @@ def submit_quiz():
         total = len(questions)
 
         detailed_results = []
-        user_id = session['user_id']
-
         for i, q in enumerate(questions):
             user_letter = answers.get(str(i))
             correct_letter = q.get('correct')
@@ -1357,10 +1288,26 @@ def submit_quiz():
             if is_correct:
                 correct_count += 1
 
-            # record per-question event + progress
-            q_domain = q.get('domain') or domain or 'general'
-            record_question_event(user_id, q, domain=q_domain, topic=None, is_correct=is_correct, source=('mock' if quiz_type == 'mock-exam' else 'quiz'))
-            update_user_progress_on_answer(user_id, domain=q_domain, topic=None, is_correct=is_correct)
+            # Track each Q for future flashcard "no repeats"
+            try:
+                record_question_event(
+                    user_id=session['user_id'],
+                    question_obj=q,
+                    domain=q.get('domain') or domain or 'general',
+                    topic=None,
+                    is_correct=is_correct,
+                    response_time_s=None,
+                    source=('mock' if quiz_type == 'mock-exam' else 'quiz')
+                )
+                update_user_progress_on_answer(
+                    user_id=session['user_id'],
+                    domain=q.get('domain') or domain or 'general',
+                    topic=None,
+                    is_correct=is_correct
+                )
+            except Exception as _e:
+                # don't fail the whole submission
+                print(f"tracking error: {_e}")
 
             detailed_results.append({
                 'index': i + 1,
@@ -1371,14 +1318,14 @@ def submit_quiz():
                 'user_text': options.get(user_letter, '') if user_letter else None,
                 'explanation': q.get('explanation', ''),
                 'is_correct': bool(is_correct),
-                'domain': q_domain
+                'domain': q.get('domain', 'general')
             })
 
         score = (correct_count / total) * 100 if total else 0.0
 
-        # Save overall result
+        # Save result
         qr = QuizResult(
-            user_id=user_id,
+            user_id=session['user_id'],
             quiz_type=quiz_type,
             domain=domain,
             questions=json.dumps(questions),
@@ -1390,14 +1337,14 @@ def submit_quiz():
         db.session.add(qr)
         db.session.commit()
 
-        # Update user's quick score history cache
-        user = User.query.get(user_id)
+        # Update user quiz score history (compact)
+        user = User.query.get(session['user_id'])
         try:
             scores = json.loads(user.quiz_scores) if user.quiz_scores else []
         except Exception:
             scores = []
         scores.append({
-            'score': score,
+            'score': round(score, 1),
             'date': datetime.utcnow().isoformat(),
             'type': quiz_type,
             'domain': domain,
@@ -1423,7 +1370,8 @@ def submit_quiz():
             elif avg > 3:
                 insights.append("Consider practicing to improve your speed.")
 
-        log_activity(user_id, 'quiz_completed', f'{quiz_type}: {correct_count}/{total} in {time_taken} min')
+        log_activity(session['user_id'], 'quiz_completed',
+                     f'{quiz_type}: {correct_count}/{total} in {time_taken} min')
 
         return jsonify({
             'success': True,
@@ -1439,193 +1387,171 @@ def submit_quiz():
         db.session.rollback()
         return jsonify({'error': 'Error processing quiz results.'}), 500
 
-# ----------------------------- Progress & Insights ----------------------------
+# ------------------------------- Progress -------------------------------------
 @app.route('/progress')
-@subscription_required
+@login_required
 def progress():
-    user_id = session['user_id']
-    user = User.query.get(user_id)
+    try:
+        user_id = session['user_id']
+        user = User.query.get(user_id)
 
-    # Domain mastery rows (include all domains, default zero if no data)
-    domain_rows = {}
-    for code, meta in CPP_DOMAINS.items():
-        domain_rows[code] = {
-            'code': code,
-            'name': meta['name'],
-            'mastery_level': 'needs_practice',
-            'average_score': 0.0,
-            'question_count': 0,
-            'last_updated': None
-        }
-
-    for row in UserProgress.query.filter_by(user_id=user_id).all():
-        if row.domain in domain_rows:
-            domain_rows[row.domain].update({
-                'mastery_level': row.mastery_level or 'needs_practice',
-                'average_score': round(row.average_score or 0.0, 1),
-                'question_count': row.question_count or 0,
-                'last_updated': row.last_updated
-            })
-        else:
-            # Unknown domain code (keep it anyway)
-            domain_rows[row.domain] = {
-                'code': row.domain,
-                'name': row.domain.replace('-', ' ').title(),
-                'mastery_level': row.mastery_level or 'needs_practice',
-                'average_score': round(row.average_score or 0.0, 1),
-                'question_count': row.question_count or 0,
-                'last_updated': row.last_updated
-            }
-
-    # Score trend (last 10 quizzes)
-    recent_q = (QuizResult.query
-                .filter_by(user_id=user_id)
-                .order_by(QuizResult.completed_at.desc())
-                .limit(10)
-                .all())
-    recent_q = list(reversed(recent_q))  # chronological
-    trend_labels = [(q.completed_at or datetime.utcnow()).strftime('%m/%d') for q in recent_q]
-    trend_scores = [round(q.score, 1) for q in recent_q]
-
-    # Study time: last 7 days vs previous 7 days
-    now = datetime.utcnow()
-    start_curr = now - timedelta(days=7)
-    start_prev = now - timedelta(days=14)
-    sessions_14 = (StudySession.query
-                   .filter(StudySession.user_id == user_id, StudySession.started_at >= start_prev)
+        # Pull recent quiz results (limit for perf)
+        results = (QuizResult.query
+                   .filter_by(user_id=user_id)
+                   .order_by(QuizResult.completed_at.asc())
                    .all())
-    prev_minutes = sum((s.duration or 0) for s in sessions_14 if start_prev <= (s.started_at or now) < start_curr)
-    curr_minutes = sum((s.duration or 0) for s in sessions_14 if start_curr <= (s.started_at or now) <= now)
-    delta_minutes = curr_minutes - prev_minutes
 
-    # Recommendations: pick two lowest average domains
-    rows_sorted = sorted(domain_rows.values(), key=lambda r: (r['average_score'], r['question_count']))
-    recs = []
-    for r in rows_sorted[:2]:
-        code = r['code']
-        recs.append({
-            'text': f"Practice {r['name']} (avg {r['average_score']}%)",
-            'quiz_url': f"/quiz/domain-specific?domain={code}"
-        })
+        # Overall snapshot
+        total_quizzes = len(results)
+        overall_avg = 0.0
+        last_score = None
+        if total_quizzes:
+            total_score_sum = sum((r.score or 0.0) for r in results)
+            overall_avg = round(total_score_sum / total_quizzes, 1)
+            last_score = round(results[-1].score or 0.0, 1)
 
-    # Build mastery table HTML
-    def mastery_badge(level: str) -> str:
-        if level == 'mastered':
-            return '<span class="badge bg-success">Mastered</span>'
-        if level == 'good':
-            return '<span class="badge bg-info">Good</span>'
-        return '<span class="badge bg-warning text-dark">Needs Practice</span>'
+        # Domain stats
+        domain_map = {}
+        for r in results:
+            d = (r.domain or 'general')
+            stats = domain_map.setdefault(d, {'sum': 0.0, 'count': 0})
+            stats['sum'] += (r.score or 0.0)
+            stats['count'] += 1
 
-    rows_html = []
-    for r in domain_rows.values():
-        rows_html.append(
-            "<tr>"
-            f"<td>{r['name']}</td>"
-            f"<td>{mastery_badge(r['mastery_level'])}</td>"
-            f"<td>{r['average_score']}%</td>"
-            f"<td>{r['question_count']}</td>"
-            f"<td><a class='btn btn-sm btn-outline-primary' href='/quiz/domain-specific?domain={r['code']}'>Practice</a></td>"
-            "</tr>"
-        )
-    table_html = (
-        "<div class='table-responsive'>"
-        "<table class='table table-hover align-middle'>"
-        "<thead><tr><th>Domain</th><th>Status</th><th>Avg Score</th><th>Questions</th><th></th></tr></thead>"
-        f"<tbody>{''.join(rows_html)}</tbody>"
-        "</table>"
-        "</div>"
-    )
+        domain_rows = []
+        for d, stats in sorted(domain_map.items(), key=lambda kv: kv[0]):
+            avg = (stats['sum'] / stats['count']) if stats['count'] else 0.0
+            # optional mastery if present
+            up = UserProgress.query.filter_by(user_id=user_id, domain=d, topic=None).first()
+            mastery = up.mastery_level if up else '—'
+            domain_rows.append(
+                f"<tr><td>{CPP_DOMAINS.get(d, {'name': d}).get('name', d)}</td>"
+                f"<td>{stats['count']}</td><td>{avg:.1f}%</td><td>{mastery}</td></tr>"
+            )
 
-    # JSON for chart
-    labels_json = json.dumps(trend_labels)
-    scores_json = json.dumps(trend_scores)
+        if not domain_rows:
+            domain_rows.append("<tr><td colspan='4' class='text-muted'>No quiz data yet.</td></tr>")
 
-    # Recommendations HTML
-    rec_html_items = []
-    for r in recs:
-        rec_html_items.append(f"<li class='mb-2'><a href='{r['quiz_url']}' class='link-primary'>{r['text']}</a></li>")
-    rec_html = "<ul class='mb-0'>" + "".join(rec_html_items) + "</ul>"
+        # Score trend (last 12 points)
+        last_n = results[-12:] if total_quizzes > 12 else results
+        labels = [ (r.completed_at or datetime.utcnow()).strftime('%m/%d') for r in last_n ]
+        scores = [ round(r.score or 0.0, 1) for r in last_n ]
 
-    page = Template("""
-    <div class="row g-3">
-      <div class="col-lg-7">
-        <div class="card h-100">
-          <div class="card-body">
-            <h4 class="mb-3">Domain Mastery</h4>
-            $table_html
+        # HTML
+        page = Template("""
+        <div class="row">
+          <div class="col-12"><h2>Your Progress</h2></div>
+        </div>
+
+        <div class="row g-3 mt-1">
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="text-muted">Overall Average</div>
+                <div class="display-6">$overall_avg%</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="text-muted">Quizzes Taken</div>
+                <div class="display-6">$total_quizzes</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="text-muted">Study Minutes</div>
+                <div class="display-6">$study_minutes</div>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100">
+              <div class="card-body">
+                <div class="text-muted">Last Score</div>
+                <div class="display-6">$last_score</div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="col-lg-5">
-        <div class="card mb-3">
-          <div class="card-body">
-            <h5 class="mb-3">Score Trend (last 10 quizzes)</h5>
-            <canvas id="scoreTrend" height="160"></canvas>
+        <div class="row mt-4">
+          <div class="col-md-7">
+            <div class="card">
+              <div class="card-body">
+                <h5 class="card-title mb-3">Score Trend</h5>
+                <canvas id="scoresChart" height="120"></canvas>
+              </div>
+            </div>
+          </div>
+          <div class="col-md-5">
+            <div class="card">
+              <div class="card-body">
+                <h5 class="card-title mb-3">By Domain</h5>
+                <div class="table-responsive">
+                  <table class="table table-sm">
+                    <thead><tr><th>Domain</th><th>Attempts</th><th>Avg</th><th>Mastery</th></tr></thead>
+                    <tbody>
+                      $domain_rows
+                    </tbody>
+                  </table>
+                </div>
+                <p class="text-muted mb-0" style="font-size: 0.9em;">
+                  Mastery updates as you answer questions correctly over time.
+                </p>
+              </div>
+            </div>
           </div>
         </div>
-        <div class="card mb-3">
-          <div class="card-body">
-            <h5 class="mb-2">Study Time</h5>
-            <p class="mb-1"><strong>This 7 days:</strong> $curr_minutes min</p>
-            <p class="mb-1"><strong>Prev 7 days:</strong> $prev_minutes min</p>
-            <p class="mb-0"><strong>Change:</strong> $delta_prefix$delta_abs min $delta_suffix</p>
-          </div>
-        </div>
-        <div class="card">
-          <div class="card-body">
-            <h5 class="mb-2">Recommended Next Steps</h5>
-            $rec_html
-          </div>
-        </div>
-      </div>
-    </div>
 
-    <!-- Chart.js only on this page -->
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
-    <script>
-      (function(){
-        const labels = $labels_json;
-        const data = $scores_json;
-        const ctx = document.getElementById('scoreTrend');
-        if (ctx && labels.length) {
-          new Chart(ctx, {
-            type: 'line',
-            data: {
-              labels: labels,
-              datasets: [{
-                label: 'Score %',
-                data: data,
-                tension: 0.25
-              }]
-            },
-            options: {
-              responsive: true,
-              plugins: { legend: { display: false } },
-              scales: {
-                y: { min: 0, max: 100, ticks: { stepSize: 20 } }
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <script>
+          (function(){
+            const labels = $labels_json;
+            const scores = $scores_json;
+            if (window.Chart && labels.length > 0) {
+              const ctx = document.getElementById('scoresChart').getContext('2d');
+              new Chart(ctx, {
+                type: 'line',
+                data: { labels: labels, datasets: [{ label: 'Score %', data: scores, tension: 0.3 }] },
+                options: {
+                  responsive: true,
+                  scales: { y: { suggestedMin: 0, suggestedMax: 100 } }
+                }
+              });
+            } else {
+              // If no data, show a friendly message
+              const cv = document.getElementById('scoresChart');
+              if (cv) {
+                const p = document.createElement('p');
+                p.className = 'text-muted mt-2';
+                p.innerText = 'No results yet. Take a quiz to see your trend.';
+                cv.parentNode.appendChild(p);
               }
             }
-          });
-        }
-      })();
-    </script>
-    """)
-    delta_prefix = "+" if delta_minutes >= 0 else "-"
-    delta_abs = abs(delta_minutes)
-    delta_suffix = "vs last week"
-    content = page.substitute(
-        table_html=table_html,
-        curr_minutes=str(curr_minutes),
-        prev_minutes=str(prev_minutes),
-        delta_prefix=delta_prefix,
-        delta_abs=str(delta_abs),
-        delta_suffix=delta_suffix,
-        rec_html=rec_html,
-        labels_json=labels_json,
-        scores_json=scores_json
-    )
-    return render_base_template("Progress", content, user=user)
+          })();
+        </script>
+        """)
+        content = page.substitute(
+            overall_avg=f"{overall_avg:.1f}",
+            total_quizzes=str(total_quizzes),
+            study_minutes=str(user.study_time or 0),
+            last_score=(f"{last_score:.1f}%" if last_score is not None else "—"),
+            domain_rows="".join(domain_rows),
+            labels_json=json.dumps(labels),
+            scores_json=json.dumps(scores)
+        )
+        return render_base_template("Progress", content, user=user)
+    except Exception as e:
+        # Catch-all to avoid 500s
+        print(f"/progress error: {e}")
+        content = """
+        <div class="alert alert-danger">Sorry, we couldn't load your progress right now.</div>
+        """
+        return render_base_template("Progress Error", content, user=User.query.get(session.get('user_id'))), 200
 
 # ----------------------------- Subscription & Stripe --------------------------
 @app.route('/subscribe')
