@@ -300,10 +300,6 @@ def generate_fallback_quiz(quiz_type: str, domain: str | None, difficulty: str, 
 # Routes
 # --------------------------------------------------------------------------------------
 
-@app.before_first_request
-def _on_start():
-    init_db()
-
 @app.route("/")
 def home():
     return redirect(url_for("dashboard"))
@@ -1334,3 +1330,4 @@ if __name__ == "__main__":
     # For local testing; Render uses Gunicorn
     init_db()
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "5000")), debug=False)
+
