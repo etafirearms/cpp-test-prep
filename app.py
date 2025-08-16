@@ -1,31 +1,24 @@
 # app.py
-# CPP Test Prep – Stable Build
-# - Fixes /progress crash and adds overall dial
-# - Keeps Tutor (with avatar), Flashcards (with instructions & keyboard), Quizzes selector (domain pills + counts)
-# - Mock Exam question-count picker (25/50/75/100)
-# - Preserves Stripe + OpenAI + DB initialization
-# - Uses Templates for large HTML/JS blocks to avoid f-string brace issues
-
-from flask import (
-    Flask, request, redirect, url_for, flash, session, jsonify, Response
-)
+# --------------------------------------------------------------------
+# CPP Test Prep - Stable Build (UI v1 locked)
+# --------------------------------------------------------------------
+from flask import Flask, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
+from sqlalchemy import text, inspect
 from datetime import datetime, timedelta
 from string import Template
 from functools import wraps
-from sqlalchemy import text, inspect
-import json
 import os
+import json
 import time
+import hashlib
 import requests
 import stripe
-import hashlib
-import random
 
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
 # App & Config
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
 app = Flask(__name__)
 
 def require_env(name: str) -> str:
@@ -34,11 +27,11 @@ def require_env(name: str) -> str:
         raise RuntimeError(f"Missing required environment variable: {name}")
     return val
 
-# Required env vars (Render: set these in your env)
+# Required env vars
 app.config['SECRET_KEY'] = require_env('SECRET_KEY')
 app.config['SQLALCHEMY_DATABASE_URI'] = require_env('DATABASE_URL')
 
-# Render sometimes gives postgres:// but SQLAlchemy wants postgresql://
+# Render sometimes provides postgres://; SQLAlchemy expects postgresql://
 if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
     app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://')
 
@@ -53,43 +46,51 @@ app.config['SQLALCHEMY_ENGINE_OPTIONS'] = {
 }
 db = SQLAlchemy(app)
 
-# OpenAI
+# Design/version lock (prevents accidental visual changes)
+DESIGN_VERSION = os.environ.get('DESIGN_VERSION', 'v1')
+
+# Admin token for import endpoints
+ADMIN_TOKEN = os.environ.get('ADMIN_TOKEN', None)
+
+# OpenAI config
 OPENAI_API_KEY = require_env('OPENAI_API_KEY')
 OPENAI_CHAT_MODEL = os.environ.get('OPENAI_CHAT_MODEL', 'gpt-4o-mini')
 OPENAI_API_BASE = os.environ.get('OPENAI_API_BASE', 'https://api.openai.com/v1')
 
-# Stripe
+# Stripe config
 stripe.api_key = require_env('STRIPE_SECRET_KEY')
 STRIPE_PUBLISHABLE_KEY = require_env('STRIPE_PUBLISHABLE_KEY')
 STRIPE_WEBHOOK_SECRET = os.environ.get('STRIPE_WEBHOOK_SECRET')
 
-# Simple rate limiter for AI calls
+# Simple AI call rate limiter
 last_api_call = None
 
-# -----------------------------------------------------------------------------
-# Domains & Quiz Types
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
+# Quiz Types & Domains
+# --------------------------------------------------------------------
 QUIZ_TYPES = {
-    'practice': {'name': 'Practice Quiz', 'description': 'General practice questions', 'questions': 10},
-    'mock-exam': {'name': 'Mock Exam', 'description': 'Full exam simulation', 'questions': 50},
-    'domain-specific': {'name': 'Domain-Specific Quiz', 'description': 'Focus on specific domains', 'questions': 15},
-    'quick-review': {'name': 'Quick Review', 'description': 'Short 5-question review', 'questions': 5},
-    'difficult': {'name': 'Advanced Challenge', 'description': 'Challenging questions', 'questions': 20},
+    'practice':        {'name': 'Practice Quiz',        'description': 'General practice questions', 'questions': 10},
+    'mock-exam':       {'name': 'Mock Exam',            'description': 'Full exam simulation',       'questions': 50},
+    'domain-specific': {'name': 'Domain-Specific Quiz', 'description': 'Focus on specific domains',  'questions': 15},
+    'quick-review':    {'name': 'Quick Review',         'description': 'Short 5-question review',    'questions': 5},
+    'difficult':       {'name': 'Advanced Challenge',   'description': 'Challenging questions',      'questions': 20}
 }
 
 CPP_DOMAINS = {
     'security-principles': {'name': 'Security Principles & Practices', 'topics': ['Risk Management', 'Security Governance']},
     'business-principles': {'name': 'Business Principles & Practices', 'topics': ['Budgeting', 'Contracts']},
-    'investigations': {'name': 'Investigations', 'topics': ['Investigation Planning', 'Evidence Collection']},
-    'personnel-security': {'name': 'Personnel Security', 'topics': ['Background Screening', 'Insider Threat']},
-    'physical-security': {'name': 'Physical Security', 'topics': ['CPTED', 'Access Control']},
-    'information-security': {'name': 'Information Security', 'topics': ['Data Protection', 'Cybersecurity']},
-    'crisis-management': {'name': 'Crisis Management', 'topics': ['Business Continuity', 'Emergency Response']},
+    'investigations':      {'name': 'Investigations',                  'topics': ['Investigation Planning', 'Evidence Collection']},
+    'personnel-security':  {'name': 'Personnel Security',              'topics': ['Background Screening', 'Insider Threat']},
+    'physical-security':   {'name': 'Physical Security',               'topics': ['CPTED', 'Access Control']},
+    'information-security':{'name': 'Information Security',            'topics': ['Data Protection', 'Cybersecurity']},
+    'crisis-management':   {'name': 'Crisis Management',               'topics': ['Business Continuity', 'Emergency Response']}
 }
 
-# -----------------------------------------------------------------------------
+ALL_DOMAIN_KEYS = list(CPP_DOMAINS.keys())
+
+# --------------------------------------------------------------------
 # Database Models
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     email = db.Column(db.String(120), unique=True, nullable=False)
@@ -148,78 +149,108 @@ class UserProgress(db.Model):
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
     domain = db.Column(db.String(50), nullable=False, index=True)
     topic = db.Column(db.String(100), nullable=True, index=True)  # optional drill-down
-    mastery_level = db.Column(db.String(20), default='needs_practice')  # needs_practice|good|mastered
+    mastery_level = db.Column(db.String(20), default='needs_practice')  # needs_practice | good | mastered
     average_score = db.Column(db.Float, default=0.0)  # 0-100
     question_count = db.Column(db.Integer, default=0)
     last_updated = db.Column(db.DateTime, default=datetime.utcnow)
     consecutive_good_scores = db.Column(db.Integer, default=0)
+
     __table_args__ = (
         db.UniqueConstraint('user_id', 'domain', 'topic', name='uq_userprogress_user_domain_topic'),
     )
 
 class QuestionEvent(db.Model):
+    """
+    One row per answered card/question.
+    source: 'quiz' | 'mock' | 'flashcard' | 'tutor'
+    """
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    question_hash = db.Column(db.String(64), nullable=False, index=True)  # sha256
+    question_hash = db.Column(db.String(64), nullable=False, index=True)  # sha256 of content
     domain = db.Column(db.String(50), nullable=True, index=True)
     topic = db.Column(db.String(100), nullable=True, index=True)
     source = db.Column(db.String(20), nullable=False)  # quiz/mock/flashcard/tutor
-    is_correct = db.Column(db.Boolean, nullable=True)
-    response_time_s = db.Column(db.Integer)
+    is_correct = db.Column(db.Boolean, nullable=True)  # flashcards can be Know/Don't Know
+    response_time_s = db.Column(db.Integer)  # optional
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
     __table_args__ = (
         db.Index('ix_question_event_user_created', 'user_id', 'created_at'),
     )
 
-# -----------------------------------------------------------------------------
-# DB Init / Safe Migrations
-# -----------------------------------------------------------------------------
+class QuestionBank(db.Model):
+    """
+    Canonical content store for quizzes/flashcards (if present).
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    domain = db.Column(db.String(50), index=True)           # e.g., 'information-security'
+    difficulty = db.Column(db.String(20), default='medium') # easy/medium/hard
+    question = db.Column(db.Text, nullable=False)
+    options_json = db.Column(db.Text, nullable=False)       # JSON dict {"A": "...", "B": "...", ...}
+    correct = db.Column(db.String(5), nullable=False)       # "A" | "B" | ...
+    explanation = db.Column(db.Text)
+    source_name = db.Column(db.String(120))
+    source_url = db.Column(db.Text)
+    is_verified = db.Column(db.Boolean, default=True, index=True)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
+
+# --------------------------------------------------------------------
+# DB Initialization / Safe Migrations
+# --------------------------------------------------------------------
+def _safe_add_column(table: str, col_sql: str):
+    try:
+        db.session.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_sql}"))
+        db.session.commit()
+    except Exception:
+        db.session.rollback()
+
 def init_database():
     try:
         db.create_all()
         insp = inspect(db.engine)
 
-        # Ensure QuizResult has 'domain' and 'time_taken'
+        # QuizResult: ensure domain + time_taken
         if 'quiz_result' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('quiz_result')}
-            if 'domain' not in cols:
-                try:
-                    db.session.execute(text("ALTER TABLE quiz_result ADD COLUMN domain VARCHAR(50)"))
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
-            if 'time_taken' not in cols:
-                try:
-                    db.session.execute(text("ALTER TABLE quiz_result ADD COLUMN time_taken INTEGER"))
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
+            existing = {c['name'] for c in insp.get_columns('quiz_result')}
+            if 'domain' not in existing:
+                _safe_add_column('quiz_result', 'domain VARCHAR(50)')
+            if 'time_taken' not in existing:
+                _safe_add_column('quiz_result', 'time_taken INTEGER')
 
-        # Ensure User has terms columns
+        # User: ensure terms columns
         if 'user' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('user')}
-            if 'terms_accepted' not in cols:
-                try:
-                    db.session.execute(text('ALTER TABLE "user" ADD COLUMN terms_accepted BOOLEAN DEFAULT FALSE'))
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
-            if 'terms_accepted_date' not in cols:
-                try:
-                    db.session.execute(text('ALTER TABLE "user" ADD COLUMN terms_accepted_date TIMESTAMP'))
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
+            existing = {c['name'] for c in insp.get_columns('user')}
+            if 'terms_accepted' not in existing:
+                _safe_add_column('"user"', 'terms_accepted BOOLEAN DEFAULT FALSE')
+            if 'terms_accepted_date' not in existing:
+                _safe_add_column('"user"', 'terms_accepted_date TIMESTAMP')
 
-        # Ensure UserProgress has 'topic'
+        # UserProgress: ensure topic & consecutive_good_scores
         if 'user_progress' in insp.get_table_names():
-            cols = {c['name'] for c in insp.get_columns('user_progress')}
-            if 'topic' not in cols:
-                try:
-                    db.session.execute(text('ALTER TABLE user_progress ADD COLUMN topic VARCHAR(100)'))
-                    db.session.commit()
-                except Exception:
-                    db.session.rollback()
+            existing = {c['name'] for c in insp.get_columns('user_progress')}
+            if 'topic' not in existing:
+                _safe_add_column('user_progress', 'topic VARCHAR(100)')
+            if 'consecutive_good_scores' not in existing:
+                _safe_add_column('user_progress', 'consecutive_good_scores INTEGER DEFAULT 0')
+
+        # QuestionBank: ensure all required columns (table may exist already)
+        if 'question_bank' in insp.get_table_names():
+            existing = {c['name'] for c in insp.get_columns('question_bank')}
+            needed = [
+                ('domain', 'VARCHAR(50)'),
+                ('difficulty', 'VARCHAR(20)'),
+                ('question', 'TEXT'),
+                ('options_json', 'TEXT'),
+                ('correct', 'VARCHAR(5)'),
+                ('explanation', 'TEXT'),
+                ('source_name', 'VARCHAR(120)'),
+                ('source_url', 'TEXT'),
+                ('is_verified', 'BOOLEAN DEFAULT TRUE'),
+                ('created_at', 'TIMESTAMP')
+            ]
+            for name, ddl in needed:
+                if name not in existing:
+                    _safe_add_column('question_bank', f'{name} {ddl}')
 
         print("Database initialized successfully")
     except Exception as e:
@@ -228,9 +259,9 @@ def init_database():
 with app.app_context():
     init_database()
 
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
 # Helpers & Decorators
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
 def login_required(f):
     @wraps(f)
     def inner(*args, **kwargs):
@@ -250,9 +281,11 @@ def subscription_required(f):
             if not user:
                 session.clear()
                 return redirect(url_for('login'))
+
             if user.subscription_status == 'expired':
                 flash('Your subscription has expired. Please renew to continue.', 'danger')
                 return redirect(url_for('subscribe'))
+
             if user.subscription_status == 'trial' and user.subscription_end_date:
                 if datetime.utcnow() > user.subscription_end_date:
                     user.subscription_status = 'expired'
@@ -274,6 +307,7 @@ def log_activity(user_id, activity, details=None):
         print(f"Activity logging error: {e}")
         db.session.rollback()
 
+# Tracking helpers
 def _hash_question_payload(question_obj: dict) -> str:
     q_text = (question_obj or {}).get('question', '') or ''
     opts = (question_obj or {}).get('options', {}) or {}
@@ -338,7 +372,12 @@ def update_user_progress_on_answer(user_id: int, domain: str, topic: str, is_cor
         new_count = old_count + 1
         row.average_score = ((row.average_score or 0.0) * old_count + earned) / new_count
         row.question_count = new_count
-        row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1 if earned >= 75 else 0
+
+        if earned >= 75.0:
+            row.consecutive_good_scores = (row.consecutive_good_scores or 0) + 1
+        else:
+            row.consecutive_good_scores = 0
+
         row.mastery_level = _mastery_from_stats(row.average_score, row.consecutive_good_scores)
         row.last_updated = datetime.utcnow()
         db.session.commit()
@@ -362,6 +401,9 @@ def get_seen_hashes(user_id: int, domain: str = None, topic: str = None, window_
         print(f"get_seen_hashes error: {e}")
         return set()
 
+# --------------------------------------------------------------------
+# AI Chat (OpenAI)
+# --------------------------------------------------------------------
 def chat_with_ai(messages, user_id=None):
     global last_api_call
     try:
@@ -374,15 +416,17 @@ def chat_with_ai(messages, user_id=None):
             "role": "system",
             "content": (
                 "You are an expert tutor for the ASIS Certified Protection Professional (CPP) exam. "
-                "Focus on the seven CPP domains: Security Principles & Practices, Business Principles & Practices, "
-                "Investigations, Personnel Security, Physical Security, Information Security, and Crisis Management. "
-                "Provide clear explanations, practical examples, and do not claim affiliation with ASIS."
+                "Focus on the seven CPP domains. Provide clear explanations and practical examples. "
+                "Do not claim affiliation with ASIS."
             )
         }
         if not messages or messages[0].get('role') != 'system':
             messages.insert(0, system_message)
 
-        headers = {'Authorization': f'Bearer {OPENAI_API_KEY}', 'Content-Type': 'application/json'}
+        headers = {
+            'Authorization': f'Bearer {OPENAI_API_KEY}',
+            'Content-Type': 'application/json'
+        }
         data = {'model': OPENAI_CHAT_MODEL, 'messages': messages, 'max_tokens': 1500, 'temperature': 0.7}
 
         last_api_call = datetime.utcnow()
@@ -403,119 +447,69 @@ def chat_with_ai(messages, user_id=None):
         print(f"AI chat error: {e}")
         return "I encountered a technical issue. Please try again."
 
-# -----------------------------------------------------------------------------
-# Question Bank (fallback, safe & static)
-# -----------------------------------------------------------------------------
-_BASE_QUESTIONS = [
-    {
-        "question": "What is the primary purpose of a security risk assessment?",
-        "options": {"A": "Identify all threats", "B": "Determine cost-effective mitigation", "C": "Eliminate all risks", "D": "Satisfy compliance"},
-        "correct": "B",
-        "explanation": "Risk assessments inform balanced, cost-effective mitigation decisions.",
-        "domain": "security-principles"
-    },
-    {
-        "question": "In CPTED, natural surveillance primarily accomplishes what?",
-        "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
-        "correct": "B",
-        "explanation": "Natural surveillance raises the chance inappropriate behavior is seen.",
-        "domain": "physical-security"
-    },
-    {
-        "question": "Which concept means applying multiple security layers so if one fails others still protect?",
-        "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
-        "correct": "B",
-        "explanation": "Layered defenses limit single point of failure.",
-        "domain": "security-principles"
-    },
-    {
-        "question": "In incident response, what is usually the FIRST priority?",
-        "options": {"A": "Notify law enforcement", "B": "Contain the incident", "C": "Eradicate malware", "D": "Perform lessons learned"},
-        "correct": "B",
-        "explanation": "Containment reduces ongoing impact before eradication and recovery.",
-        "domain": "information-security"
-    },
-    {
-        "question": "Background investigations primarily support which objective?",
-        "options": {"A": "Regulatory compliance only", "B": "Improving marketing outcomes", "C": "Personnel security risk reduction", "D": "Disaster response coordination"},
-        "correct": "C",
-        "explanation": "They reduce insider threat likelihood.",
-        "domain": "personnel-security"
-    },
-    {
-        "question": "Business impact analysis (BIA) mainly helps an organization to:",
-        "options": {"A": "Harden perimeter security", "B": "Prioritize processes for continuity", "C": "Eliminate all downtime", "D": "Create audit schedules"},
-        "correct": "B",
-        "explanation": "BIA identifies critical processes and recovery priorities.",
-        "domain": "crisis-management"
-    },
-    {
-        "question": "Chain of custody in investigations is important because it:",
-        "options": {"A": "Expedites court dates", "B": "Ensures evidence integrity", "C": "Reduces investigation costs", "D": "Eliminates the need for witnesses"},
-        "correct": "B",
-        "explanation": "It documents control/handling of evidence to preserve admissibility.",
-        "domain": "investigations"
-    },
-    {
-        "question": "Which is the best example of least privilege?",
-        "options": {"A": "Admins share one account", "B": "Users get only needed access", "C": "Default allow firewall", "D": "Open guest Wi-Fi"},
-        "correct": "B",
-        "explanation": "Least privilege grants only necessary permissions to complete tasks.",
-        "domain": "information-security"
-    },
-    {
-        "question": "A mantrap (two-door interlock) primarily protects against:",
-        "options": {"A": "Shoulder surfing", "B": "Piggybacking/tailgating", "C": "Phishing", "D": "Dumpster diving"},
-        "correct": "B",
-        "explanation": "Mantraps control one person per cycle to prevent tailgating.",
-        "domain": "physical-security"
-    },
-    {
-        "question": "Which contract type places the most risk on the seller?",
-        "options": {"A": "Firm fixed price", "B": "Cost-plus fixed fee", "C": "Time and materials", "D": "Cost-reimbursable"},
-        "correct": "A",
-        "explanation": "Firm fixed price shifts risk to the seller to control costs.",
-        "domain": "business-principles"
-    },
-]
-
-def _copy_randomized(questions, num):
-    pool = questions[:]
-    random.shuffle(pool)
-    out = []
-    while len(out) < num:
-        for q in pool:
-            if len(out) < num:
-                out.append(q.copy())
-            else:
-                break
-    return out[:num]
-
+# --------------------------------------------------------------------
+# Content Generators (Fallback)
+# --------------------------------------------------------------------
 def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
-    # Filter by domain if provided
-    if domain and domain != 'general':
-        filtered = [q for q in _BASE_QUESTIONS if q.get('domain') == domain]
-        if not filtered:
-            filtered = _BASE_QUESTIONS[:]
-    else:
-        filtered = _BASE_QUESTIONS[:]
-    questions = _copy_randomized(filtered, num_questions)
+    base_questions = [
+        {
+            "question": "What is the primary purpose of a security risk assessment?",
+            "options": {"A": "Identify all threats", "B": "Determine cost-effective mitigation", "C": "Eliminate all risks", "D": "Satisfy compliance"},
+            "correct": "B",
+            "explanation": "Risk assessments help determine cost-effective mitigation strategies.",
+            "domain": "security-principles"
+        },
+        {
+            "question": "In CPTED, natural surveillance primarily accomplishes what?",
+            "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
+            "correct": "B",
+            "explanation": "Natural surveillance increases the likelihood that criminal activity will be observed.",
+            "domain": "physical-security"
+        },
+        {
+            "question": "Which concept means applying multiple security layers so if one fails others still protect?",
+            "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
+            "correct": "B",
+            "explanation": "Defense in Depth uses layered controls to maintain protection despite single-point failures.",
+            "domain": "security-principles"
+        },
+        {
+            "question": "In incident response, what is usually the FIRST priority?",
+            "options": {"A": "Notify law enforcement", "B": "Contain the incident", "C": "Eradicate malware", "D": "Perform lessons learned"},
+            "correct": "B",
+            "explanation": "Containment prevents further damage before eradication and recovery.",
+            "domain": "information-security"
+        },
+        {
+            "question": "Background investigations primarily support which objective?",
+            "options": {"A": "Regulatory compliance only", "B": "Improving marketing outcomes", "C": "Personnel Security risk reduction", "D": "Disaster response coordination"},
+            "correct": "C",
+            "explanation": "They help reduce personnel security risks such as insider threat.",
+            "domain": "personnel-security"
+        }
+    ]
+    questions = []
+    while len(questions) < num_questions:
+        for q in base_questions:
+            if len(questions) < num_questions:
+                questions.append(q.copy())
     return {
         "title": f"CPP {quiz_type.title().replace('-', ' ')}",
         "quiz_type": quiz_type,
         "domain": domain or 'general',
         "difficulty": difficulty,
-        "questions": questions
+        "questions": questions[:num_questions]
     }
 
-def generate_quiz(quiz_type, domain=None, difficulty='medium', count=None):
+def generate_quiz(quiz_type, domain=None, difficulty='medium', override_count=None):
+    if override_count:
+        return generate_fallback_quiz(quiz_type, domain, difficulty, override_count)
     config = QUIZ_TYPES.get(quiz_type, {'questions': 10})
-    n = int(count or config['questions'])
-    return generate_fallback_quiz(quiz_type, domain, difficulty, n)
+    return generate_fallback_quiz(quiz_type, domain, difficulty, config['questions'])
 
-# -----------------------------------------------------------------------------
-# HTML Base Template (Bootstrap + minimal CSS)
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
+# Base Template Renderer
+# --------------------------------------------------------------------
 def render_base_template(title, content_html, user=None):
     disclaimer = """
     <div class="bg-light border-top mt-4 py-3">
@@ -523,8 +517,7 @@ def render_base_template(title, content_html, user=None):
         <div class="row"><div class="col-12">
           <div class="alert alert-info mb-0">
             <strong>Important Notice:</strong> This service is NOT affiliated with, endorsed by, or approved by ASIS International.
-            CPP® is a registered certification mark of ASIS International, Inc.
-            This platform is an independent study aid and does not guarantee exam success.
+            CPP® is a registered certification mark of ASIS International, Inc. This platform is an independent study aid and does not guarantee exam success.
           </div>
         </div></div>
       </div>
@@ -533,7 +526,6 @@ def render_base_template(title, content_html, user=None):
 
     nav_html = ""
     if user:
-        # Add Flashcards + Mock Exam + Progress in nav
         nav_html = (
             '<nav class="navbar navbar-expand-lg navbar-dark bg-primary">'
             '  <div class="container">'
@@ -557,44 +549,27 @@ def render_base_template(title, content_html, user=None):
             '</nav>'
         )
 
-    # Small CSS: badges, pills, flashcards sizing
-    css = """
-    <style>
-      .badge-mastered { background:#198754; }
-      .badge-good { background:#fd7e14; }
-      .badge-need { background:#dc3545; }
-      .domain-pill {
-        display:inline-block; padding:4px 8px; border-radius:999px; background:#e7f1ff; color:#0d6efd;
-        font-size:12px; margin:2px; border:1px solid #cfe2ff;
-      }
-      .flashcard {
-        width: 100%; max-width: 720px; height: min(56vh, 400px);
-        margin: 0 auto; border-radius: 16px; border:1px solid #e5e5e5;
-        box-shadow: 0 6px 20px rgba(0,0,0,0.06); background: #fff; display:flex; align-items:center; justify-content:center;
-        padding: 24px; text-align:center; font-size: 22px; line-height: 1.4;
-      }
-      .flashcard-ctrls .btn { min-width: 140px; }
-      .fc-sidebar a { display:block; margin-bottom:8px; }
-      .fc-count { font-size: 12px; color:#6c757d; }
-      .sr-legend span { display:inline-block; padding:4px 8px; border-radius:6px; margin-right:6px; font-size:12px; }
-      .sr-legend .k { background:#e7f7ed; color:#198754; }
-      .sr-legend .d { background:#fdecea; color:#dc3545; }
-      .card-hint { color:#6c757d; font-size: 13px; }
-      .top-right-hint { position: absolute; right: 16px; top: 8px; font-size: 12px; color:#6c757d; }
-      .table thead th { white-space: nowrap; }
-    </style>
-    """
-
     page = Template("""\
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-ui-version="$ui_version">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>$title - CPP Test Prep</title>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    .domain-chip { display:inline-block; padding:6px 10px; border-radius:16px; margin:3px; background:#e7f1ff; color:#0a58ca; font-weight:600; cursor:pointer; }
+    .domain-chip.active { background:#0a58ca; color:#fff; }
+    .avatar-bubble { width:36px; height:36px; border-radius:50%; background:#0a58ca; color:#fff; display:inline-flex; align-items:center; justify-content:center; font-weight:700; }
+    .gauge-wrap { width:160px; height:160px; border-radius:50%; background: conic-gradient(#198754 var(--p,0%), #e9ecef 0); display:flex; align-items:center; justify-content:center; }
+    .gauge-wrap span { font-size:1.25rem; font-weight:700; }
+    /* Flashcard 3x5 feel */
+    .fc-card { width: 100%; max-width: 560px; min-height: 300px; border-radius: 12px; box-shadow: 0 8px 20px rgba(0,0,0,0.08); background:#fff; }
+    .fc-front, .fc-back { font-size: 1.2rem; line-height:1.5; color:#222; }
+    .fc-instr { font-size: 0.9rem; color:#6c757d; }
+    .sr-badge { font-size: 0.75rem; }
+  </style>
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-  $css
 </head>
 <body>
   $nav
@@ -605,11 +580,17 @@ def render_base_template(title, content_html, user=None):
 </body>
 </html>
 """)
-    return page.substitute(title=title, nav=nav_html, content=content_html, disclaimer=disclaimer, css=css)
+    return page.substitute(
+        title=title,
+        nav=nav_html,
+        content=content_html,
+        disclaimer=disclaimer,
+        ui_version=DESIGN_VERSION
+    )
 
-# -----------------------------------------------------------------------------
-# Basic Routes
-# -----------------------------------------------------------------------------
+# --------------------------------------------------------------------
+# Routes: core
+# --------------------------------------------------------------------
 @app.route('/favicon.ico')
 def favicon():
     return Response('', status=204, mimetype='image/x-icon')
@@ -626,13 +607,27 @@ def healthz():
 def home():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
+
     content = """
     <div class="row justify-content-center">
       <div class="col-md-8">
         <div class="text-center mb-5">
-          <h1 class="display-5">CPP Test Prep</h1>
+          <h1 class="display-4">CPP Test Prep</h1>
           <p class="lead">AI-powered study platform for the Certified Protection Professional exam</p>
-          <div class="mt-3 text-muted">Login to access your dashboard.</div>
+        </div>
+        <div class="row">
+          <div class="col-md-6">
+            <div class="card h-100"><div class="card-body">
+              <h5 class="card-title">🎯 Smart Quizzes</h5>
+              <p class="card-text">Practice with questions across all CPP domains</p>
+            </div></div>
+          </div>
+          <div class="col-md-6">
+            <div class="card h-100"><div class="card-body">
+              <h5 class="card-title">🤖 AI Tutor</h5>
+              <p class="card-text">Get personalized explanations and study guidance</p>
+            </div></div>
+          </div>
         </div>
         <div class="text-center mt-4">
           <a href="/register" class="btn btn-primary btn-lg me-3">Start Free Trial</a>
@@ -643,7 +638,7 @@ def home():
     """
     return render_base_template("Home", content)
 
-# ----------------------------- Auth ------------------------------------------
+# ----------------------------- Auth -----------------------------
 @app.route('/register', methods=['GET', 'POST'])
 def register():
     if request.method == 'POST':
@@ -679,7 +674,7 @@ def register():
                 last_name=last_name,
                 subscription_status='trial',
                 subscription_plan='trial',
-                subscription_end_date=datetime.utcnow() + timedelta(days=7),  # adjust later if desired
+                subscription_end_date=datetime.utcnow() + timedelta(days=7),
                 stripe_customer_id=stripe_customer.id,
                 terms_accepted=True,
                 terms_accepted_date=datetime.utcnow()
@@ -688,7 +683,6 @@ def register():
             db.session.commit()
 
             log_activity(user.id, 'user_registered', f'New user: {first_name} {last_name}')
-
             session['user_id'] = user.id
             session['user_name'] = f"{first_name} {last_name}"
             flash(f'Welcome {first_name}! You have a 7-day free trial.', 'success')
@@ -701,51 +695,34 @@ def register():
     content = """
     <div class="row justify-content-center">
       <div class="col-md-6">
-        <div class="card">
-          <div class="card-header"><h3 class="mb-0">Create Account</h3></div>
+        <div class="card"><div class="card-header"><h3 class="mb-0">Create Account</h3></div>
           <div class="card-body">
             <form method="POST">
+              <div class="mb-3"><label for="first_name" class="form-label">First Name</label>
+              <input type="text" class="form-control" id="first_name" name="first_name" required></div>
+              <div class="mb-3"><label for="last_name" class="form-label">Last Name</label>
+              <input type="text" class="form-control" id="last_name" name="last_name" required></div>
+              <div class="mb-3"><label for="email" class="form-label">Email</label>
+              <input type="email" class="form-control" id="email" name="email" required></div>
+              <div class="mb-3"><label for="password" class="form-label">Password</label>
+              <input type="password" class="form-control" id="password" name="password" required>
+              <div class="form-text">Must be at least 8 characters long.</div></div>
               <div class="mb-3">
-                <label for="first_name" class="form-label">First Name</label>
-                <input type="text" class="form-control" id="first_name" name="first_name" required>
-              </div>
-              <div class="mb-3">
-                <label for="last_name" class="form-label">Last Name</label>
-                <input type="text" class="form-control" id="last_name" name="last_name" required>
-              </div>
-              <div class="mb-3">
-                <label for="email" class="form-label">Email</label>
-                <input type="email" class="form-control" id="email" name="email" required>
-              </div>
-              <div class="mb-3">
-                <label for="password" class="form-label">Password</label>
-                <input type="password" class="form-control" id="password" name="password" required>
-                <div class="form-text">Must be at least 8 characters long.</div>
-              </div>
-              <div class="mb-3">
-                <div class="card bg-light">
-                  <div class="card-body">
-                    <h6 class="card-title">Terms and Conditions</h6>
-                    <div style="max-height: 200px; overflow-y: auto; font-size: 0.9em;">
-                      <p><strong>1. Service Description</strong><br>
-                      This platform provides study materials and practice tests for CPP exam preparation.</p>
-                      <p><strong>2. User Responsibilities</strong><br>
-                      Use this service for legitimate study purposes and keep your account secure.</p>
-                      <p><strong>3. Payment Terms</strong><br>
-                      Subscription fees and cancellation policies apply as stated during checkout.</p>
-                      <p><strong>4. Intellectual Property</strong><br>
-                      All content is proprietary and protected by copyright.</p>
-                      <p><strong>5. Disclaimer</strong><br>
-                      We do not guarantee exam success; results depend on individual preparation.</p>
-                      <p><strong>6. Privacy</strong><br>
-                      We protect personal information per our privacy policy.</p>
-                    </div>
-                    <div class="form-check mt-3">
-                      <input class="form-check-input" type="checkbox" id="terms_accepted" name="terms_accepted" required>
-                      <label class="form-check-label" for="terms_accepted"><strong>I agree to the Terms and Conditions</strong></label>
-                    </div>
+                <div class="card bg-light"><div class="card-body">
+                  <h6 class="card-title">Terms and Conditions</h6>
+                  <div style="max-height: 200px; overflow-y: auto; font-size: 0.9em;">
+                    <p><strong>1. Service Description</strong> Study materials and practice tests for CPP exam preparation.</p>
+                    <p><strong>2. User Responsibilities</strong> Use legitimately and keep your account secure.</p>
+                    <p><strong>3. Payment Terms</strong> Subscription fees and cancellation policies apply.</p>
+                    <p><strong>4. IP</strong> All content proprietary & protected by copyright.</p>
+                    <p><strong>5. Disclaimer</strong> We do not guarantee exam success.</p>
+                    <p><strong>6. Privacy</strong> We protect personal information per our privacy policy.</p>
                   </div>
-                </div>
+                  <div class="form-check mt-3">
+                    <input class="form-check-input" type="checkbox" id="terms_accepted" name="terms_accepted" required>
+                    <label class="form-check-label" for="terms_accepted"><strong>I agree to the Terms and Conditions</strong></label>
+                  </div>
+                </div></div>
               </div>
               <button type="submit" class="btn btn-primary w-100">Create Account</button>
             </form>
@@ -781,18 +758,13 @@ def login():
     content = """
     <div class="row justify-content-center">
       <div class="col-md-5">
-        <div class="card">
-          <div class="card-header"><h3 class="mb-0">Login</h3></div>
+        <div class="card"><div class="card-header"><h3 class="mb-0">Login</h3></div>
           <div class="card-body">
             <form method="POST">
-              <div class="mb-3">
-                <label for="email" class="form-label">Email</label>
-                <input type="email" class="form-control" id="email" name="email" required>
-              </div>
-              <div class="mb-3">
-                <label for="password" class="form-label">Password</label>
-                <input type="password" class="form-control" id="password" name="password" required>
-              </div>
+              <div class="mb-3"><label for="email" class="form-label">Email</label>
+              <input type="email" class="form-control" id="email" name="email" required></div>
+              <div class="mb-3"><label for="password" class="form-label">Password</label>
+              <input type="password" class="form-control" id="password" name="password" required></div>
               <button type="submit" class="btn btn-primary w-100">Login</button>
             </form>
             <div class="text-center mt-3">
@@ -813,7 +785,7 @@ def logout():
     flash('You have been logged out.', 'info')
     return redirect(url_for('home'))
 
-# --------------------------------- Dashboard ----------------------------------
+# ----------------------------- Dashboard -----------------------------
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -826,74 +798,63 @@ def dashboard():
     <div class="row">
       <div class="col-12"><h1>Welcome back, $first_name!</h1></div>
       <div class="col-12">
-        <div class="row mt-3 g-3">
+        <div class="row mt-4 g-3">
           <div class="col-md-3">
-            <div class="card bg-primary text-white">
-              <div class="card-body">
-                <h6 class="mb-1">Plan</h6>
-                <div class="h5 mb-0">$days_left days left</div>
-              </div>
-            </div>
+            <div class="card bg-primary text-white h-100"><div class="card-body">
+              <h6 class="mb-1">Trial/Plan</h6>
+              <h3 class="mb-0">$days_left days left</h3>
+            </div></div>
           </div>
           <div class="col-md-3">
-            <div class="card bg-success text-white">
-              <div class="card-body">
-                <h6 class="mb-1">Study Time</h6>
-                <div class="h5 mb-0">$study_time mins</div>
-              </div>
+            <div class="card bg-success text-white h-100"><div class="card-body">
+              <h6 class="mb-1">Study Time</h6>
+              <h3 class="mb-0">$study_time mins</h3>
+            </div></div>
+          </div>
+          <div class="col-md-3">
+            <div class="card h-100 d-flex align-items-center justify-content-center">
+              <div class="gauge-wrap" style="--p:$overall_pct;"><span>$overall_pct%</span></div>
+              <div class="small text-muted mt-2">Overall progress</div>
             </div>
           </div>
         </div>
 
         <div class="row mt-4 g-3">
-          <div class="col-md-4">
+          <div class="col-md-6">
             <div class="card h-100">
-              <div class="card-body d-flex flex-column text-center">
+              <div class="card-body d-flex flex-column">
                 <h5 class="mb-2">🤖 Tutor</h5>
-                <p class="text-muted flex-grow-1">Ask questions and get explanations.</p>
+                <p class="text-muted">Ask anything across CPP domains, see suggestions, and get clear explanations.</p>
                 <a href="/study" class="btn btn-primary mt-auto">Open Tutor</a>
               </div>
             </div>
           </div>
-
-          <div class="col-md-4">
+          <div class="col-md-6">
             <div class="card h-100">
-              <div class="card-body d-flex flex-column text-center">
+              <div class="card-body d-flex flex-column">
                 <h5 class="mb-2">🃏 Flashcards</h5>
-                <p class="text-muted flex-grow-1">Quick recall by domain, with keyboard shortcuts.</p>
+                <p class="text-muted">Spaced practice with instant flip (J) and next (K). Unlimited per session.</p>
                 <a href="/flashcards" class="btn btn-secondary mt-auto">Open Flashcards</a>
               </div>
             </div>
           </div>
 
-          <div class="col-md-4">
+          <div class="col-md-6">
             <div class="card h-100">
-              <div class="card-body d-flex flex-column text-center">
+              <div class="card-body d-flex flex-column">
                 <h5 class="mb-2">📝 Quizzes</h5>
-                <p class="text-muted flex-grow-1">Choose domain, question count, difficulty.</p>
+                <p class="text-muted">Domain-specific or mixed. Choose count & difficulty.</p>
                 <a href="/quiz-selector" class="btn btn-success mt-auto">Choose a Quiz</a>
               </div>
             </div>
           </div>
 
-        </div>
-
-        <div class="row mt-3">
           <div class="col-md-6">
             <div class="card h-100">
-              <div class="card-body d-flex flex-column text-center">
+              <div class="card-body d-flex flex-column">
                 <h5 class="mb-2">🏁 Mock Exam</h5>
-                <p class="text-muted flex-grow-1">25–100 random questions across all domains.</p>
+                <p class="text-muted">25/50/75/100 random questions across domains.</p>
                 <a href="/mock-exam" class="btn btn-warning mt-auto">Start Mock Exam</a>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="card h-100">
-              <div class="card-body d-flex flex-column text-center">
-                <h5 class="mb-2">📈 Progress</h5>
-                <p class="text-muted flex-grow-1">See strengths and practice areas.</p>
-                <a href="/progress" class="btn btn-outline-primary mt-auto">View Progress</a>
               </div>
             </div>
           </div>
@@ -902,39 +863,71 @@ def dashboard():
       </div>
     </div>
     """)
+    # Compute overall progress (simple average of domain averages)
+    user_progress = UserProgress.query.filter_by(user_id=user.id).all()
+    if user_progress:
+        avg_sum = sum([(p.average_score or 0.0) for p in user_progress])
+        overall_pct = int(round(avg_sum / len(user_progress)))
+    else:
+        overall_pct = 0
+
     content = tmpl.substitute(
         first_name=user.first_name,
         days_left=days_left,
-        study_time=(user.study_time or 0)
+        study_time=(user.study_time or 0),
+        overall_pct=overall_pct
     )
     return render_base_template("Dashboard", content, user=user)
 
-# --------------------------------- Tutor --------------------------------------
+# ----------------------------- Study Chat -----------------------------
 @app.route('/study')
 @subscription_required
 def study():
     user = User.query.get(session['user_id'])
     session['study_start_time'] = datetime.utcnow().timestamp()
-    domain_pills = ''.join([f'<span class="domain-pill">{meta["name"]}</span>' for meta in CPP_DOMAINS.values()])
 
-    content = f"""
+    # Quick chips (static)
+    domain_chips_html = ''.join([
+        f'<span class="domain-chip" data-domain="{k}">{v["name"]}</span>'
+        for k, v in CPP_DOMAINS.items()
+    ])
+
+    content = Template("""
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <div class="d-flex align-items-center">
-              <div style="width:40px;height:40px;border-radius:50%;background:#0d6efd;color:#fff;display:flex;align-items:center;justify-content:center;font-size:20px;margin-right:10px;" aria-hidden="true">🤖</div>
-              <h4 class="mb-0">AI Tutor</h4>
-            </div>
-            <div class="text-end" style="max-width:60%;">{domain_pills}</div>
+          <div class="card-header d-flex align-items-center gap-2">
+            <div class="avatar-bubble">AI</div>
+            <h4 class="mb-0">Tutor</h4>
           </div>
           <div class="card-body">
+            <div class="mb-2">Select a domain to see a short intro, then ask a question:</div>
+            <div class="mb-3">$chips</div>
+            <div id="intro" class="alert alert-secondary" style="display:none;"></div>
+
             <div id="chat" style="height: 360px; overflow-y: auto; border: 1px solid #eee; padding: 10px; margin-bottom: 12px;"></div>
-            <div class="input-group">
-              <input type="text" id="userInput" class="form-control" placeholder="Ask about any CPP topic..." />
-              <button id="sendBtn" class="btn btn-primary">Send</button>
+
+            <div class="row">
+              <div class="col-md-9">
+                <div class="input-group">
+                  <input type="text" id="userInput" class="form-control" placeholder="Ask about any CPP topic..." />
+                  <button id="sendBtn" class="btn btn-primary">Send</button>
+                </div>
+              </div>
+              <div class="col-md-3">
+                <div class="card">
+                  <div class="card-body">
+                    <div class="fw-bold mb-2">Suggestions</div>
+                    <div id="sugs">
+                      <div class="small text-muted">Click to fill the ask box</div>
+                      <ul id="sugList" class="mt-2 mb-0" style="padding-left:18px;"></ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
-            <div class="form-text mt-2">Tip: Ask for explanations, compare domains, or request examples.</div>
+
+            <div class="small text-muted mt-2">Tip: Start with “Explain like I’m new to the topic” for a gentle ramp.</div>
           </div>
         </div>
       </div>
@@ -943,47 +936,83 @@ def study():
       const chatDiv = document.getElementById('chat');
       const input = document.getElementById('userInput');
       const sendBtn = document.getElementById('sendBtn');
+      const introDiv = document.getElementById('intro');
+      const sugList = document.getElementById('sugList');
 
-      function esc(s) {{ return (s || '').replace(/</g,'&lt;'); }}
+      const domainSnippets = {
+        "security-principles": "Security Principles & Practices: governance, risk, defense-in-depth, and program management.",
+        "business-principles": "Business Principles & Practices: budgeting, contracts, and aligning security with business goals.",
+        "investigations": "Investigations: planning, evidence collection, interviews, and reporting.",
+        "personnel-security": "Personnel Security: screening, onboarding, insider threat, and termination processes.",
+        "physical-security": "Physical Security: CPTED, access control, barriers, lighting, and surveillance.",
+        "information-security": "Information Security: data protection, incident response, and cyber hygiene.",
+        "crisis-management": "Crisis Management: BCP/DR, emergency response, ICS, and communications."
+      };
 
-      function append(role, text) {{
+      const domainSuggestions = {
+        "security-principles": ["What is defense in depth?", "How do I prioritize risks?", "What KPIs make sense for a security program?"],
+        "business-principles": ["Build a basic security budget", "CapEx vs OpEx tradeoffs in security", "Vendor management essentials"],
+        "investigations": ["Chain of custody best practices", "Interview vs interrogation: differences", "Open-source intel basics"],
+        "personnel-security": ["Effective background checks", "Detecting insider threats", "Termination checklists"],
+        "physical-security": ["Layers of physical protection", "CPTED quick wins", "Access control models"],
+        "information-security": ["Incident response phases", "Password policies vs MFA", "Phishing awareness essentials"],
+        "crisis-management": ["BCP vs DR differences", "Crisis communications playbook", "Tabletop exercise ideas"]
+      };
+
+      function append(role, text) {
         const el = document.createElement('div');
         el.className = role === 'user' ? 'text-end mb-2' : 'text-start mb-2';
-        const badgeColor = role === 'user' ? 'primary' : 'secondary';
-        const who = role === 'user' ? 'You' : 'Tutor';
-        el.innerHTML =
-          (role !== 'user'
-            ? '<span class="me-2" style="display:inline-flex;width:24px;height:24px;border-radius:50%;background:#0d6efd;color:#fff;align-items:center;justify-content:center;font-size:12px;">🤖</span>'
-            : '') +
-          '<span class="badge bg-' + badgeColor + '">' + who + '</span> ' +
-          '<div class="mt-1 p-2 border rounded">' + esc(text) + '</div>';
+        el.innerHTML = '<span class="badge bg-' + (role === 'user' ? 'primary' : 'secondary') + '">' + (role === 'user' ? 'You' : 'Tutor') + '</span> ' +
+                       '<div class="mt-1 p-2 border rounded">' + text.replace(/</g,'&lt;') + '</div>';
         chatDiv.appendChild(el);
         chatDiv.scrollTop = chatDiv.scrollHeight;
-      }}
+      }
 
-      async function send() {{
-        const q = (input.value || '').trim();
+      async function send() {
+        const q = input.value.trim();
         if (!q) return;
         append('user', q);
         input.value = '';
-        try {{
-          const res = await fetch('/chat', {{
+        try {
+          const res = await fetch('/chat', {
             method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{message: q}})
-          }});
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({message: q})
+          });
           const data = await res.json();
           if (data.response) append('assistant', data.response);
           else append('assistant', data.error || 'Sorry, something went wrong.');
-        }} catch (e) {{
+        } catch (e) {
           append('assistant', 'Network error.');
-        }}
-      }}
-
+        }
+      }
       sendBtn.addEventListener('click', send);
-      input.addEventListener('keydown', (e) => {{ if (e.key === 'Enter') send(); }});
+      input.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+      // chips
+      document.querySelectorAll('.domain-chip').forEach(chip => {
+        chip.addEventListener('click', () => {
+          document.querySelectorAll('.domain-chip').forEach(c => c.classList.remove('active'));
+          chip.classList.add('active');
+          const dom = chip.getAttribute('data-domain');
+          introDiv.style.display = 'block';
+          introDiv.innerText = domainSnippets[dom] || 'General CPP domain overview.';
+          // suggestions
+          const list = domainSuggestions[dom] || [];
+          sugList.innerHTML = '';
+          list.forEach(s => {
+            const li = document.createElement('li');
+            const a = document.createElement('a');
+            a.href = '#'; a.textContent = s;
+            a.addEventListener('click', (ev) => { ev.preventDefault(); input.value = s; input.focus(); });
+            li.appendChild(a);
+            sugList.appendChild(li);
+          });
+        });
+      });
     </script>
-    """
+    """)
+    content = content.substitute(chips=domain_chips_html)
     return render_base_template("Study", content, user=user)
 
 @app.route('/chat', methods=['POST'])
@@ -996,6 +1025,7 @@ def chat():
             return jsonify({'error': 'Empty message'}), 400
 
         user_id = session['user_id']
+
         ch = ChatHistory.query.filter_by(user_id=user_id).first()
         if not ch:
             ch = ChatHistory(user_id=user_id, messages='[]')
@@ -1006,6 +1036,7 @@ def chat():
             messages = json.loads(ch.messages) if ch.messages else []
         except json.JSONDecodeError:
             messages = []
+
         if len(messages) > 20:
             messages = messages[-20:]
 
@@ -1025,291 +1056,276 @@ def chat():
         print(f"Chat error: {e}")
         return jsonify({'error': 'Sorry, I encountered an error processing your message.'}), 500
 
-# --------------------------------- Flashcards ---------------------------------
-def _flashcard_from_question(q: dict) -> dict:
-    opts = q.get('options', {}) or {}
-    correct = q.get('correct')
-    front = q.get('question', '')
-    back = "Correct: " + (correct or '')
-    if correct in opts:
-        back += ") " + str(opts.get(correct))
-    expl = q.get('explanation') or ''
-    if expl:
-        back += "\n\n" + expl
-    domain = q.get('domain') or 'general'
-    return {
-        "front": front,
-        "back": back,
-        "domain": domain,
-        "hash": _hash_question_payload(q)
-    }
-
-def generate_flashcards(domain: str = None, count: int = 50) -> dict:
-    # domain: slug in CPP_DOMAINS, 'random' or None
-    if domain and domain != 'random' and domain != 'general':
-        pool = [q for q in _BASE_QUESTIONS if q.get('domain') == domain]
-        if not pool:
-            pool = _BASE_QUESTIONS[:]
-    else:
-        pool = _BASE_QUESTIONS[:]
-
-    cards = []
-    random.shuffle(pool)
-    while len(cards) < count:
-        for q in pool:
-            if len(cards) < count:
-                cards.append(_flashcard_from_question(q))
-            else:
-                break
-
-    per_domain_counts = {}
-    for c in cards:
-        d = c.get('domain') or 'general'
-        per_domain_counts[d] = per_domain_counts.get(d, 0) + 1
-
-    return {"cards": cards, "counts": per_domain_counts}
-
+# ----------------------------- Flashcards -----------------------------
 @app.route('/flashcards')
 @subscription_required
 def flashcards_page():
     user = User.query.get(session['user_id'])
-    # Sidebar domains
-    items = ['<a href="#" class="btn btn-outline-primary w-100" data-domain="random">Random</a>']
-    for slug, meta in CPP_DOMAINS.items():
-        items.append(f'<a href="#" class="btn btn-outline-primary w-100" data-domain="{slug}">{meta["name"]}</a>')
 
-    content = f"""
+    # domain buttons (including Random)
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + [
+        f'<span class="domain-chip" data-domain="{k}">{v["name"]}</span>'
+        for k, v in CPP_DOMAINS.items()
+    ]
+    chips_html = ''.join(chips)
+
+    content = Template("""
     <div class="row">
-      <div class="col-md-3">
+      <div class="col-md-10 mx-auto">
         <div class="card">
-          <div class="card-header"><strong>Domains</strong></div>
-          <div class="card-body fc-sidebar">
-            {' '.join(items)}
-            <hr/>
-            <div class="sr-legend">
-              <span class="k">Know (K)</span>
-              <span class="d">Don’t know (J)</span>
+          <div class="card-header d-flex justify-content-between align-items-center">
+            <h4 class="mb-0">Flashcards</h4>
+            <div>
+              <span class="badge bg-secondary sr-badge me-1">J: Flip</span>
+              <span class="badge bg-secondary sr-badge me-1">K: Next</span>
+              <span class="badge bg-secondary sr-badge">Unlimited per session</span>
             </div>
-            <div class="mt-2 fc-count" id="fcCounts"></div>
           </div>
-        </div>
-      </div>
-
-      <div class="col-md-9">
-        <div class="card position-relative">
-          <div class="top-right-hint">Shortcuts: <code>J</code>=Flip, <code>K</code>=Next</div>
           <div class="card-body">
-            <h4 class="mb-3">Flashcards</h4>
-            <div id="flashcard" class="flashcard">Loading cards…</div>
-            <div class="d-flex justify-content-center gap-2 mt-3 flashcard-ctrls">
-              <button id="btnFlip" class="btn btn-outline-secondary">Flip (J)</button>
-              <button id="btnDontKnow" class="btn btn-outline-danger">Don’t Know</button>
-              <button id="btnKnow" class="btn btn-success">Know</button>
-              <button id="btnNext" class="btn btn-outline-secondary">Next (K)</button>
+            <div class="mb-2">Choose a domain or use Random:</div>
+            <div class="mb-3">$chips</div>
+
+            <div class="d-flex flex-column align-items-center">
+              <div id="fcCard" class="fc-card p-4">
+                <div id="fcFront" class="fc-front"></div>
+                <div id="fcBack" class="fc-back" style="display:none;"></div>
+              </div>
+
+              <div class="mt-3 fc-instr">
+                <strong>How to use:</strong> Click the card (or press <strong>J</strong>) to flip. Press <strong>K</strong> or click a button to move on.<br/>
+                <strong>Don’t know</strong> adds the card to your “needs practice” bucket. <strong>Know</strong> reinforces mastery and moves you forward.
+              </div>
+
+              <div class="mt-3">
+                <button id="btnDontKnow" class="btn btn-outline-danger me-2">Don’t know</button>
+                <button id="btnKnow" class="btn btn-outline-success">Know</button>
+              </div>
             </div>
-            <div class="mt-3 card-hint">
-              Click <strong>Flip</strong> (or press J) to reveal the answer. Use <strong>Know</strong> when you got it right; use <strong>Don’t Know</strong> when you missed it.
-            </div>
+
           </div>
         </div>
       </div>
     </div>
 
     <script>
-      let domain = 'random';
+      let currentDomain = 'random';
       let deck = [];
       let idx = 0;
-      let showingBack = false;
+      let frontEl = null, backEl = null, cardEl = null;
 
-      async function loadDeck() {{
-        const res = await fetch('/api/flashcards?domain=' + encodeURIComponent(domain) + '&count=100');
-        const data = await res.json();
-        deck = Array.isArray(data.cards) ? data.cards : [];
-        idx = 0; showingBack = false;
+      function load(domain) {
+        fetch('/api/flashcards?domain=' + encodeURIComponent(domain) + '&count=50')
+          .then(r => r.json())
+          .then(data => {
+            deck = data.cards || [];
+            idx = 0;
+            renderCard();
+          })
+          .catch(() => { /* ignore */});
+      }
+
+      function renderCard() {
+        if (!deck.length) {
+          document.getElementById('fcFront').innerText = 'No cards available.';
+          document.getElementById('fcBack').style.display = 'none';
+          return;
+        }
+        const c = deck[idx % deck.length];
+        frontEl.innerText = c.front || '';
+        backEl.innerText = c.back || '';
+        frontEl.style.display = 'block';
+        backEl.style.display = 'none';
+      }
+
+      function flip() {
+        if (frontEl.style.display !== 'none') {
+          frontEl.style.display = 'none';
+          backEl.style.display = 'block';
+        } else {
+          backEl.style.display = 'none';
+          frontEl.style.display = 'block';
+        }
+      }
+
+      function next(mark) {
+        // mark can be 'know' or 'dontknow' -> hook for spaced repetition later
+        idx = (idx + 1);
         renderCard();
-        const cts = data.counts || {{}};
-        const mapName = {json.dumps({k: v["name"] for k, v in CPP_DOMAINS.items()})};
-        const parts = [];
-        Object.keys(cts).forEach(d => {{
-          const name = mapName[d] || d;
-          parts.push(name + ': ' + cts[d]);
-        }});
-        document.getElementById('fcCounts').textContent = parts.join(' • ');
-      }}
+      }
 
-      function renderCard() {{
-        const el = document.getElementById('flashcard');
-        if (!deck.length) {{ el.textContent = 'No cards available.'; return; }}
-        const card = deck[idx];
-        el.textContent = showingBack ? (card.back || '') : (card.front || '');
-      }}
+      document.addEventListener('DOMContentLoaded', () => {
+        frontEl = document.getElementById('fcFront');
+        backEl = document.getElementById('fcBack');
+        cardEl = document.getElementById('fcCard');
 
-      function flip() {{ showingBack = !showingBack; renderCard(); }}
+        cardEl.addEventListener('click', flip);
+        document.getElementById('btnKnow').addEventListener('click', () => next('know'));
+        document.getElementById('btnDontKnow').addEventListener('click', () => next('dontknow'));
 
-      async function grade(know) {{
-        try {{
-          const card = deck[idx] || null;
-          if (!card) return;
-          await fetch('/api/flashcards/grade', {{
-            method:'POST',
-            headers: {{'Content-Type':'application/json'}},
-            body: JSON.stringify({{ hash: card.hash, domain: card.domain, is_correct: !!know }})
-          }});
-        }} catch(e) {{}}
-      }}
+        // keyboard
+        document.addEventListener('keydown', (e) => {
+          if (e.key === 'j' || e.key === 'J') flip();
+          if (e.key === 'k' || e.key === 'K') next('know');
+        });
 
-      async function next(know=null) {{
-        if (know !== null) {{ await grade(know); }}
-        showingBack = false;
-        if (idx < deck.length - 1) idx++;
-        else idx = 0;
-        renderCard();
-      }}
+        document.querySelectorAll('.domain-chip').forEach(chip => {
+          chip.addEventListener('click', () => {
+            document.querySelectorAll('.domain-chip').forEach(c => c.classList.remove('active'));
+            chip.classList.add('active');
+            currentDomain = chip.getAttribute('data-domain');
+            load(currentDomain);
+          });
+        });
 
-      document.getElementById('btnFlip').addEventListener('click', flip);
-      document.getElementById('btnNext').addEventListener('click', () => next(null));
-      document.getElementById('btnKnow').addEventListener('click', () => next(true));
-      document.getElementById('btnDontKnow').addEventListener('click', () => next(false));
-
-      document.addEventListener('keydown', (e) => {{
-        if (e.key === 'j' || e.key === 'J') flip();
-        if (e.key === 'k' || e.key === 'K') next(null);
-      }});
-
-      document.querySelectorAll('[data-domain]').forEach(btn => {{
-        btn.addEventListener('click', (e) => {{
-          e.preventDefault();
-          domain = btn.getAttribute('data-domain') || 'random';
-          loadDeck();
-        }});
-      }});
-
-      loadDeck();
+        load(currentDomain);
+      });
     </script>
-    """
-    return render_base_template("Flashcards", content, user=user)
+    """)
+    return render_base_template("Flashcards", content.substitute(chips=chips_html), user=user)
 
-@app.get('/api/flashcards')
+@app.get("/api/flashcards")
 @subscription_required
 def api_flashcards():
-    domain = request.args.get('domain', 'random')
+    """
+    Returns flashcards with 'front' and 'back' text.
+    IMPORTANT: back text does NOT include letter prefixes (no "B) ...").
+    Accepts ?domain=<key|random>&count=50 (max 200).
+    """
     try:
-        count = int(request.args.get('count', 100))
-    except ValueError:
-        count = 100
-    data = generate_flashcards(domain=domain, count=max(10, min(300, count)))
-    return jsonify(data)
+        domain = (request.args.get("domain") or "random").strip().lower()
+        try:
+            count = int(request.args.get("count", "50"))
+        except ValueError:
+            count = 50
+        count = max(1, min(200, count))
 
-@app.post('/api/flashcards/grade')
-@subscription_required
-def api_flashcards_grade():
-    try:
-        payload = request.get_json(force=True) or {}
-        domain = payload.get('domain') or 'general'
-        is_correct = bool(payload.get('is_correct'))
-        # Create a pseudo question for hashing consistency
-        q = {"question": payload.get('hash', ''), "options": {}, "correct": "A"}  # content doesn't matter here
-        record_question_event(session['user_id'], q, domain=domain, topic=None, is_correct=is_correct, source='flashcard')
-        update_user_progress_on_answer(session['user_id'], domain, None, is_correct)
-        return jsonify({"ok": True})
+        cards = []
+        used_db = False
+        try:
+            QuestionBank  # ensure defined
+            used_db = True
+        except Exception:
+            used_db = False
+
+        if used_db:
+            q = QuestionBank.query.filter_by(is_verified=True)
+            if domain != "random" and domain:
+                q = q.filter(QuestionBank.domain == domain)
+            q = q.order_by(db.func.random()).limit(count)
+            rows = q.all()
+            for r in rows:
+                try:
+                    opts = json.loads(r.options_json or "{}")
+                    if not isinstance(opts, dict):
+                        opts = {}
+                except Exception:
+                    opts = {}
+                correct_text = (opts.get(r.correct, "") or "").strip()
+                back_lines = []
+                if correct_text:
+                    back_lines.append(f"Correct: {correct_text}")
+                if r.explanation:
+                    back_lines.append(r.explanation.strip())
+                back = "\n\n".join([x for x in back_lines if x])
+
+                cards.append({
+                    "id": f"qb_{r.id}",
+                    "front": (r.question or "").strip(),
+                    "back": back if back else "Correct answer available.",
+                    "domain": (r.domain or "general"),
+                    "difficulty": (r.difficulty or "medium")
+                })
+        else:
+            # fallback
+            base = [
+                {
+                    "question": "What is the primary purpose of a security risk assessment?",
+                    "options": {"A": "Identify all threats", "B": "Determine cost-effective mitigation", "C": "Eliminate all risks", "D": "Satisfy compliance"},
+                    "correct": "B",
+                    "explanation": "Risk assessments help determine cost-effective mitigation strategies.",
+                    "domain": "security-principles"
+                },
+                {
+                    "question": "In CPTED, natural surveillance primarily accomplishes what?",
+                    "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
+                    "correct": "B",
+                    "explanation": "Natural surveillance increases the likelihood that criminal activity will be observed.",
+                    "domain": "physical-security"
+                },
+                {
+                    "question": "Which concept means applying multiple security layers so if one fails others still protect?",
+                    "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
+                    "correct": "B",
+                    "explanation": "Defense in Depth uses layered controls to maintain protection despite single-point failures.",
+                    "domain": "security-principles"
+                },
+                {
+                    "question": "In incident response, what is usually the FIRST priority?",
+                    "options": {"A": "Notify law enforcement", "B": "Contain the incident", "C": "Eradicate malware", "D": "Perform lessons learned"},
+                    "correct": "B",
+                    "explanation": "Containment prevents further damage before eradication and recovery.",
+                    "domain": "information-security"
+                },
+                {
+                    "question": "Background investigations primarily support which objective?",
+                    "options": {"A": "Regulatory compliance only", "B": "Improving marketing outcomes", "C": "Personnel Security risk reduction", "D": "Disaster response coordination"},
+                    "correct": "C",
+                    "explanation": "They help reduce personnel security risks such as insider threat.",
+                    "domain": "personnel-security"
+                }
+            ]
+            pool = base if domain in ("random", "", None) else [b for b in base if b.get("domain") == domain] or base
+            while len(cards) < count:
+                for b in pool:
+                    if len(cards) >= count:
+                        break
+                    opts = b.get("options", {}) or {}
+                    correct_text = (opts.get(b.get("correct"), "") or "").strip()
+                    back_lines = []
+                    if correct_text:
+                        back_lines.append(f"Correct: {correct_text}")
+                    if b.get("explanation"):
+                        back_lines.append(b["explanation"].strip())
+                    cards.append({
+                        "id": f"fb_{len(cards)+1}",
+                        "front": (b.get("question") or "").strip(),
+                        "back": "\n\n".join([x for x in back_lines if x]) or "Correct answer available.",
+                        "domain": b.get("domain", "general"),
+                        "difficulty": "medium"
+                    })
+        return jsonify({"cards": cards, "domain": domain, "count": len(cards)}), 200
     except Exception as e:
-        print(f"flashcards/grade error: {e}")
-        return jsonify({"ok": False}), 500
+        print(f"/api/flashcards error: {e}")
+        return jsonify({"error": "Could not load flashcards."}), 500
 
-# --------------------------------- Quizzes ------------------------------------
+# ----------------------------- Quizzes -----------------------------
 @app.route('/quiz-selector')
 @subscription_required
 def quiz_selector():
     user = User.query.get(session['user_id'])
-    domain_buttons = ['<button type="button" class="btn btn-primary btn-sm me-2 mb-2" data-domain="">All Domains</button>']
-    for slug, meta in CPP_DOMAINS.items():
-        domain_buttons.append(f'<button type="button" class="btn btn-outline-primary btn-sm me-2 mb-2" data-domain="{slug}">{meta["name"]}</button>')
-
+    # Simple selector with types
+    items_html = []
+    for key, meta in QUIZ_TYPES.items():
+        items_html.append(
+            f'<div class="col-md-6"><div class="card h-100 mb-3">'
+            f'<div class="card-body">'
+            f'<h5 class="card-title">{meta["name"]}</h5>'
+            f'<p class="card-text">{meta["description"]}</p>'
+            f'<div class="mb-2">Counts: '
+            f'<a class="btn btn-sm btn-outline-secondary me-1" href="/quiz/{key}?count=5">5</a>'
+            f'<a class="btn btn-sm btn-outline-secondary me-1" href="/quiz/{key}?count=10">10</a>'
+            f'<a class="btn btn-sm btn-outline-secondary me-1" href="/quiz/{key}?count=15">15</a>'
+            f'<a class="btn btn-sm btn-outline-secondary" href="/quiz/{key}?count=20">20</a>'
+            f'</div>'
+            f'<a class="btn btn-primary" href="/quiz/{key}">Start</a>'
+            f'</div></div></div>'
+        )
     content = f"""
     <div class="row">
-      <div class="col-12"><h2>Quizzes</h2></div>
-      <div class="col-md-10 mx-auto">
-        <div class="card mb-4">
-          <div class="card-body">
-            <h5 class="mb-3">Quick Setup</h5>
-            <div class="mb-2"><strong>Choose a domain:</strong></div>
-            <div id="domainPills">{''.join(domain_buttons)}</div>
-
-            <div class="mt-3"><strong>Number of questions:</strong></div>
-            <div id="countPills">
-              <button class="btn btn-outline-secondary btn-sm me-2 mb-2" data-count="5">5</button>
-              <button class="btn btn-outline-secondary btn-sm me-2 mb-2" data-count="10">10</button>
-              <button class="btn btn-outline-secondary btn-sm me-2 mb-2" data-count="15">15</button>
-              <button class="btn btn-outline-secondary btn-sm me-2 mb-2" data-count="20">20</button>
-            </div>
-
-            <div class="mt-3"><strong>Difficulty:</strong></div>
-            <select id="difficulty" class="form-select form-select-sm" style="max-width:200px;">
-              <option value="easy">Easy</option>
-              <option value="medium" selected>Medium</option>
-              <option value="hard">Hard</option>
-            </select>
-
-            <div class="mt-4 d-flex gap-2">
-              <button id="startPractice" class="btn btn-primary">Start Practice</button>
-              <a href="/mock-exam" class="btn btn-warning">Go to Mock Exam</a>
-            </div>
-          </div>
-        </div>
-
-        <div class="row g-3">
-          <div class="col-md-6">
-            <div class="card h-100">
-              <div class="card-body">
-                <h5>Quick Review (5)</h5>
-                <p>Short refresh across domains.</p>
-                <a class="btn btn-outline-primary" href="/quiz/quick-review">Start</a>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="card h-100">
-              <div class="card-body">
-                <h5>Advanced Challenge (20)</h5>
-                <p>Harder questions for deeper practice.</p>
-                <a class="btn btn-outline-danger" href="/quiz/difficult">Start</a>
-              </div>
-            </div>
-          </div>
-        </div>
-
-      </div>
+      <div class="col-12"><h2>Select a Quiz</h2></div>
+      <div class="col-12"><p>Pick a mode and start practicing. You can choose question counts right here or inside the quiz.</p></div>
     </div>
-
-    <script>
-      let selectedDomain = '';
-      let selectedCount = 10;
-
-      document.getElementById('domainPills').addEventListener('click', (e) => {{
-        const btn = e.target.closest('button[data-domain]');
-        if (!btn) return;
-        selectedDomain = btn.getAttribute('data-domain') || '';
-        document.querySelectorAll('#domainPills button').forEach(b => b.classList.remove('btn-primary'));
-        btn.classList.add('btn-primary');
-      }});
-
-      document.getElementById('countPills').addEventListener('click', (e) => {{
-        const btn = e.target.closest('button[data-count]');
-        if (!btn) return;
-        selectedCount = parseInt(btn.getAttribute('data-count'), 10) || 10;
-        document.querySelectorAll('#countPills button').forEach(b => b.classList.remove('btn-secondary'));
-        btn.classList.add('btn-secondary');
-      }});
-
-      document.getElementById('startPractice').addEventListener('click', () => {{
-        const diff = document.getElementById('difficulty').value || 'medium';
-        const params = new URLSearchParams();
-        if (selectedDomain) params.set('domain', selectedDomain);
-        params.set('difficulty', diff);
-        params.set('count', String(selectedCount));
-        window.location.href = '/quiz/practice?' + params.toString();
-      }});
-    </script>
+    <div class="row">{''.join(items_html)}</div>
     """
     return render_base_template("Quizzes", content, user=user)
 
@@ -1321,284 +1337,277 @@ def quiz(quiz_type):
         flash('Invalid quiz type.', 'danger')
         return redirect(url_for('quiz_selector'))
 
-    domain = request.args.get('domain') or None
+    domain = request.args.get('domain')
     difficulty = request.args.get('difficulty', 'medium')
-    qcount = request.args.get('count')
+    override_count = None
     try:
-        qcount = int(qcount) if qcount else None
-    except ValueError:
-        qcount = None
+        if request.args.get('count'):
+            override_count = int(request.args.get('count'))
+            override_count = max(1, min(50, override_count))
+    except Exception:
+        override_count = None
 
+    # Start timer
     session['quiz_start_time'] = datetime.utcnow().timestamp()
 
-    quiz_data = generate_quiz(quiz_type, domain, difficulty, qcount)
+    quiz_data = generate_quiz(quiz_type, domain, difficulty, override_count=override_count)
     quiz_json = json.dumps(quiz_data)
 
     page = Template("""
-    <div class="row">
-      <div class="col-md-10 mx-auto">
-        <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">$title</h4>
-            <button id="submitBtn" class="btn btn-success">Submit</button>
-          </div>
-          <div class="card-body" id="quizContainer"></div>
-        </div>
-        <div class="mt-4" id="results"></div>
+<div class="row">
+  <div class="col-md-10 mx-auto">
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h4 class="mb-0">$title</h4>
+        <button id="submitBtnTop" class="btn btn-success">Submit</button>
+      </div>
+      <div class="card-body" id="quizContainer"></div>
+      <div class="card-footer d-flex justify-content-end">
+        <button id="submitBtnBottom" class="btn btn-success">Submit</button>
       </div>
     </div>
-    <script>
-      const QUIZ_DATA = $quiz_json;
+    <div class="mt-4" id="results"></div>
+  </div>
+</div>
+<script>
+  const QUIZ_DATA = $quiz_json;
 
-      function renderQuiz() {
-        const container = document.getElementById('quizContainer');
-        container.innerHTML = '';
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
-          const card = document.createElement('div');
-          card.className = 'mb-3 p-3 border rounded';
-          const title = document.createElement('h5');
-          title.textContent = 'Q' + (idx + 1) + '. ' + (q.question || '');
-          card.appendChild(title);
+  function renderQuiz() {
+    const container = document.getElementById('quizContainer');
+    container.innerHTML = '';
+    (QUIZ_DATA.questions || []).forEach((q, idx) => {
+      const card = document.createElement('div');
+      card.className = 'mb-3 p-3 border rounded';
+      const title = document.createElement('h5');
+      title.textContent = 'Q' + (idx + 1) + '. ' + q.question;
+      card.appendChild(title);
 
-          const options = q.options || {};
-          Object.keys(options).forEach((key) => {
-            const optId = 'q' + idx + '_' + key;
-            const div = document.createElement('div');
-            div.className = 'form-check';
-            const input = document.createElement('input');
-            input.className = 'form-check-input';
-            input.type = 'radio';
-            input.name = 'q' + idx;
-            input.id = optId;
-            input.value = key;
-            const label = document.createElement('label');
-            label.className = 'form-check-label';
-            label.htmlFor = optId;
-            label.textContent = key + ') ' + (options[key] || '');
-            div.appendChild(input);
-            div.appendChild(label);
-            card.appendChild(div);
-          });
-          container.appendChild(card);
+      const options = q.options || {};
+      for (const key in options) {
+        const optId = 'q' + idx + '_' + key;
+        const div = document.createElement('div');
+        div.className = 'form-check';
+        const input = document.createElement('input');
+        input.className = 'form-check-input';
+        input.type = 'radio';
+        input.name = 'q' + idx;
+        input.id = optId;
+        input.value = key;
+        const label = document.createElement('label');
+        label.className = 'form-check-label';
+        label.htmlFor = optId;
+        label.textContent = key + ') ' + options[key];
+        div.appendChild(input);
+        div.appendChild(label);
+        card.appendChild(div);
+      }
+      container.appendChild(card);
+    });
+  }
+
+  async function submitQuiz() {
+    const answers = {};
+    (QUIZ_DATA.questions || []).forEach((q, idx) => {
+      const selected = document.querySelector('input[name="q' + idx + '"]:checked');
+      answers[String(idx)] = selected ? selected.value : null;
+    });
+    const resultsDiv = document.getElementById('results');
+    try {
+      const res = await fetch('/submit-quiz', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          quiz_type: QUIZ_DATA.quiz_type,
+          domain: QUIZ_DATA.domain,
+          questions: QUIZ_DATA.questions,
+          answers: answers
+        })
+      });
+      const data = await res.json();
+      if (data.error) {
+        resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
+        return;
+      }
+      let html = '<div class="card"><div class="card-body">';
+      html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+      html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+      if (Array.isArray(data.performance_insights)) {
+        html += '<ul>';
+        data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+        html += '</ul>';
+      }
+      if (Array.isArray(data.results)) {
+        html += '<hr><h5>Review</h5>';
+        data.results.forEach((r, i) => {
+          html += '<div class="mb-2 p-2 border rounded ' + (r.is_correct ? 'border-success' : 'border-danger') + '">';
+          html += '<div><strong>Q' + r.index + '.</strong> ' + r.question + '</div>';
+          if (r.user_letter) {
+            html += '<div>Your answer: ' + r.user_letter + (r.user_text ? ') ' + r.user_text : '') + '</div>';
+          } else {
+            html += '<div>Your answer: (no selection)</div>';
+          }
+          html += '<div>Correct: ' + r.correct_letter + (r.correct_text ? ') ' + r.correct_text : '') + '</div>';
+          if (r.explanation) {
+            html += '<div class="text-muted mt-1"><em>' + r.explanation + '</em></div>';
+          }
+          html += '</div>';
         });
       }
+      html += '</div></div>';
+      resultsDiv.innerHTML = html;
+      window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+    } catch (e) {
+      resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
+    }
+  }
 
-      async function submitQuiz() {
-        const answers = {};
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
-          const selected = document.querySelector('input[name="q' + idx + '"]:checked');
-          answers[String(idx)] = selected ? selected.value : null;
-        });
-        const resultsDiv = document.getElementById('results');
-        try {
-          const res = await fetch('/submit-quiz', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              quiz_type: QUIZ_DATA.quiz_type,
-              domain: QUIZ_DATA.domain,
-              questions: QUIZ_DATA.questions,
-              answers: answers
-            })
-          });
-          const data = await res.json();
-          if (data.error) {
-            resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
-            return;
-          }
-          let html = '<div class="card"><div class="card-body">';
-          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
-          if (Array.isArray(data.performance_insights)) {
-            html += '<ul>';
-            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-            html += '</ul>';
-          }
-
-          // Per-question review with correct answers & explanations
-          if (Array.isArray(data.results)) {
-            html += '<hr/><h5>Review</h5>';
-            data.results.forEach((r, i) => {
-              const color = r.is_correct ? 'text-success' : 'text-danger';
-              html += '<div class="mb-3 ' + color + '"><strong>Q' + r.index + '.</strong> ' + (r.question || '') + '<br/>';
-              html += '<small><strong>Your answer:</strong> ' + (r.user_letter || '-') + (r.user_text ? (') ' + r.user_text) : '') + '</small><br/>';
-              html += '<small><strong>Correct:</strong> ' + (r.correct_letter || '-') + (r.correct_text ? (') ' + r.correct_text) : '') + '</small>';
-              if (r.explanation) {
-                html += '<div class="mt-1 text-body">' + r.explanation + '</div>';
-              }
-              html += '</div>';
-            });
-          }
-
-          html += '</div></div>';
-          resultsDiv.innerHTML = html;
-          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
-        } catch (e) {
-          resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
-        }
-      }
-
-      document.getElementById('submitBtn').addEventListener('click', submitQuiz);
-      renderQuiz();
-    </script>
-    """)
+  document.getElementById('submitBtnTop').addEventListener('click', submitQuiz);
+  document.getElementById('submitBtnBottom').addEventListener('click', submitQuiz);
+  renderQuiz();
+</script>
+""")
     content = page.substitute(title=quiz_data['title'], quiz_json=quiz_json)
     return render_base_template("Quiz", content, user=user)
 
 @app.route('/mock-exam')
 @subscription_required
 def mock_exam():
-    count_param = request.args.get('count')
-    if not count_param:
-        user = User.query.get(session['user_id'])
-        content = """
-        <div class="row">
-          <div class="col-md-8 mx-auto">
-            <div class="card">
-              <div class="card-header"><h4 class="mb-0">Mock Exam</h4></div>
-              <div class="card-body">
-                <p>Select the number of questions to begin:</p>
-                <div class="d-flex flex-wrap gap-2">
-                  <a class="btn btn-outline-primary" href="/mock-exam?count=25">25</a>
-                  <a class="btn btn-outline-primary" href="/mock-exam?count=50">50</a>
-                  <a class="btn btn-outline-primary" href="/mock-exam?count=75">75</a>
-                  <a class="btn btn-outline-primary" href="/mock-exam?count=100">100</a>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-        """
-        return render_base_template("Mock Exam", content, user=user)
-
+    # count selection UI + quiz
     try:
-        requested = int(count_param)
+        requested = int(request.args.get('count', 50))
     except ValueError:
         requested = 50
     num_questions = max(25, min(100, requested))
-
-    session['quiz_start_time'] = datetime.utcnow().timestamp()
     quiz_data = generate_fallback_quiz('mock-exam', domain=None, difficulty='medium', num_questions=num_questions)
     quiz_json = json.dumps(quiz_data)
 
     page = Template("""
-    <div class="row">
-      <div class="col-md-10 mx-auto">
-        <div class="card">
-          <div class="card-header d-flex justify-content-between align-items-center">
-            <h4 class="mb-0">Mock Exam ($num Q)</h4>
-            <div>
-              <a href="/mock-exam" class="btn btn-outline-secondary btn-sm me-2">Change Count</a>
-              <button id="submitBtnTop" class="btn btn-success">Submit</button>
-            </div>
-          </div>
-          <div class="card-body" id="quizContainer"></div>
-          <div class="card-footer d-flex justify-content-end">
-            <button id="submitBtnBottom" class="btn btn-success">Submit</button>
-          </div>
-        </div>
-        <div class="mt-4" id="results"></div>
+<div class="row">
+  <div class="col-md-10 mx-auto">
+    <div class="d-flex justify-content-between align-items-center mb-2">
+      <h3 class="mb-0">Mock Exam</h3>
+      <div class="btn-group" role="group" aria-label="Counts">
+        <a class="btn btn-outline-secondary btn-sm" href="/mock-exam?count=25">25</a>
+        <a class="btn btn-outline-secondary btn-sm" href="/mock-exam?count=50">50</a>
+        <a class="btn btn-outline-secondary btn-sm" href="/mock-exam?count=75">75</a>
+        <a class="btn btn-outline-secondary btn-sm" href="/mock-exam?count=100">100</a>
       </div>
     </div>
-    <script>
-      const QUIZ_DATA = $quiz_json;
 
-      function renderQuiz() {
-        const container = document.getElementById('quizContainer');
-        container.innerHTML = '';
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
-          const card = document.createElement('div');
-          card.className = 'mb-3 p-3 border rounded';
-          const title = document.createElement('h5');
-          title.textContent = 'Q' + (idx + 1) + '. ' + (q.question || '');
-          card.appendChild(title);
+    <div class="card">
+      <div class="card-header d-flex justify-content-between align-items-center">
+        <h4 class="mb-0">Mock Exam ($num Q)</h4>
+        <button id="submitBtnTop" class="btn btn-success">Submit</button>
+      </div>
+      <div class="card-body" id="quizContainer"></div>
+      <div class="card-footer d-flex justify-content-end">
+        <button id="submitBtnBottom" class="btn btn-success">Submit</button>
+      </div>
+    </div>
+    <div class="mt-4" id="results"></div>
+  </div>
+</div>
+<script>
+  const QUIZ_DATA = $quiz_json;
 
-          const options = q.options || {};
-          Object.keys(options).forEach((key) => {
-            const optId = 'q' + idx + '_' + key;
-            const div = document.createElement('div');
-            div.className = 'form-check';
-            const input = document.createElement('input');
-            input.className = 'form-check-input';
-            input.type = 'radio';
-            input.name = 'q' + idx;
-            input.id = optId;
-            input.value = key;
-            const label = document.createElement('label');
-            label.className = 'form-check-label';
-            label.htmlFor = optId;
-            label.textContent = key + ') ' + (options[key] || '');
-            div.appendChild(input);
-            div.appendChild(label);
-            card.appendChild(div);
-          });
-          container.appendChild(card);
+  function renderQuiz() {
+    const container = document.getElementById('quizContainer');
+    container.innerHTML = '';
+    (QUIZ_DATA.questions || []).forEach((q, idx) => {
+      const card = document.createElement('div');
+      card.className = 'mb-3 p-3 border rounded';
+      const title = document.createElement('h5');
+      title.textContent = 'Q' + (idx + 1) + '. ' + q.question;
+      card.appendChild(title);
+
+      const options = q.options || {};
+      for (const key in options) {
+        const optId = 'q' + idx + '_' + key;
+        const div = document.createElement('div');
+        div.className = 'form-check';
+        const input = document.createElement('input');
+        input.className = 'form-check-input';
+        input.type = 'radio';
+        input.name = 'q' + idx;
+        input.id = optId;
+        input.value = key;
+        const label = document.createElement('label');
+        label.className = 'form-check-label';
+        label.htmlFor = optId;
+        label.textContent = key + ') ' + options[key];
+        div.appendChild(input);
+        div.appendChild(label);
+        card.appendChild(div);
+      }
+      container.appendChild(card);
+    });
+  }
+
+  async function submitQuiz() {
+    const answers = {};
+    (QUIZ_DATA.questions || []).forEach((q, idx) => {
+      const selected = document.querySelector('input[name="q' + idx + '"]:checked');
+      answers[String(idx)] = selected ? selected.value : null;
+    });
+    const resultsDiv = document.getElementById('results');
+    try {
+      const res = await fetch('/submit-quiz', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          quiz_type: 'mock-exam',
+          domain: 'general',
+          questions: QUIZ_DATA.questions,
+          answers: answers
+        })
+      });
+      const data = await res.json();
+      if (data.error) {
+        resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
+        return;
+      }
+      let html = '<div class="card"><div class="card-body">';
+      html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
+      html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
+      if (Array.isArray(data.performance_insights)) {
+        html += '<ul>';
+        data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
+        html += '</ul>';
+      }
+      if (Array.isArray(data.results)) {
+        html += '<hr><h5>Review</h5>';
+        data.results.forEach((r, i) => {
+          html += '<div class="mb-2 p-2 border rounded ' + (r.is_correct ? 'border-success' : 'border-danger') + '">';
+          html += '<div><strong>Q' + r.index + '.</strong> ' + r.question + '</div>';
+          if (r.user_letter) {
+            html += '<div>Your answer: ' + r.user_letter + (r.user_text ? ') ' + r.user_text : '') + '</div>';
+          } else {
+            html += '<div>Your answer: (no selection)</div>';
+          }
+          html += '<div>Correct: ' + r.correct_letter + (r.correct_text ? ') ' + r.correct_text : '') + '</div>';
+          if (r.explanation) {
+            html += '<div class="text-muted mt-1"><em>' + r.explanation + '</em></div>';
+          }
+          html += '</div>';
         });
       }
+      html += '</div></div>';
+      resultsDiv.innerHTML = html;
+      window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
+    } catch (e) {
+      resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
+    }
+  }
 
-      async function submitQuiz() {
-        const answers = {};
-        (QUIZ_DATA.questions || []).forEach((q, idx) => {
-          const selected = document.querySelector('input[name="q' + idx + '"]:checked');
-          answers[String(idx)] = selected ? selected.value : null;
-        });
-        const resultsDiv = document.getElementById('results');
-        try {
-          const res = await fetch('/submit-quiz', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({
-              quiz_type: 'mock-exam',
-              domain: 'general',
-              questions: QUIZ_DATA.questions,
-              answers: answers
-            })
-          });
-          const data = await res.json();
-          if (data.error) {
-            resultsDiv.innerHTML = '<div class="alert alert-danger">' + data.error + '</div>';
-            return;
-          }
-          let html = '<div class="card"><div class="card-body">';
-          html += '<h4>Score: ' + data.score.toFixed(1) + '% (' + data.correct + '/' + data.total + ')</h4>';
-          html += '<p>Time taken: ' + (data.time_taken || 0) + ' min</p>';
-          if (Array.isArray(data.performance_insights)) {
-            html += '<ul>';
-            data.performance_insights.forEach(p => { html += '<li>' + p + '</li>'; });
-            html += '</ul>';
-          }
-
-          if (Array.isArray(data.results)) {
-            html += '<hr/><h5>Review</h5>';
-            data.results.forEach((r, i) => {
-              const color = r.is_correct ? 'text-success' : 'text-danger';
-              html += '<div class="mb-3 ' + color + '"><strong>Q' + r.index + '.</strong> ' + (r.question || '') + '<br/>';
-              html += '<small><strong>Your answer:</strong> ' + (r.user_letter || '-') + (r.user_text ? (') ' + r.user_text) : '') + '</small><br/>';
-              html += '<small><strong>Correct:</strong> ' + (r.correct_letter || '-') + (r.correct_text ? (') ' + r.correct_text) : '') + '</small>';
-              if (r.explanation) {
-                html += '<div class="mt-1 text-body">' + r.explanation + '</div>';
-              }
-              html += '</div>';
-            });
-          }
-
-          html += '</div></div>';
-          resultsDiv.innerHTML = html;
-          window.scrollTo({ top: resultsDiv.offsetTop - 20, behavior: 'smooth' });
-        } catch (e) {
-          resultsDiv.innerHTML = '<div class="alert alert-danger">Submission failed.</div>';
-        }
-      }
-
-      document.getElementById('submitBtnTop').addEventListener('click', submitQuiz);
-      document.getElementById('submitBtnBottom').addEventListener('click', submitQuiz);
-      renderQuiz();
-    </script>
-    """)
+  document.getElementById('submitBtnTop').addEventListener('click', submitQuiz);
+  document.getElementById('submitBtnBottom').addEventListener('click', submitQuiz);
+  renderQuiz();
+</script>
+""")
     content = page.substitute(num=num_questions, quiz_json=quiz_json)
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
-# ---------------- Submit quiz: score + record + progress + review payload -----
+# ----------------- Submit Quiz -----------------
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1612,6 +1621,7 @@ def submit_quiz():
         if not quiz_type or not questions:
             return jsonify({'error': 'Invalid quiz data'}), 400
 
+        # Duration
         time_taken = 0
         if 'quiz_start_time' in session:
             start = datetime.fromtimestamp(session['quiz_start_time'])
@@ -1630,12 +1640,25 @@ def submit_quiz():
             if is_correct:
                 correct_count += 1
 
-            # record events + progress per question
+            # record event + update progress
             try:
-                record_question_event(session['user_id'], q, domain=q.get('domain', domain), is_correct=is_correct, source=('mock' if quiz_type == 'mock-exam' else 'quiz'))
-                update_user_progress_on_answer(session['user_id'], q.get('domain', domain), None, is_correct)
-            except Exception as e:
-                print(f"submit_quiz record/progress error: {e}")
+                record_question_event(
+                    user_id=session['user_id'],
+                    question_obj=q,
+                    domain=q.get('domain', domain),
+                    topic=None,
+                    is_correct=is_correct,
+                    response_time_s=None,
+                    source=('mock' if quiz_type == 'mock-exam' else 'quiz')
+                )
+                update_user_progress_on_answer(
+                    user_id=session['user_id'],
+                    domain=q.get('domain', domain),
+                    topic=None,
+                    is_correct=is_correct
+                )
+            except Exception as _:
+                pass
 
             detailed_results.append({
                 'index': i + 1,
@@ -1651,7 +1674,7 @@ def submit_quiz():
 
         score = (correct_count / total) * 100 if total else 0.0
 
-        # Save overall result
+        # Save result
         qr = QuizResult(
             user_id=session['user_id'],
             quiz_type=quiz_type,
@@ -1681,15 +1704,16 @@ def submit_quiz():
         user.quiz_scores = json.dumps(scores[-50:])
         db.session.commit()
 
+        # Simple insights + feedback
         insights = []
         if score >= 90:
-            insights.append("Excellent performance. You're well-prepared for this topic.")
+            insights.append("Excellent performance — you’re demonstrating mastery.")
         elif score >= 80:
-            insights.append("Good job. Review missed questions to strengthen weak areas.")
+            insights.append("Strong showing — review the few missed questions to polish understanding.")
         elif score >= 70:
-            insights.append("Fair performance. Focus on the areas you missed.")
+            insights.append("Decent progress — target the topics you missed for better retention.")
         else:
-            insights.append("Consider more study time in this area before the exam.")
+            insights.append("Consider a bit more practice in this area to build confidence.")
         if time_taken > 0 and total > 0:
             avg = time_taken / total
             if avg < 1:
@@ -1713,101 +1737,69 @@ def submit_quiz():
         db.session.rollback()
         return jsonify({'error': 'Error processing quiz results.'}), 500
 
-# --------------------------------- Progress -----------------------------------
-def _overall_progress_svg(percent: float) -> str:
-    p = max(0.0, min(100.0, float(percent)))
-    color = "#198754" if p >= 80 else ("#fd7e14" if p >= 60 else "#dc3545")
-    r = 42.0
-    cx = cy = 50
-    import math
-    circ = 2 * math.pi * r
-    dash = circ * (p / 100.0)
-    gap = circ - dash
-    return f"""
-    <svg width="120" height="120" viewBox="0 0 100 100" aria-label="Overall progress {p:.1f}%">
-      <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="#eee" stroke-width="10"/>
-      <circle cx="{cx}" cy="{cy}" r="{r}" fill="none" stroke="{color}" stroke-width="10"
-              stroke-dasharray="{dash:.2f} {gap:.2f}" stroke-linecap="round" transform="rotate(-90 {cx} {cy})"/>
-      <text x="50" y="54" text-anchor="middle" font-size="18" fill="#333">{p:.0f}%</text>
-    </svg>
-    """
-
+# ----------------------------- Progress -----------------------------
 @app.route('/progress')
 @subscription_required
 def progress_page():
     user = User.query.get(session['user_id'])
-    try:
-        rows = UserProgress.query.filter_by(user_id=user.id).all()
-    except Exception as e:
-        print(f"/progress error: {e}")
-        rows = []
+    rows = UserProgress.query.filter_by(user_id=user.id, topic=None).all()
 
-    def badge(row):
-        if row.mastery_level == 'mastered':
-            return '<span class="badge badge-mastered">Mastered</span>'
-        if row.mastery_level == 'good':
-            return '<span class="badge badge-good">Good</span>'
-        return '<span class="badge badge-need">Needs Practice</span>'
+    # Map to colored rows
+    def color_for(level: str) -> str:
+        if level == 'mastered':
+            return 'bg-success text-white'
+        if level == 'good':
+            return 'bg-warning text-dark'
+        return 'bg-danger text-white'
 
-    total_q = sum((r.question_count or 0) for r in rows) or 0
-    if total_q > 0:
-        overall = sum((r.average_score or 0.0) * (r.question_count or 0) for r in rows) / total_q
-    else:
-        overall = (sum((r.average_score or 0.0) for r in rows) / len(rows)) if rows else 0.0
-
-    dial_svg = _overall_progress_svg(overall)
-
-    items = []
+    tr_html = []
     for r in rows:
-        domain_name = CPP_DOMAINS.get(r.domain, {}).get("name", r.domain)  # <-- fixed {}
-        items.append(
-            f'<tr>'
-            f'<td>{domain_name}</td>'
-            f'<td>{round(r.average_score or 0.0,1)}%</td>'
+        dmeta = CPP_DOMAINS.get(r.domain, {})
+        dname = dmeta.get('name', r.domain)
+        pct = int(round(r.average_score or 0))
+        level = r.mastery_level or 'needs_practice'
+        bar_class = 'bg-success' if level == 'mastered' else ('bg-warning' if level == 'good' else 'bg-danger')
+        tr_html.append(
+            '<tr>'
+            f'<td>{dname}</td>'
+            f'<td><div class="progress" style="height: 16px;"><div class="progress-bar {bar_class}" role="progressbar" style="width: {pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">{pct}%</div></div></td>'
+            f'<td><span class="badge {color_for(level)}">{level.replace("_"," ").title()}</span></td>'
             f'<td>{r.question_count or 0}</td>'
-            f'<td>{badge(r)}</td>'
-            f'<td><small>{(r.last_updated or datetime.utcnow()).strftime("%Y-%m-%d")}</small></td>'
-            f'</tr>'
+            f'<td>{(r.last_updated or datetime.utcnow()).strftime("%Y-%m-%d")}</td>'
+            '</tr>'
         )
 
-    content = f"""
-    <div class="row">
-      <div class="col-8"><h2>Your Progress</h2></div>
-      <div class="col-4 text-end">
-        <div class="card">
-          <div class="card-body">
-            <div class="d-flex align-items-center justify-content-end">
-              <div class="me-3">
-                <div><strong>Overall</strong></div>
-                <div class="text-muted">Weighted avg score</div>
-              </div>
-              {dial_svg}
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+    # overall dial
+    overall_pct = 0
+    if rows:
+        overall_pct = int(round(sum([(p.average_score or 0.0) for p in rows]) / len(rows)))
 
-    <div class="row mt-3">
-      <div class="col-12">
-        <div class="card">
+    content = Template("""
+    <div class="row">
+      <div class="col-md-8">
+        <div class="card"><div class="card-header"><h4 class="mb-0">Progress by Domain</h4></div>
           <div class="card-body">
             <div class="table-responsive">
-              <table class="table table-striped">
-                <thead>
-                  <tr><th>Domain</th><th>Average Score</th><th>Questions</th><th>Status</th><th>Updated</th></tr>
-                </thead>
-                <tbody>
-                  {''.join(items) if items else '<tr><td colspan="5" class="text-muted">No progress yet. Take a quiz or use flashcards to get started.</td></tr>'}
-                </tbody>
+              <table class="table align-middle">
+                <thead><tr><th>Domain</th><th>Average</th><th>Level</th><th>Questions</th><th>Updated</th></tr></thead>
+                <tbody>$rows</tbody>
               </table>
+            </div>
+            <div class="small text-muted">
+              Green = strong, Orange = good, Red = needs practice. Keep going — consistency wins!
             </div>
           </div>
         </div>
       </div>
+      <div class="col-md-4 d-flex align-items-center justify-content-center">
+        <div class="text-center">
+          <div class="gauge-wrap" style="--p:$overall;"><span>$overall%</span></div>
+          <div class="mt-2 small text-muted">Overall progress</div>
+        </div>
+      </div>
     </div>
-    """
-    return render_base_template("Progress", content, user=user)
+    """)
+    return render_base_template("Progress", content.substitute(rows=''.join(tr_html), overall=overall_pct), user=user)
 
 # ----------------------------- Subscription & Stripe --------------------------
 @app.route('/subscribe')
@@ -1821,41 +1813,30 @@ def subscribe():
     plans_html = """
     <div class="row">
       <div class="col-md-6">
-        <div class="card h-100">
-          <div class="card-body">
-            <h4>Monthly</h4>
-            <p>$39.99 / month</p>
-            <form method="POST" action="/create-checkout-session">
-              <input type="hidden" name="plan_type" value="monthly" />
-              <div class="mb-2">
-                <input type="text" class="form-control" name="discount_code" placeholder="Discount code (optional)">
-              </div>
-              <button class="btn btn-primary">Choose Monthly</button>
-            </form>
-          </div>
-        </div>
+        <div class="card h-100"><div class="card-body">
+          <h4>Monthly</h4>
+          <p>$39.99 / month</p>
+          <form method="POST" action="/create-checkout-session">
+            <input type="hidden" name="plan_type" value="monthly" />
+            <div class="mb-2"><input type="text" class="form-control" name="discount_code" placeholder="Discount code (optional)"></div>
+            <button class="btn btn-primary">Choose Monthly</button>
+          </form>
+        </div></div>
       </div>
       <div class="col-md-6">
-        <div class="card h-100">
-          <div class="card-body">
-            <h4>6 Months</h4>
-            <p>$99 / 6 months</p>
-            <form method="POST" action="/create-checkout-session">
-              <input type="hidden" name="plan_type" value="6month" />
-              <div class="mb-2">
-                <input type="text" class="form-control" name="discount_code" placeholder="Discount code (optional)">
-              </div>
-              <button class="btn btn-success">Choose 6 Months</button>
-            </form>
-          </div>
-        </div>
+        <div class="card h-100"><div class="card-body">
+          <h4>6 Months</h4>
+          <p>$99 / 6 months</p>
+          <form method="POST" action="/create-checkout-session">
+            <input type="hidden" name="plan_type" value="6month" />
+            <div class="mb-2"><input type="text" class="form-control" name="discount_code" placeholder="Discount code (optional)"></div>
+            <button class="btn btn-success">Choose 6 Months</button>
+          </form>
+        </div></div>
       </div>
     </div>
     """
-    header = ""
-    if trial_days_left is not None:
-        header = f'<div class="alert alert-info mb-3">Trial days left: {trial_days_left}</div>'
-
+    header = f'<div class="alert alert-info mb-3">Trial days left: {trial_days_left}</div>' if trial_days_left is not None else ""
     content = f"""
     <div class="row">
       <div class="col-12"><h2>Choose a Plan</h2></div>
@@ -1885,20 +1866,15 @@ def create_checkout_session():
         final_amount = selected['amount']
         discount_applied = False
         if discount_code == 'LAUNCH50':
-            final_amount = int(selected['amount'] * 0.5)
-            discount_applied = True
+            final_amount = int(selected['amount'] * 0.5); discount_applied = True
         elif discount_code == 'STUDENT20':
-            final_amount = int(selected['amount'] * 0.8)
-            discount_applied = True
+            final_amount = int(selected['amount'] * 0.8); discount_applied = True
 
         price = stripe.Price.create(
             unit_amount=final_amount,
             currency='usd',
             recurring={'interval': selected['interval'], 'interval_count': selected['interval_count']},
-            product_data={
-                'name': selected['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''),
-                'description': 'AI tutor, quizzes, and study tools'
-            }
+            product_data={'name': selected['name'] + (f' ({discount_code} DISCOUNT)' if discount_applied else ''), 'description': 'AI tutor, quizzes, and study tools'}
         )
 
         checkout_session = stripe.checkout.Session.create(
@@ -1908,13 +1884,7 @@ def create_checkout_session():
             mode='subscription',
             success_url=url_for('subscription_success', _external=True) + f'?session_id={{CHECKOUT_SESSION_ID}}&plan={plan_type}',
             cancel_url=url_for('subscribe', _external=True),
-            metadata={
-                'user_id': user.id,
-                'plan_type': plan_type,
-                'discount_code': discount_code if discount_applied else '',
-                'original_amount': selected['amount'],
-                'final_amount': final_amount
-            },
+            metadata={'user_id': user.id, 'plan_type': plan_type, 'discount_code': discount_code if discount_applied else '', 'original_amount': selected['amount'], 'final_amount': final_amount},
             allow_promotion_codes=True
         )
 
@@ -2043,39 +2013,23 @@ def end_study_session():
         db.session.rollback()
         return jsonify({'success': False, 'error': 'Session end error'})
 
-# --------------------------------- Diagnostics --------------------------------
+# ----------------------------- Diagnostics ------------------------------------
 @app.get("/diag/openai")
 def diag_openai():
     has_key = bool(os.environ.get("OPENAI_API_KEY"))
     model = os.environ.get("OPENAI_CHAT_MODEL", OPENAI_CHAT_MODEL)
     try:
-        headers = {
-            'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY","")}',
-            'Content-Type': 'application/json'
-        }
-        data = {
-            'model': model,
-            'messages': [{"role": "user", "content": "Say 'pong' if you can hear me."}],
-            'max_tokens': 10,
-            'temperature': 0
-        }
+        headers = {'Authorization': f'Bearer {os.environ.get("OPENAI_API_KEY","")}', 'Content-Type': 'application/json'}
+        data = {'model': model, 'messages': [{"role": "user", "content": "Say 'pong' if you can hear me."}], 'max_tokens': 10, 'temperature': 0}
         response = requests.post(f'{OPENAI_API_BASE}/chat/completions', headers=headers, json=data, timeout=20)
         success = (response.status_code == 200)
         return jsonify({
-            "has_key": has_key,
-            "model": model,
-            "status_code": response.status_code,
-            "success": success,
-            "response_preview": response.text[:300],
+            "has_key": has_key, "model": model, "status_code": response.status_code,
+            "success": success, "response_preview": response.text[:300],
             "timestamp": datetime.utcnow().isoformat()
         }), (200 if success else 500)
     except Exception as e:
-        return jsonify({
-            "has_key": has_key,
-            "model": model,
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
+        return jsonify({"has_key": has_key, "model": model, "error": str(e), "timestamp": datetime.utcnow().isoformat()}), 500
 
 @app.get("/diag/database")
 def diag_database():
@@ -2083,20 +2037,82 @@ def diag_database():
         db.session.execute(text('SELECT 1'))
         user_count = db.session.query(User).count()
         quiz_count = db.session.query(QuizResult).count()
-        return jsonify({
-            "status": "healthy",
-            "user_count": user_count,
-            "quiz_count": quiz_count,
-            "timestamp": datetime.utcnow().isoformat()
-        }), 200
+        return jsonify({"status": "healthy", "user_count": user_count, "quiz_count": quiz_count, "timestamp": datetime.utcnow().isoformat()}), 200
     except Exception as e:
-        return jsonify({
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }), 500
+        return jsonify({"status": "unhealthy", "error": str(e), "timestamp": datetime.utcnow().isoformat()}), 500
 
-# --------------------------------- App Factory --------------------------------
+# ----------------------------- Admin Importers (Protected) --------------------
+def _require_admin(req):
+    if not ADMIN_TOKEN:
+        return False
+    token = req.headers.get('X-Admin-Token', '')
+    return token and token == ADMIN_TOKEN
+
+def _hash_q(question: str, options: dict) -> str:
+    parts = [question.strip()]
+    for k in sorted(options.keys()):
+        parts.append(f"{k}:{str(options.get(k,''))}")
+    return hashlib.sha256("||".join(parts).encode('utf-8')).hexdigest()
+
+@app.post("/admin/import-bot")
+def admin_import_bot():
+    """
+    Protected endpoint: expects JSON list of items with fields:
+     - domain, difficulty, question, options (dict), correct (letter), explanation, source_name, source_url
+    Header: X-Admin-Token: <ADMIN_TOKEN>
+    """
+    if not _require_admin(request):
+        return jsonify({"error": "Unauthorized"}), 401
+    try:
+        payload = request.get_json(force=True)
+        if not isinstance(payload, list):
+            return jsonify({"error": "Expected a JSON array"}), 400
+
+        inserted, skipped = 0, 0
+        for item in payload:
+            q = (item.get('question') or '').strip()
+            options = item.get('options') or {}
+            correct = (item.get('correct') or '').strip().upper()
+            if not q or not isinstance(options, dict) or correct not in options.keys():
+                skipped += 1
+                continue
+            # Validate options JSON
+            opts_json = json.dumps(options, ensure_ascii=False)
+            # Deduplicate by hash of (question + options)
+            h = _hash_q(q, options)
+            # Check existing by same question text and correct set
+            existing = QuestionBank.query.filter(
+                QuestionBank.question == q,
+                QuestionBank.correct == correct
+            ).first()
+            if existing:
+                skipped += 1
+                continue
+
+            row = QuestionBank(
+                domain=item.get('domain') or 'general',
+                difficulty=item.get('difficulty') or 'medium',
+                question=q,
+                options_json=opts_json,
+                correct=correct,
+                explanation=(item.get('explanation') or '').strip(),
+                source_name=item.get('source_name') or 'BotImport',
+                source_url=item.get('source_url') or '',
+                is_verified=True
+            )
+            db.session.add(row)
+            inserted += 1
+
+        db.session.commit()
+        return jsonify({"inserted": inserted, "skipped": skipped}), 200
+    except Exception as e:
+        db.session.rollback()
+        print(f"/admin/import-bot error: {e}")
+        return jsonify({"error": "Import failed"}), 500
+
+# --------------------------------------------------------------------
+# App Factory / Run
+# --------------------------------------------------------------------
 def create_app(config_name='default'):
     return app
 
@@ -2108,4 +2124,5 @@ if __name__ == '__main__':
     print(f"DB configured: {bool(app.config.get('SQLALCHEMY_DATABASE_URI'))}")
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
+    print(f"Design version: {DESIGN_VERSION}")
     app.run(host='0.0.0.0', port=port, debug=debug)
