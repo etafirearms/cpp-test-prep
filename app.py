@@ -1,4 +1,3 @@
-APP.PY code 8-16-2025 solid working code: 
 # app.py
 from flask import Flask, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
@@ -2206,3 +2205,4 @@ if __name__ == '__main__':
     print(f"OpenAI configured: {bool(OPENAI_API_KEY)}")
     print(f"Stripe configured: {bool(stripe.api_key)}")
     app.run(host='0.0.0.0', port=port, debug=debug) 0.0', port=port, debug=debug)
+
