@@ -2,7 +2,7 @@
 from flask import Flask, request, redirect, url_for, flash, session, jsonify, Response
 from flask_sqlalchemy import SQLAlchemy
 from werkzeug.security import generate_password_hash, check_password_hash
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from string import Template
 from functools import wraps
 import json
@@ -13,8 +13,8 @@ import time
 import hashlib
 import random
 
-# For SQL text/inspection helpers
-from sqlalchemy import text, inspect
+# For SQL text/inspection/helpers
+from sqlalchemy import text, inspect, func
 
 # -----------------------------------------------------------------------------
 # App & Config
@@ -79,6 +79,7 @@ CPP_DOMAINS = {
     'information-security': {'name': 'Information Security', 'topics': ['Data Protection', 'Cybersecurity']},
     'crisis-management': {'name': 'Crisis Management', 'topics': ['Business Continuity', 'Emergency Response']}
 }
+ALL_DOMAIN_KEYS = list(CPP_DOMAINS.keys())
 
 # Soft color accents for domains
 DOMAIN_THEME_CLASSES = {
@@ -152,37 +153,31 @@ class UserProgress(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
     domain = db.Column(db.String(50), nullable=False, index=True)
-    topic = db.Column(db.String(100), nullable=True, index=True)  # optional drill-down
-    mastery_level = db.Column(db.String(20), default='needs_practice')  # needs_practice | good | mastered
-    average_score = db.Column(db.Float, default=0.0)  # 0-100
+    topic = db.Column(db.String(100), nullable=True, index=True)
+    mastery_level = db.Column(db.String(20), default='needs_practice')
+    average_score = db.Column(db.Float, default=0.0)
     question_count = db.Column(db.Integer, default=0)
     last_updated = db.Column(db.DateTime, default=datetime.utcnow)
     consecutive_good_scores = db.Column(db.Integer, default=0)
-
     __table_args__ = (
         db.UniqueConstraint('user_id', 'domain', 'topic', name='uq_userprogress_user_domain_topic'),
     )
 
 class QuestionEvent(db.Model):
-    """
-    One row per answered card/question.
-    source: 'quiz' | 'mock' | 'flashcard' | 'tutor'
-    """
     id = db.Column(db.Integer, primary_key=True)
     user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
-    question_hash = db.Column(db.String(64), nullable=False, index=True)  # sha256 of content
+    question_hash = db.Column(db.String(64), nullable=False, index=True)
     domain = db.Column(db.String(50), nullable=True, index=True)
     topic = db.Column(db.String(100), nullable=True, index=True)
     source = db.Column(db.String(20), nullable=False)  # quiz/mock/flashcard/tutor
-    is_correct = db.Column(db.Boolean, nullable=True)  # flashcards can be Know/Don't Know
-    response_time_s = db.Column(db.Integer)  # optional
+    is_correct = db.Column(db.Boolean, nullable=True)
+    response_time_s = db.Column(db.Integer)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, index=True)
-
     __table_args__ = (
         db.Index('ix_question_event_user_created', 'user_id', 'created_at'),
     )
 
-# Optional: DB-backed question bank (verified questions)
+# Optional DB question bank (verified items)
 class QuestionBank(db.Model):
     __tablename__ = 'question_bank'
     id = db.Column(db.Integer, primary_key=True)
@@ -197,6 +192,23 @@ class QuestionBank(db.Model):
     is_verified = db.Column(db.Boolean, default=False, index=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
+# NEW: Flashcard progress (SM-2 scheduling)
+class FlashcardProgress(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey('user.id'), nullable=False, index=True)
+    card_hash = db.Column(db.String(64), nullable=False, index=True)
+    domain = db.Column(db.String(50), index=True)
+    source_type = db.Column(db.String(10))  # 'qb' or 'fallback'
+    source_id = db.Column(db.Integer)       # QuestionBank.id when source_type='qb'
+    easiness = db.Column(db.Float, default=2.5)
+    interval = db.Column(db.Integer, default=0)  # days
+    repetitions = db.Column(db.Integer, default=0)
+    due_date = db.Column(db.Date, default=date.today)
+    last_reviewed = db.Column(db.DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        db.UniqueConstraint('user_id', 'card_hash', name='uq_flashcardprogress_user_card'),
+    )
+
 # -----------------------------------------------------------------------------
 # Database Initialization / Migrations (safe, idempotent)
 # -----------------------------------------------------------------------------
@@ -205,80 +217,70 @@ def init_database():
         db.create_all()
         insp = inspect(db.engine)
 
-        # Ensure QuizResult has 'domain' and 'time_taken'
+        # Ensure QuizResult columns
         if 'quiz_result' in insp.get_table_names():
-            existing_cols = {c['name'] for c in insp.get_columns('quiz_result')}
-            if 'domain' not in existing_cols:
+            existing = {c['name'] for c in insp.get_columns('quiz_result')}
+            if 'domain' not in existing:
                 try:
                     db.session.execute(text("ALTER TABLE quiz_result ADD COLUMN domain VARCHAR(50)"))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
-            if 'time_taken' not in existing_cols:
+            if 'time_taken' not in existing:
                 try:
                     db.session.execute(text("ALTER TABLE quiz_result ADD COLUMN time_taken INTEGER"))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
 
-        # Ensure User has terms columns
+        # Ensure User terms columns
         if 'user' in insp.get_table_names():
-            existing_cols = {c['name'] for c in insp.get_columns('user')}
-            if 'terms_accepted' not in existing_cols:
+            existing = {c['name'] for c in insp.get_columns('user')}
+            if 'terms_accepted' not in existing:
                 try:
                     db.session.execute(text('ALTER TABLE "user" ADD COLUMN terms_accepted BOOLEAN DEFAULT FALSE'))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
-            if 'terms_accepted_date' not in existing_cols:
+            if 'terms_accepted_date' not in existing:
                 try:
                     db.session.execute(text('ALTER TABLE "user" ADD COLUMN terms_accepted_date TIMESTAMP'))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
 
-        # Ensure UserProgress has 'topic' and 'consecutive_good_scores'
+        # Ensure UserProgress columns
         if 'user_progress' in insp.get_table_names():
-            existing_cols = {c['name'] for c in insp.get_columns('user_progress')}
-            if 'topic' not in existing_cols:
+            existing = {c['name'] for c in insp.get_columns('user_progress')}
+            if 'topic' not in existing:
                 try:
                     db.session.execute(text('ALTER TABLE user_progress ADD COLUMN topic VARCHAR(100)'))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
-            if 'consecutive_good_scores' not in existing_cols:
+            if 'consecutive_good_scores' not in existing:
                 try:
                     db.session.execute(text('ALTER TABLE user_progress ADD COLUMN consecutive_good_scores INTEGER DEFAULT 0'))
                     db.session.commit()
                 except Exception:
                     db.session.rollback()
 
-        # Ensure QuestionBank table & columns (fixes earlier UndefinedColumn error)
+        # Ensure QuestionBank columns (fix UndefinedColumn error)
         if 'question_bank' not in insp.get_table_names():
             db.create_all()
         else:
             qb_cols = {c['name'] for c in insp.get_columns('question_bank')}
             ddl = []
-            if 'domain' not in qb_cols:
-                ddl.append("ADD COLUMN domain VARCHAR(50)")
-            if 'difficulty' not in qb_cols:
-                ddl.append("ADD COLUMN difficulty VARCHAR(20)")
-            if 'question' not in qb_cols:
-                ddl.append("ADD COLUMN question TEXT")
-            if 'options_json' not in qb_cols:
-                ddl.append("ADD COLUMN options_json TEXT")
-            if 'correct' not in qb_cols:
-                ddl.append("ADD COLUMN correct VARCHAR(10)")
-            if 'explanation' not in qb_cols:
-                ddl.append("ADD COLUMN explanation TEXT")
-            if 'source_name' not in qb_cols:
-                ddl.append("ADD COLUMN source_name VARCHAR(120)")
-            if 'source_url' not in qb_cols:
-                ddl.append("ADD COLUMN source_url TEXT")
-            if 'is_verified' not in qb_cols:
-                ddl.append("ADD COLUMN is_verified BOOLEAN DEFAULT FALSE")
-            if 'created_at' not in qb_cols:
-                ddl.append("ADD COLUMN created_at TIMESTAMP DEFAULT NOW()")
+            if 'domain' not in qb_cols: ddl.append("ADD COLUMN domain VARCHAR(50)")
+            if 'difficulty' not in qb_cols: ddl.append("ADD COLUMN difficulty VARCHAR(20)")
+            if 'question' not in qb_cols: ddl.append("ADD COLUMN question TEXT")
+            if 'options_json' not in qb_cols: ddl.append("ADD COLUMN options_json TEXT")
+            if 'correct' not in qb_cols: ddl.append("ADD COLUMN correct VARCHAR(10)")
+            if 'explanation' not in qb_cols: ddl.append("ADD COLUMN explanation TEXT")
+            if 'source_name' not in qb_cols: ddl.append("ADD COLUMN source_name VARCHAR(120)")
+            if 'source_url' not in qb_cols: ddl.append("ADD COLUMN source_url TEXT")
+            if 'is_verified' not in qb_cols: ddl.append("ADD COLUMN is_verified BOOLEAN DEFAULT FALSE")
+            if 'created_at' not in qb_cols: ddl.append("ADD COLUMN created_at TIMESTAMP DEFAULT NOW()")
             if ddl:
                 try:
                     db.session.execute(text("ALTER TABLE question_bank " + ", ".join(ddl)))
@@ -341,7 +343,7 @@ def log_activity(user_id, activity, details=None):
         print(f"Activity logging error: {e}")
         db.session.rollback()
 
-# ---------- Tracking helpers ----------
+# ---------- Tracking helpers (quiz) ----------
 def _hash_question_payload(question_obj: dict) -> str:
     q_text = (question_obj or {}).get('question', '') or ''
     opts = (question_obj or {}).get('options', {}) or {}
@@ -389,7 +391,6 @@ def update_user_progress_on_answer(user_id: int, domain: str, topic: str, is_cor
 
         row.mastery_level = _mastery_from_stats(row.average_score, row.consecutive_good_scores)
         row.last_updated = datetime.utcnow()
-
         db.session.commit()
     except Exception as e:
         print(f"update_user_progress_on_answer error: {e}")
@@ -514,11 +515,9 @@ def fetch_questions_from_db(quiz_type, domain, difficulty, num_questions):
 
 def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
     final_questions = []
-
     db_questions = fetch_questions_from_db(quiz_type, domain, difficulty, num_questions)
     if db_questions:
         final_questions.extend(db_questions)
-
     if len(final_questions) < num_questions:
         base = _fallback_bank()
         random.shuffle(base)
@@ -532,7 +531,6 @@ def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
                 continue
             seen_hashes.add(qh)
             final_questions.append(q.copy())
-
     title = f"CPP {quiz_type.title().replace('-', ' ')}"
     return {
         "title": title,
@@ -545,6 +543,87 @@ def generate_fallback_quiz(quiz_type, domain, difficulty, num_questions):
 def generate_quiz(quiz_type, domain=None, difficulty='medium'):
     config = QUIZ_TYPES.get(quiz_type, {'questions': 10})
     return generate_fallback_quiz(quiz_type, domain, difficulty, config['questions'])
+
+# ---------- Flashcards helpers ----------
+def _hash_flashcard(front: str, back: str, domain: str) -> str:
+    raw = f"{(front or '').strip()}||{(back or '').strip()}||{(domain or '').strip()}"
+    return hashlib.sha256(raw.encode('utf-8')).hexdigest()
+
+def _flashcard_from_qb_row(r: QuestionBank):
+    try:
+        opts = json.loads(r.options_json or '{}')
+    except Exception:
+        opts = {}
+    correct_text = opts.get(r.correct, '')
+    front = r.question
+    back_parts = []
+    if r.correct:
+        back_parts.append(f"Correct: {r.correct}) {correct_text}")
+    if r.explanation:
+        back_parts.append(r.explanation)
+    back = "\n\n".join(back_parts) if back_parts else "Review the concept and rationale."
+    domain = r.domain or 'general'
+    chash = _hash_flashcard(front, back, domain)
+    return {
+        'front': front,
+        'back': back,
+        'domain': domain,
+        'card_hash': chash,
+        'source_type': 'qb',
+        'source_id': r.id
+    }
+
+def _fallback_flashcards():
+    cards = []
+    for q in _fallback_bank():
+        front = q['question']
+        correct_text = (q['options'] or {}).get(q['correct'], '')
+        back = f"Correct: {q['correct']}) {correct_text}\n\n{q.get('explanation','')}"
+        domain = q.get('domain','general')
+        chash = _hash_flashcard(front, back, domain)
+        cards.append({
+            'front': front, 'back': back, 'domain': domain,
+            'card_hash': chash, 'source_type': 'fallback', 'source_id': None
+        })
+    return cards
+
+def _get_all_candidate_cards(domain: str | None):
+    """Return list of dict cards from DB (preferred) then fallback."""
+    cards = []
+    try:
+        q = QuestionBank.query.filter(QuestionBank.is_verified == True)
+        if domain and domain != 'random':
+            q = q.filter(QuestionBank.domain == domain)
+        rows = q.order_by(text('random()')).limit(400).all()
+        cards.extend([_flashcard_from_qb_row(r) for r in rows])
+    except Exception as e:
+        print(f"Flashcard DB fetch error: {e}")
+
+    # Fallback only if DB empty or domain has none
+    if not cards:
+        fb = _fallback_flashcards()
+        if domain and domain != 'random':
+            fb = [c for c in fb if c['domain'] == domain]
+        cards.extend(fb)
+    return cards
+
+def _sm2_update(progress: FlashcardProgress, quality: int):
+    """SM-2 scheduling update. quality: 0..5 (2=Don't know, 4=Know)."""
+    if quality < 3:
+        progress.repetitions = 0
+        progress.interval = 1
+    else:
+        if progress.repetitions == 0:
+            progress.interval = 1
+        elif progress.repetitions == 1:
+            progress.interval = 6
+        else:
+            progress.interval = int(round(progress.interval * progress.easiness))
+        progress.repetitions += 1
+    # Update easiness factor
+    progress.easiness = max(1.3, progress.easiness + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)))
+    progress.due_date = date.today() + timedelta(days=progress.interval)
+    progress.last_reviewed = datetime.utcnow()
 
 # -----------------------------------------------------------------------------
 # HTML Base Template (with light domain theme support)
@@ -603,6 +682,40 @@ def render_base_template(title, content_html, user=None):
       .answer-correct   { border-left: 4px solid #198754; background: #F0FFF4; }
       .answer-incorrect { border-left: 4px solid #DC3545; background: #FFF5F5; }
       .unanswered { border: 2px solid #DC3545 !important; }
+
+      /* Flashcards */
+      .fc-sidebar .domain-btn { margin-bottom: .5rem; width: 100%; text-align: left; }
+      .fc-card-wrap { display: flex; justify-content: center; }
+      .fc-card {
+        width: min(92vw, 640px);
+        height: calc(min(92vw, 640px) * 0.6); /* ~3x5 ratio feel */
+        max-height: 420px;
+        background: #fffdf5;
+        color: #1f2937;
+        border-radius: 16px;
+        box-shadow: 0 8px 24px rgba(0,0,0,.08);
+        border: 1px solid #f1eadd;
+        padding: 24px 28px;
+        cursor: pointer;
+        position: relative;
+        transition: transform .2s ease;
+      }
+      .fc-card:hover { transform: translateY(-2px); }
+      .fc-front, .fc-back {
+        position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+        padding: 24px 28px;
+        display: flex; align-items: center; justify-content: center;
+        text-align: center;
+        white-space: pre-wrap;
+      }
+      .fc-front { font-size: 1.15rem; font-weight: 600; }
+      .fc-back  { font-size: 1rem; }
+      .fc-hidden { display: none; }
+      .fc-ctrls .btn { min-width: 140px; }
+      .kbd {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+        background: #f1f5f9; border: 1px solid #cbd5e1; padding: 2px 6px; border-radius: 6px; font-size: .85em;
+      }
     </style>
     """
 
@@ -647,7 +760,6 @@ def healthz():
 def home():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
-
     content = """
     <div class="row justify-content-center">
       <div class="col-md-8">
@@ -711,7 +823,6 @@ def register():
                 name=f"{first_name} {last_name}",
                 metadata={'source': 'cpp_test_prep'}
             )
-
             user = User(
                 email=email,
                 password_hash=generate_password_hash(password),
@@ -728,7 +839,6 @@ def register():
             db.session.commit()
 
             log_activity(user.id, 'user_registered', f'New user: {first_name} {last_name}')
-
             session['user_id'] = user.id
             session['user_name'] = f"{first_name} {last_name}"
             flash(f'Welcome {first_name}! You have a 7-day free trial.', 'success')
@@ -1068,32 +1178,332 @@ def chat():
         print(f"Chat error: {e}")
         return jsonify({'error': 'Sorry, I encountered an error processing your message.'}), 500
 
-# -------------------------------- Flashcards (placeholder page) ---------------
+# -------------------------------- Flashcards ----------------------------------
 @app.route('/flashcards')
 @subscription_required
 def flashcards_page():
     user = User.query.get(session['user_id'])
-    content = """
+
+    # Build per-domain counts from DB (verified Qs). Fallback adds minimal counts.
+    db_counts = {k: 0 for k in ALL_DOMAIN_KEYS}
+    try:
+        rows = db.session.query(QuestionBank.domain, func.count(QuestionBank.id))\
+            .filter(QuestionBank.is_verified == True)\
+            .group_by(QuestionBank.domain).all()
+        for dom, cnt in rows:
+            if dom in db_counts:
+                db_counts[dom] = cnt or 0
+    except Exception as e:
+        print(f"Flashcard count error: {e}")
+
+    # Fallback counts
+    fb_counts = {k: 0 for k in ALL_DOMAIN_KEYS}
+    for c in _fallback_flashcards():
+        if c['domain'] in fb_counts:
+            fb_counts[c['domain']] += 1
+
+    total_counts = {k: (db_counts.get(k,0) + fb_counts.get(k,0)) for k in ALL_DOMAIN_KEYS}
+    total_all = sum(total_counts.values())
+
+    # Render domain buttons (server-side)
+    dom_btns = []
+    dom_btns.append('<button class="btn btn-primary domain-btn" data-domain="random">Random <span class="badge bg-light text-dark ms-1">{}</span></button>'.format(total_all))
+    for key in ALL_DOMAIN_KEYS:
+        name = CPP_DOMAINS[key]['name']
+        cnt = total_counts.get(key, 0)
+        dom_btns.append(f'<button class="btn btn-outline-primary domain-btn" data-domain="{key}">{name} <span class="badge bg-secondary ms-1">{cnt}</span></button>')
+
+    content = f"""
     <div class="row">
-      <div class="col-md-8 mx-auto">
-        <div class="card">
+      <div class="col-lg-3 fc-sidebar">
+        <div class="card mb-3">
+          <div class="card-header"><strong>Domains</strong></div>
           <div class="card-body">
-            <h3 class="mb-3">Flashcards</h3>
-            <p class="text-muted">Flashcards are being enhanced. Use Tutor or Quizzes meanwhile.</p>
-            <a href="/dashboard" class="btn btn-outline-secondary">Back to Dashboard</a>
+            {' '.join(dom_btns)}
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><strong>How to use</strong></div>
+          <div class="card-body">
+            <ul class="mb-2">
+              <li>Click a domain (or <strong>Random</strong>).</li>
+              <li>Click the card (or press <span class="kbd">J</span>) to <strong>flip</strong> it.</li>
+              <li>Choose <span class="text-success">Know</span> or <span class="text-danger">Don't know</span> to train the system.</li>
+              <li>Press <span class="kbd">K</span> to mark <strong>Know</strong> & load the next card quickly.</li>
+            </ul>
+            <small class="text-muted">We use spaced repetition under the hood to prioritize what you need most.</small>
           </div>
         </div>
       </div>
+
+      <div class="col-lg-9">
+        <div class="card mb-3">
+          <div class="card-header d-flex align-items-center justify-content-between">
+            <div><strong>Flashcards</strong> <span id="fcDomainLabel" class="badge bg-secondary">Random</span></div>
+            <div><button id="fcChangeBtn" class="btn btn-sm btn-outline-secondary">Change Domain</button></div>
+          </div>
+          <div class="card-body">
+
+            <div class="fc-card-wrap mb-3">
+              <div class="fc-card" id="fcCard">
+                <div class="fc-front" id="fcFront">Choose a domain to begin.</div>
+                <div class="fc-back fc-hidden" id="fcBack"></div>
+              </div>
+            </div>
+
+            <div class="d-flex justify-content-center gap-3 fc-ctrls">
+              <button class="btn btn-outline-danger" id="btnDontKnow">Don't know</button>
+              <button class="btn btn-outline-secondary" id="btnFlip">Flip (J)</button>
+              <button class="btn btn-success" id="btnKnow">Know (K)</button>
+            </div>
+
+          </div>
+        </div>
+        <div id="fcStatus" class="text-muted"></div>
+      </div>
     </div>
+
+    <script>
+      let currentDomain = 'random';
+      let currentCard = null;
+      let flipped = false;
+
+      const domainButtons = document.querySelectorAll('.domain-btn');
+      const cardEl = document.getElementById('fcCard');
+      const frontEl = document.getElementById('fcFront');
+      const backEl  = document.getElementById('fcBack');
+      const domainLabel = document.getElementById('fcDomainLabel');
+      const statusEl = document.getElementById('fcStatus');
+
+      const btnFlip = document.getElementById('btnFlip');
+      const btnKnow = document.getElementById('btnKnow');
+      const btnDont = document.getElementById('btnDontKnow');
+      const btnChange = document.getElementById('fcChangeBtn');
+
+      function setDomain(dom) {
+        currentDomain = dom || 'random';
+        domainLabel.textContent = (dom && dom !== 'random') ? dom.replace(/-/g,' ') : 'Random';
+        flipped = false;
+        frontEl.classList.remove('fc-hidden');
+        backEl.classList.add('fc-hidden');
+        frontEl.textContent = 'Loading...';
+        backEl.textContent = '';
+        fetchNext();
+        statusEl.textContent = '';
+      }
+
+      async function fetchNext() {
+        try {
+          const res = await fetch('/api/flashcards/next', {
+            method: 'POST',
+            headers: {{'Content-Type':'application/json'}},
+            body: JSON.stringify({domain: currentDomain})
+          });
+          const data = await res.json();
+          if (data && data.card) {
+            currentCard = data.card;
+            frontEl.textContent = currentCard.front;
+            backEl.textContent  = currentCard.back;
+            flipped = false;
+            frontEl.classList.remove('fc-hidden');
+            backEl.classList.add('fc-hidden');
+            statusEl.textContent = data.message || '';
+          } else {
+            currentCard = null;
+            frontEl.textContent = data.error || 'No cards available.';
+            backEl.textContent = '';
+          }
+        } catch(e) {
+          currentCard = null;
+          frontEl.textContent = 'Network error.';
+          backEl.textContent = '';
+        }
+      }
+
+      function flipCard() {
+        if (!currentCard) return;
+        flipped = !flipped;
+        if (flipped) {
+          frontEl.classList.add('fc-hidden');
+          backEl.classList.remove('fc-hidden');
+        } else {
+          backEl.classList.add('fc-hidden');
+          frontEl.classList.remove('fc-hidden');
+        }
+      }
+
+      async function rateCard(isKnow) {
+        if (!currentCard) return;
+        try {
+          const res = await fetch('/api/flashcards/rate', {
+            method: 'POST',
+            headers: {{'Content-Type':'application/json'}},
+            body: JSON.stringify({
+              domain: currentDomain,
+              card_hash: currentCard.card_hash,
+              source_type: currentCard.source_type,
+              source_id: currentCard.source_id,
+              rating: isKnow ? 'know' : 'dont_know'
+            })
+          });
+          await res.json(); // ignore details, just fetch next
+        } catch (e) { /* ignore */ }
+        fetchNext();
+      }
+
+      // Sidebar domain clicks
+      domainButtons.forEach(b => {
+        b.addEventListener('click', () => {
+          domainButtons.forEach(x => x.classList.replace('btn-primary','btn-outline-primary'));
+          domainButtons.forEach(x => x.classList.replace('btn-secondary','btn-outline-primary'));
+          b.classList.remove('btn-outline-primary');
+          b.classList.add('btn-primary');
+          setDomain(b.getAttribute('data-domain'));
+        });
+      });
+
+      // Main controls
+      btnFlip.addEventListener('click', flipCard);
+      cardEl.addEventListener('click', flipCard);
+      btnKnow.addEventListener('click', () => rateCard(true));
+      btnDont.addEventListener('click', () => rateCard(false));
+      btnChange.addEventListener('click', () => {
+        window.scrollTo({top:0, behavior:'smooth'});
+      });
+
+      // Keyboard shortcuts: J flip, K know+next
+      document.addEventListener('keydown', (e) => {
+        if (e.key.toLowerCase() === 'j') flipCard();
+        if (e.key.toLowerCase() === 'k') rateCard(true);
+      });
+
+      // Auto-start on Random
+      setDomain('random');
+    </script>
     """
     return render_base_template("Flashcards", content, user=user)
+
+@app.post('/api/flashcards/next')
+@subscription_required
+def api_flashcards_next():
+    try:
+        data = request.get_json() or {}
+        domain = (data.get('domain') or 'random').strip()
+        user_id = session['user_id']
+
+        # 1) Serve due cards first
+        q = FlashcardProgress.query.filter_by(user_id=user_id)
+        if domain and domain != 'random':
+            q = q.filter(FlashcardProgress.domain == domain)
+        q = q.filter(FlashcardProgress.due_date <= date.today()).order_by(FlashcardProgress.due_date.asc())
+        due = q.first()
+
+        def load_card_from_progress(fp: FlashcardProgress):
+            if fp.source_type == 'qb' and fp.source_id:
+                row = QuestionBank.query.get(fp.source_id)
+                if row:
+                    return _flashcard_from_qb_row(row)
+            # Fallback reconstruction not guaranteed — pick a fresh candidate
+            return None
+
+        if due:
+            card = load_card_from_progress(due)
+            if card:
+                return jsonify({'card': card, 'message': 'Due for review'}), 200
+            else:
+                # Stale pointer; delete and continue
+                try:
+                    db.session.delete(due)
+                    db.session.commit()
+                except Exception:
+                    db.session.rollback()
+
+        # 2) Otherwise, deliver a new card
+        candidates = _get_all_candidate_cards(None if domain == 'random' else domain)
+        if not candidates:
+            return jsonify({'error': 'No flashcards available for this domain.'}), 200
+
+        # Avoid cards that already exist for user (so they first see new material)
+        existing_hashes = {h for (h,) in db.session.query(FlashcardProgress.card_hash)
+                                              .filter(FlashcardProgress.user_id == user_id).all()}
+        new_candidates = [c for c in candidates if c['card_hash'] not in existing_hashes]
+        chosen = random.choice(new_candidates or candidates)
+
+        # Ensure a progress row exists (due today)
+        fp = FlashcardProgress.query.filter_by(user_id=user_id, card_hash=chosen['card_hash']).first()
+        if not fp:
+            fp = FlashcardProgress(
+                user_id=user_id,
+                card_hash=chosen['card_hash'],
+                domain=chosen['domain'],
+                source_type=chosen['source_type'],
+                source_id=chosen['source_id'],
+                easiness=2.5,
+                interval=0,
+                repetitions=0,
+                due_date=date.today(),
+                last_reviewed=datetime.utcnow()
+            )
+            try:
+                db.session.add(fp)
+                db.session.commit()
+            except Exception:
+                db.session.rollback()
+
+        return jsonify({'card': chosen, 'message': 'New card'}), 200
+    except Exception as e:
+        print(f"/api/flashcards/next error: {e}")
+        return jsonify({'error': 'Could not fetch next card.'}), 500
+
+@app.post('/api/flashcards/rate')
+@subscription_required
+def api_flashcards_rate():
+    try:
+        data = request.get_json() or {}
+        user_id = session['user_id']
+        card_hash = data.get('card_hash')
+        rating = (data.get('rating') or '').lower()
+        domain = (data.get('domain') or 'random')
+        source_type = data.get('source_type')
+        source_id = data.get('source_id')
+
+        if not card_hash or rating not in ('know', 'dont_know'):
+            return jsonify({'error': 'Invalid rating'}), 400
+
+        fp = FlashcardProgress.query.filter_by(user_id=user_id, card_hash=card_hash).first()
+        if not fp:
+            fp = FlashcardProgress(
+                user_id=user_id,
+                card_hash=card_hash,
+                domain=(domain if domain != 'random' else None),
+                source_type=source_type,
+                source_id=source_id,
+                easiness=2.5, interval=0, repetitions=0, due_date=date.today()
+            )
+            db.session.add(fp)
+
+        quality = 4 if rating == 'know' else 2
+        _sm2_update(fp, quality)
+        db.session.commit()
+
+        # Optional: log a question event (treat as flashcard)
+        try:
+            db.session.add(ActivityLog(user_id=user_id, activity='flashcard_rate', details=f'{rating}:{domain}'))
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
+
+        return jsonify({'success': True}), 200
+    except Exception as e:
+        print(f"/api/flashcards/rate error: {e}")
+        db.session.rollback()
+        return jsonify({'error': 'Could not record rating.'}), 500
 
 # ------------------------------ Quizzes ---------------------------------------
 @app.route('/quiz-selector')
 @subscription_required
 def quiz_selector():
     user = User.query.get(session['user_id'])
-
     items_html = []
     for key, meta in QUIZ_TYPES.items():
         items_html.append(
@@ -1422,7 +1832,7 @@ def mock_exam():
     content = page.substitute(num=num_questions, quiz_json=quiz_json, theme=theme_class)
     return render_base_template("Mock Exam", content, user=User.query.get(session['user_id']))
 
-# ----------------- Submit quiz: returns detailed results & domain feedback ----
+# ----------------- Submit quiz: detailed results & domain feedback -----------
 @app.route('/submit-quiz', methods=['POST'])
 @subscription_required
 def submit_quiz():
@@ -1444,10 +1854,9 @@ def submit_quiz():
 
         correct_count = 0
         total = len(questions)
-
         domain_stats = {}
-
         detailed_results = []
+
         for i, q in enumerate(questions):
             user_letter = answers.get(str(i))
             correct_letter = q.get('correct')
