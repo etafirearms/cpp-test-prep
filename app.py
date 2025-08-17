@@ -822,7 +822,7 @@ def mock_exam_page():
           const shuffled = pool.slice().sort(()=>Math.random()-0.5);
           for (const q of shuffled) {{ if(out.length >= COUNT) break; out.push(structuredClone(q)); }}
         }}
-        return {{title: `Mock (${COUNT} questions)`, domain: DOMAIN, questions: out.slice(0, COUNT)}};
+        return {{title: 'Mock (' + COUNT + ' questions)', domain: DOMAIN, questions: out.slice(0, COUNT)}};
       }}
 
       const cont = document.getElementById('quiz');
@@ -1125,5 +1125,6 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
