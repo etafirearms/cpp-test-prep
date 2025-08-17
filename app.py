@@ -209,114 +209,123 @@ def diag_openai():
 # --- Home ---
 @app.get("/")
 def home():
-    # rotating tip
-    tip = random.choice(STUDY_TIPS)
-
-    # quick stats for the dial
+    # compute a quick average for the gauge (uses your existing session history)
     hist = session.get("quiz_history", [])
-    overall_avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
-    total_answered = sum(h.get("total", 0) for h in hist)
-    completion_goal = 200  # change if you want a different goal
-    completion_pct = min(100, int((total_answered / completion_goal) * 100)) if completion_goal else 0
+    avg = round(sum(h["score"] for h in hist) / len(hist), 1) if hist else 0.0
 
-    body = f"""
+    # rotating tip on the home page
+    tips = [
+        "Small, daily practice beats long, rare cram sessions.",
+        "Plan a short study block and stick to it — even 10 minutes counts.",
+        "Active recall: quiz yourself, don’t just re-read notes.",
+        "Missed questions are gold — they show you what to study next.",
+        "Set a target for today: 5 questions per domain you struggle with."
+    ]
+    tip = random.choice(tips)
+
+    body_top = """
     <div class="row justify-content-center">
-      <div class="col-md-9 text-center">
-        <div class="alert alert-primary shadow-sm">
-          <strong>Daily Tip:</strong> {tip}
-        </div>
-        <h1 class="mb-3">CPP Test Prep</h1>
-        <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams — ready to go.</p>
-        <div class="d-flex gap-2 justify-content-center mt-3 flex-wrap">
-          <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
-          <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
-          <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
-          <a class="btn btn-warning btn-lg btn-enhanced" href="/mock-exam">Mock Exam</a>
-          <a class="btn btn-info btn-lg btn-enhanced" href="/progress">Progress</a>
-        </div>
-      </div>
-    </div>
-
-    <div class="row mt-4">
-      <div class="col-md-8 mx-auto">
-        <div class="card border-0 shadow">
-          <div class="card-header bg-light"><strong>Your progress at a glance</strong></div>
+      <div class="col-md-10">
+        <div class="card border-0 shadow mb-3">
           <div class="card-body">
-            <div id="homeGauge" style="max-width:520px; margin:0 auto;"></div>
-            <div class="text-center small text-muted mt-2">
-              <strong>Needle</strong> = average score &nbsp; • &nbsp; <strong>Thin inner ring</strong> = completion
-              (answered {total_answered} of {completion_goal})
+            <h1 class="mb-2">CPP Test Prep</h1>
+            <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams — ready to go.</p>
+
+            <div class="alert alert-info mb-4" role="alert">
+              <strong>Quick tip:</strong> """
+    body_mid = tip
+    body_mid2 = """</div>
+
+            <div class="d-flex gap-2 flex-wrap">
+              <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
+              <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
+              <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
+              <a class="btn btn-warning btn-lg btn-enhanced" href="/mock-exam">Mock Exam</a>
+              <a class="btn btn-info btn-lg btn-enhanced" href="/progress">Progress</a>
             </div>
+          </div>
+        </div>
+
+        <div class="card border-0 shadow">
+          <div class="card-header bg-light"><strong>Overall Progress</strong></div>
+          <div class="card-body">
+            <div id="gaugeHome" class="d-flex justify-content-center"></div>
+            <div class="text-center text-muted mt-2">Average of your saved attempts</div>
           </div>
         </div>
       </div>
     </div>
 
     <script>
-      (function() {{
-        function toRad(d) {{ return d*Math.PI/180; }}
-        function polar(cx, cy, r, ang) {{ ang=toRad(ang); return {{x: cx+r*Math.cos(ang), y: cy+r*Math.sin(ang)}}; }}
-        function arc(cx, cy, r, a0, a1) {{
-          const p0=polar(cx,cy,r,a0), p1=polar(cx,cy,r,a1);
-          const large = (Math.abs(a1-a0)>180)?1:0; const sweep=(a1>a0)?1:0;
-          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1) + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' ' + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
-        }}
-        function drawDial(id, avg, completion, size) {{
-          const start=-120, sweep=240; // like the image
-          const w=size, h=Math.round(size*0.66); const cx=w/2, cy=Math.round(h*0.95);
-          const r= Math.round(w*0.40);
-          const rInner = r-8; // thin completion ring
+      // Draw a half-circle gauge (0–100) with a needle.
+      (function () {
+        var pct = """
+    body_pct = str(avg)
+    body_bot = """;
+        if (isNaN(pct)) { pct = 0; }
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
 
-          let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
+        var el = document.getElementById('gaugeHome');
+        var w = 320, h = 190;
+        var cx = w/2, cy = h - 10, r = Math.min(w, h*2) * 0.45; // nice sizing
+        var start = 180, end = 0; // left to right along a half circle
 
-          // Segments (green, yellow, orange, red) across 0–100
-          const segs=[
-            {{pct0:0,pct1:40,color:'#28a745'}},   // green
-            {{pct0:40,pct1:65,color:'#ffc107'}},  // yellow
-            {{pct0:65,pct1:85,color:'#fd7e14'}},  // orange
-            {{pct0:85,pct1:100,color:'#dc3545'}}  // red
-          ];
-          svg += `<path d="${arc(cx,cy,r,start,start+sweep)}" fill="none" stroke="#eee" stroke-width="18" stroke-linecap="round"/>`;
-          segs.forEach(s=>{{
-            const a0=start + sweep*(s.pct0/100), a1=start + sweep*(s.pct1/100);
-            svg += `<path d="${arc(cx,cy,r,a0,a1)}" fill="none" stroke="${s.color}" stroke-width="18" stroke-linecap="butt"/>`;
-          }});
+        function polar(cx, cy, r, a) {
+          var rad = (a - 90) * Math.PI/180;
+          return {x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad)};
+        }
+        function arc(cx, cy, r, a0, a1) {
+          var p0 = polar(cx,cy,r,a0), p1 = polar(cx,cy,r,a1);
+          var large = ((a1 - a0 + 360) % 360) > 180 ? 1 : 0;
+          var sweep = a1 > a0 ? 1 : 0;
+          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1)
+               + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' '
+               + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
+        }
 
-          // Thin inner completion ring (blue)
-          const compEnd = start + sweep*(Math.max(0,Math.min(100,completion))/100);
-          svg += `<path d="${arc(cx,cy,rInner,start,compEnd)}" fill="none" stroke="#0d6efd" stroke-width="4" stroke-linecap="round"/>`;
+        // Choose color by pct
+        var col = '#dc3545'; // red
+        if (pct >= 70) col = '#fd7e14'; // orange
+        if (pct >= 80) col = '#ffc107'; // yellow
+        if (pct >= 90) col = '#28a745'; // green
 
-          // Tick marks and labels
-          for(let t=0;t<=100;t+=5){{
-            const ang = start + sweep*(t/100);
-            const outer=polar(cx,cy,r,ang);
-            const len=(t%10===0)?16:8;
-            const inner=polar(cx,cy,r-len,ang);
-            svg += `<line x1="${outer.x.toFixed(1)}" y1="${outer.y.toFixed(1)}" x2="${inner.x.toFixed(1)}" y2="${inner.y.toFixed(1)}" stroke="#cfd4da" stroke-width="2"/>`;
-            if(t%20===0){{
-              const lab=polar(cx,cy,r-30,ang);
-              svg += `<text x="${lab.x.toFixed(1)}" y="${lab.y.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" font-size="11" fill="#6c757d">${{t}}</text>`;
-            }}
-          }}
+        var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
 
-          // Needle (black)
-          const angNeedle = start + sweep*(Math.max(0,Math.min(100,avg))/100);
-          const tip = polar(cx,cy,r-18,angNeedle);
-          svg += `<line x1="${cx}" y1="${cy}" x2="${tip.x.toFixed(1)}" y2="${tip.y.toFixed(1)}" stroke="#000" stroke-width="3"/>`;
-          svg += `<circle cx="${cx}" cy="${cy}" r="7" fill="#000"/>`;
+        // background arc
+        svg += '<path d="' + arc(cx,cy,r,start,end) + '" fill="none" stroke="#e9ecef" stroke-width="16" stroke-linecap="round"/>';
 
-          // Readouts
-          svg += `<text x="${cx}" y="${cy-34}" text-anchor="middle" font-size="28" font-weight="700" fill="#212529">${{Math.round(avg)}}%</text>`;
-          svg += `<text x="${cx}" y="${cy-14}" text-anchor="middle" font-size="12" fill="#6c757d">Average score</text>`;
-          svg += `<text x="${cx}" y="${cy+12}" text-anchor="middle" font-size="12" fill="#6c757d">Completion: ${{Math.round(completion)}}%</text>`;
+        // progress arc
+        var sweep = (end - start) * (pct/100);
+        svg += '<path d="' + arc(cx,cy,r,start,start+sweep) + '" fill="none" stroke="' + col + '" stroke-width="16" stroke-linecap="round"/>';
 
-          svg += `</svg>`;
-          document.getElementById(id).innerHTML = svg;
-        }}
-        drawDial('homeGauge', {overall_avg}, {completion_pct}, 520);
-      }})();
+        // tick marks (every 10%)
+        for (var t = 0; t <= 10; t++) {
+          var a = start + (end - start) * (t/10);
+          var p0 = polar(cx,cy,r+2,a);
+          var p1 = polar(cx,cy,r-10,a);
+          svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
+              + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
+              + '" stroke="#ced4da" stroke-width="2" />';
+        }
+
+        // needle
+        var na = start + (end - start) * (pct/100);
+        var pn = polar(cx,cy,r-6,na);
+        svg += '<line x1="' + cx.toFixed(1) + '" y1="' + cy.toFixed(1)
+            + '" x2="' + pn.x.toFixed(1) + '" y2="' + pn.y.toFixed(1)
+            + '" stroke="#343a40" stroke-width="3" />';
+        svg += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="5" fill="#343a40" />';
+
+        // label
+        svg += '<text x="' + cx.toFixed(1) + '" y="' + (cy-20).toFixed(1) + '" text-anchor="middle" font-size="20" font-weight="700" fill="#212529">' + pct.toFixed(1) + '%</text>';
+
+        svg += '</svg>';
+        el.innerHTML = svg;
+      })();
     </script>
     """
+    body = body_top + body_mid + body_mid2 + body_pct + body_bot
     return base_layout("Home", body)
 
 # --- Tutor ---
@@ -1125,6 +1134,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
