@@ -267,7 +267,7 @@ def home():
           const r= Math.round(w*0.40);
           const rInner = r-8; // thin completion ring
 
-          let svg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+          let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
 
           // Segments (green, yellow, orange, red) across 0–100
           const segs=[
@@ -1079,7 +1079,7 @@ def progress_page():
         function drawDial(id, avg, completion, size) {{
           const start=-120, sweep=240; const w=size, h=Math.round(size*0.66); const cx=w/2, cy=Math.round(h*0.95);
           const r=Math.round(w*0.40), rInner=r-8;
-          let svg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}">`;
+          let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
           const segs=[{{pct0:0,pct1:40,color:'#28a745'}},{{pct0:40,pct1:65,color:'#ffc107'}},{{pct0:65,pct1:85,color:'#fd7e14'}},{{pct0:85,pct1:100,color:'#dc3545'}}];
           svg += `<path d="${arc(cx,cy,r,start,start+sweep)}" fill="none" stroke="#eee" stroke-width="18" stroke-linecap="round"/>`;
           segs.forEach(s=>{{ const a0=start+sweep*(s.pct0/100), a1=start+sweep*(s.pct1/100); svg += `<path d="${arc(cx,cy,r,a0,a1)}" fill="none" stroke="${s.color}" stroke-width="18" stroke-linecap="butt"/>`; }});
@@ -1125,6 +1125,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
