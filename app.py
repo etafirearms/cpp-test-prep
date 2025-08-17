@@ -1,10 +1,9 @@
-# app.py — Stable MVP (no DB), with Tutor, Flashcards, Quiz/Mock (detailed review),
-# and Progress (with speedometer dial)
+# app.py — Stable MVP (no DB) with Tutor, Flashcards, Quiz/Mock (with review), Progress + Speedometer Gauge
 
 from flask import Flask, request, jsonify, session, redirect, url_for
 from flask import Response
 from datetime import datetime
-import os, json, random, textwrap, requests, time
+import os, json, random, textwrap, requests
 
 app = Flask(__name__)
 
@@ -85,7 +84,56 @@ DOMAINS = {
 }
 
 # --- Helpers ---
+def _session_average_score() -> float:
+    """Average score (%) from session quiz history."""
+    hist = session.get("quiz_history", [])
+    if not hist:
+        return 0.0
+    return round(sum(h["score"] for h in hist) / len(hist), 1)
+
 def base_layout(title: str, body_html: str) -> str:
+    # Simple speedometer (half-circle) styles + result card styles
+    css = """
+    <style>
+      .domain-chip {
+        display:inline-block; margin:4px 6px 4px 0; padding:8px 12px; border-radius:20px;
+        background:#e3f2fd; color:#1976d2; border:1px solid #bbdefb; cursor:pointer; user-select:none;
+      }
+      .domain-chip.active { background:#1976d2; color:#fff; border-color:#1976d2; }
+      .btn-enhanced { border-radius:8px; font-weight:600; }
+
+      /* Result cards */
+      .result-card { border-left: 4px solid; transition: all 0.2s ease; }
+      .result-card.correct {
+        border-left-color: #28a745;
+        background: linear-gradient(90deg, rgba(40,167,69,0.07) 0%, transparent 100%);
+      }
+      .result-card.incorrect {
+        border-left-color: #dc3545;
+        background: linear-gradient(90deg, rgba(220,53,69,0.07) 0%, transparent 100%);
+      }
+
+      /* Speedometer gauge */
+      .gauge-wrap { width: 200px; margin: 12px auto; position: relative; }
+      .gauge-arc {
+        width: 200px; height: 200px; border-radius: 50%;
+        background: conic-gradient(#dc3545 0deg 60deg, #ffc107 60deg 120deg, #28a745 120deg 180deg, transparent 180deg 360deg);
+        clip-path: inset(0 0 50% 0);
+        transform: rotate(-90deg);
+      }
+      .gauge-needle {
+        position: absolute; left: 50%; bottom: 0; transform-origin: bottom center;
+        width: 2px; height: 96px; background: #111; transform: rotate(0deg) translateX(-50%);
+      }
+      .gauge-center {
+        position: absolute; left: 50%; bottom: 0; transform: translate(-50%, 10px);
+        background: #fff; padding: 6px 10px; border-radius: 12px; border:1px solid #e9ecef; font-weight: 700;
+        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+      }
+      .small-muted { color:#6c757d; font-size:0.9rem; }
+    </style>
+    """
+
     nav = textwrap.dedent(f"""
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
       <div class="container">
@@ -119,38 +167,7 @@ def base_layout(title: str, body_html: str) -> str:
       <title>{title} - CPP Test Prep</title>
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
       <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-      <style>
-        .domain-chip {{
-          display:inline-block; margin:4px 6px 4px 0; padding:8px 12px; border-radius:20px;
-          background:#e3f2fd; color:#1976d2; border:1px solid #bbdefb; cursor:pointer; user-select:none;
-        }}
-        .domain-chip.active {{ background:#1976d2; color:#fff; border-color:#1976d2; }}
-        .btn-enhanced {{ border-radius:8px; font-weight:600; }}
-
-        /* Results styling */
-        .result-card {{ border-left: 4px solid #dee2e6; }}
-        .result-card.correct {{ border-left-color: #28a745; background: rgba(40,167,69,0.05); }}
-        .result-card.incorrect {{ border-left-color: #dc3545; background: rgba(220,53,69,0.05); }}
-        .answer.correct {{ color: #198754; font-weight: 600; }}
-        .answer.wrong {{ color: #dc3545; font-weight: 600; }}
-
-        /* Simple speedometer dial */
-        .dial-wrap {{
-          width: 220px; height: 120px; position: relative; margin: 0 auto;
-          background: conic-gradient(#dc3545 0 60deg, #ffc107 60deg 120deg, #28a745 120deg 180deg);
-          border-bottom-left-radius: 220px; border-bottom-right-radius: 220px;
-          overflow: hidden;
-        }}
-        .dial-center {{
-          position:absolute; left:50%; bottom:0; transform: translateX(-50%);
-          width: 12px; height: 12px; background:#212529; border-radius: 50%; z-index: 2;
-        }}
-        .needle {{
-          position:absolute; bottom:0; left:50%; transform-origin: bottom center; transform: translateX(-50%) rotate(-90deg);
-          width: 2px; height: 100px; background:#212529; z-index:1;
-        }}
-        .dial-label {{ text-align:center; margin-top: 8px; font-weight:600; }}
-      </style>
+      {css}
     </head><body>
       {nav}
       <div class="container mt-4">
@@ -211,28 +228,32 @@ def diag_openai():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# --- Home ---
-@app.get("/")
+# --- Home (with gauge) ---
 @app.get("/")
 def home():
-    hist = session.get("quiz_history", [])
-    avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
-    degree = -90 + int((avg/100.0) * 180)
-
+    avg = _session_average_score()
+    # Simple dial with needle set via inline style
+    gauge_html = f"""
+    <div class="gauge-wrap">
+      <div class="gauge-arc"></div>
+      <div class="gauge-needle" id="homeNeedle"></div>
+      <div class="gauge-center">{avg}%</div>
+    </div>
+    <script>
+      (function() {{
+        var avg = {avg};
+        var deg = -90 + (avg/100)*180; // -90deg (0%) to +90deg (100%)
+        var needle = document.getElementById('homeNeedle');
+        if (needle) needle.style.transform = 'rotate(' + deg + 'deg) translateX(-50%)';
+      }})();
+    </script>
+    """
     body = f"""
     <div class="row justify-content-center">
       <div class="col-md-8 text-center">
-        <h1 class="mb-3">CPP Test Prep</h1>
+        <h1 class="mb-2">CPP Test Prep</h1>
         <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams — ready to go.</p>
-
-        <div class="my-4">
-          <div class="dial-wrap">
-            <div class="needle" id="needle"></div>
-            <div class="dial-center"></div>
-          </div>
-          <div class="dial-label">Your Session Average: <strong><span id="avgPct">{avg}</span>%</strong></div>
-        </div>
-
+        <div class="my-3">{gauge_html}<div class="small-muted">Average score (this browser session)</div></div>
         <div class="d-flex gap-2 justify-content-center mt-3">
           <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
           <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
@@ -241,13 +262,6 @@ def home():
         </div>
       </div>
     </div>
-    <script>
-      const deg = {degree};
-      document.addEventListener('DOMContentLoaded', () => {{
-        const n = document.getElementById('needle');
-        if (n) n.style.transform = 'translateX(-50%) rotate(' + deg + 'deg)';
-      }});
-    </script>
     """
     return base_layout("Home", body)
 
@@ -363,7 +377,7 @@ def flashcards_page():
       function render() {{
         const c = CARDS[i] || {{front:'No cards', back:''}};
         const txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
-        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
+        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
       }}
       function next() {{ back=false; i=(i+1)%CARDS.length; render(); }}
       el.addEventListener('click', ()=>{{ back=!back; render(); }});
@@ -378,11 +392,10 @@ def flashcards_page():
     """
     return base_layout("Flashcards", body)
 
-# --- Quiz (with count selector + detailed review) ---
-@app.get("/quiz")
+# --- Quiz + Mock Exam (with selection + detailed review) ---
 @app.get("/quiz")
 def quiz_page():
-    # Read ?count= from the address (default 10). Allowed: 5,10,15,20
+    # Choose number of questions via ?count= (5,10,15,20)
     try:
         count = int(request.args.get("count", "10"))
     except ValueError:
@@ -395,18 +408,19 @@ def quiz_page():
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
       <div class="card border-0 shadow">
-        <div class="card-header bg-success text-white d-flex flex-wrap gap-2 justify-content-between align-items-center">
-          <div><h4 class="mb-0">📝 Practice Quiz</h4><small>{count} questions</small></div>
-          <div class="d-flex align-items-center gap-2">
-            <label class="me-2 fw-semibold">Number of questions:</label>
-            <div class="btn-group" role="group">
-              <a class="btn btn-light btn-sm {'active' if count==5 else ''}" href="/quiz?count=5">5</a>
-              <a class="btn btn-light btn-sm {'active' if count==10 else ''}" href="/quiz?count=10">10</a>
-              <a class="btn btn-light btn-sm {'active' if count==15 else ''}" href="/quiz?count=15">15</a>
-              <a class="btn btn-light btn-sm {'active' if count==20 else ''}" href="/quiz?count=20">20</a>
+        <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+          <div>
+            <h4 class="mb-0">📝 Practice Quiz</h4>
+            <small>Choose how many questions:</small>
+            <div class="mt-2">
+              <a class="btn btn-light btn-sm me-1" href="/quiz?count=5">5</a>
+              <a class="btn btn-light btn-sm me-1" href="/quiz?count=10">10</a>
+              <a class="btn btn-light btn-sm me-1" href="/quiz?count=15">15</a>
+              <a class="btn btn-light btn-sm" href="/quiz?count=20">20</a>
+              <span class="badge bg-dark ms-2">Selected: {count}</span>
             </div>
-            <button id="submitTop" class="btn btn-warning btn-sm btn-enhanced ms-2">Submit</button>
           </div>
+          <button id="submitTop" class="btn btn-light btn-sm btn-enhanced">Submit</button>
         </div>
         <div class="card-body" id="quiz"></div>
         <div class="card-footer text-end">
@@ -438,55 +452,12 @@ def quiz_page():
           cont.appendChild(card);
         }});
       }}
-
-      function renderDetailedResults(data) {{
-        let html = '<div class="card border-0 shadow"><div class="card-body text-center">';
-        html += '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>';
-        html += '<div class="text-muted mb-3">Correct: '+data.correct+' / '+data.total+'</div>';
-        if (Array.isArray(data.performance_insights)) {{
-          html += '<div class="alert alert-info border-0 text-start"><strong>📈 Insights</strong><ul class="mb-0">';
-          data.performance_insights.forEach(s => html += '<li>'+s+'</li>');
-          html += '</ul></div>';
-        }}
-        html += '</div></div>';
-
-        if (Array.isArray(data.detailed_results)) {{
-          html += '<div class="mt-3"><h5>📝 Question Review</h5>';
-          data.detailed_results.forEach(r => {{
-            const cls = r.is_correct ? 'correct' : 'incorrect';
-            const icon = r.is_correct ? '✅' : '❌';
-            html += '<div class="card mb-2 result-card '+cls+'"><div class="card-body">';
-            html += '<div class="fw-semibold mb-2">'+icon+' Question '+r.index+'</div>';
-            html += '<div class="mb-2">'+(r.question||'')+'</div>';
-
-            if (r.is_correct) {{
-              html += '<div class="answer correct mb-2">✅ Correct: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-            }} else {{
-              html += '<div class="answer wrong mb-1">❌ Your answer: '+(r.user_letter||'—')+(r.user_text?') '+r.user_text:'')+'</div>';
-              html += '<div class="answer correct mb-2">✅ Correct answer: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-            }}
-            if (r.explanation) {{
-              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> '+r.explanation+'</div>';
-            }}
-            html += '</div></div>';
-          }});
-          html += '</div>';
-        }}
-        return html;
-      }}
-
       async function submitQuiz() {{
         const answers = {{}};
-        const unanswered = [];
         (QUIZ.questions||[]).forEach((qq, idx) => {{
           const sel = document.querySelector('input[name="q'+idx+'"]:checked');
           answers[String(idx)] = sel ? sel.value : null;
-          if (!sel) unanswered.push(idx+1);
         }});
-        if (unanswered.length) {{
-          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
-          return;
-        }}
         const res = await fetch('/api/submit-quiz', {{
           method:'POST', headers:{{'Content-Type':'application/json'}},
           body: JSON.stringify({{ quiz_type:'practice', domain:'general', questions: QUIZ.questions, answers }})
@@ -494,7 +465,46 @@ def quiz_page():
         const data = await res.json();
         const out = document.getElementById('results');
         if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-        out.innerHTML = renderDetailedResults(data);
+
+        // Summary
+        let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
+                 + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
+                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '') 
+                 + '</div></div>';
+
+        // Insights (bullets)
+        if (Array.isArray(data.performance_insights)) {{
+          html += '<div class="alert alert-info border-0 mt-3"><strong>📈 Performance:</strong><ul class="mb-0">';
+          data.performance_insights.forEach(i => {{ html += '<li>'+i+'</li>'; }});
+          html += '</ul></div>';
+        }}
+
+        // Detailed review
+        if (Array.isArray(data.detailed_results)) {{
+          html += '<div class="mt-4"><h5>📝 Question Review</h5>';
+          data.detailed_results.forEach(r => {{
+            const cls = r.is_correct ? 'correct' : 'incorrect';
+            html += '<div class="card mb-3 result-card '+cls+'"><div class="card-body">'
+                 +  '<div class="fw-bold mb-2">' + (r.is_correct ? '✅ Correct' : '❌ Incorrect') + ' — Question ' + r.index + '</div>'
+                 +  '<div class="mb-2">'+ (r.question || '') + '</div>';
+
+            if (!r.is_correct) {{
+              html += '<div class="alert alert-danger border-0 py-2 mb-2"><strong>Your answer:</strong> '
+                   +  (r.user_letter ? (r.user_letter + ') ') : '') + (r.user_text || '—') + '</div>';
+            }}
+            html += '<div class="alert alert-success border-0 py-2"><strong>Correct answer:</strong> '
+                 +  (r.correct_letter ? (r.correct_letter + ') ') : '') + (r.correct_text || '') + '</div>';
+
+            if (r.explanation) {{
+              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> ' + r.explanation + '</div>';
+            }}
+            html += '</div></div>';
+          }});
+          html += '</div>';
+        }}
+
+        out.innerHTML = html;
         window.scrollTo({{top: 0, behavior: 'smooth'}});
       }}
       document.getElementById('submitTop').addEventListener('click', submitQuiz);
@@ -504,11 +514,9 @@ def quiz_page():
     """
     return base_layout("Quiz", body)
 
-# --- Mock Exam (landing + detailed review) ---
-@app.get("/mock-exam")
 @app.get("/mock-exam")
 def mock_exam_page():
-    # Read ?count= from the address (default 25). Allowed: 25,50,75,100
+    # Choose number of questions via ?count= (25,50,75,100)
     try:
         count = int(request.args.get("count", "25"))
     except ValueError:
@@ -521,134 +529,21 @@ def mock_exam_page():
     body = f"""
     <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
-        <div class="card-header bg-warning text-dark d-flex flex-wrap gap-2 justify-content-between align-items-center">
-          <div>
-            <h4 class="mb-0">🏁 Mock Exam</h4>
-            <small>{count} questions — answer all before submitting</small>
-          </div>
-          <div class="d-flex align-items-center gap-2">
-            <label class="me-2 fw-semibold">Exam size:</label>
-            <div class="btn-group" role="group">
-              <a class="btn btn-light btn-sm {'active' if count==25 else ''}" href="/mock-exam?count=25">25</a>
-              <a class="btn btn-light btn-sm {'active' if count==50 else ''}" href="/mock-exam?count=50">50</a>
-              <a class="btn btn-light btn-sm {'active' if count==75 else ''}" href="/mock-exam?count=75">75</a>
-              <a class="btn btn-light btn-sm {'active' if count==100 else ''}" href="/mock-exam?count=100">100</a>
-            </div>
-            <button id="submit" class="btn btn-success btn-sm btn-enhanced ms-2">Submit Exam</button>
-          </div>
-        </div>
-        <div class="card-body" id="quiz"></div>
-      </div>
-      <div id="results" class="mt-4"></div>
-    </div></div>
-    <script>
-      const QUIZ = {q_json};
-      const cont = document.getElementById('quiz');
-      function render() {{
-        cont.innerHTML = '';
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const card = document.createElement('div');
-          card.className = 'mb-3 p-3 border rounded';
-          card.id = 'q'+idx;
-          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
-                         + '<div class="mb-2">'+ qq.question + '</div>';
-          const opts = qq.options || {{}};
-          for (const k in opts) {{
-            const id = 'q' + idx + '_' + k;
-            const row = document.createElement('div');
-            row.className = 'form-check mb-1';
-            row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
-                          + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
-            card.appendChild(row);
-          }}
-          cont.appendChild(card);
-        }});
-      }}
-
-      function renderDetailedResults(data) {{
-        let html = '<div class="card border-0 shadow"><div class="card-body text-center">';
-        const ready = data.score>=80 ? '✅ Exam Ready' : (data.score>=70 ? '📚 Needs More Study' : '⚠️ Keep Practicing');
-        html += '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">'+data.score.toFixed(1)+'% — '+ready+'</h3>';
-        html += '<div class="text-muted mb-3">Correct: '+data.correct+' / '+data.total+'</div>';
-        if (Array.isArray(data.performance_insights)) {{
-          html += '<div class="alert alert-info border-0 text-start"><strong>📈 Insights</strong><ul class="mb-0">';
-          data.performance_insights.forEach(s => html += '<li>'+s+'</li>');
-          html += '</ul></div>';
-        }}
-        html += '</div></div>';
-
-        if (Array.isArray(data.detailed_results)) {{
-          html += '<div class="mt-3"><h5>📝 Complete Review</h5>';
-          data.detailed_results.forEach(r => {{
-            const cls = r.is_correct ? 'correct' : 'incorrect';
-            const icon = r.is_correct ? '✅' : '❌';
-            html += '<div class="card mb-2 result-card '+cls+'"><div class="card-body">';
-            html += '<div class="fw-semibold mb-2">'+icon+' Question '+r.index+'</div>';
-            html += '<div class="mb-2">'+(r.question||'')+'</div>';
-
-            if (r.is_correct) {{
-              html += '<div class="answer correct mb-2">✅ Correct: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-            }} else {{
-              html += '<div class="answer wrong mb-1">❌ Your answer: '+(r.user_letter||'—')+(r.user_text?') '+r.user_text:'')+'</div>';
-              html += '<div class="answer correct mb-2">✅ Correct answer: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-            }}
-            if (r.explanation) {{
-              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> '+r.explanation+'</div>';
-            }}
-            html += '</div></div>';
-          }});
-          html += '</div>';
-        }}
-        return html;
-      }}
-
-      async function submitQuiz() {{
-        const answers = {{}};
-        const unanswered = [];
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
-          answers[String(idx)] = sel ? sel.value : null;
-          if (!sel) unanswered.push(idx+1);
-        }});
-        if (unanswered.length) {{
-          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
-          return;
-        }}
-        const res = await fetch('/api/submit-quiz', {{
-          method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{ quiz_type:'mock-exam', domain:'general', questions: QUIZ.questions, answers }})
-        }});
-        const data = await res.json();
-        const out = document.getElementById('results');
-        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-        out.innerHTML = renderDetailedResults(data);
-        window.scrollTo({{top: 0, behavior: 'smooth'}});
-      }}
-      document.getElementById('submit').addEventListener('click', submitQuiz);
-      render();
-    </script>
-    """
-    return base_layout("Mock Exam", body)
-
-    # Generate exam
-    q = build_quiz(count)
-    q_json = json.dumps(q)
-    session["quiz_started_at"] = time.time()
-
-    body = f"""
-    <div class="row"><div class="col-md-11 mx-auto">
-      <div class="card border-0 shadow">
         <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
           <div>
             <h4 class="mb-0">🏁 Mock Exam</h4>
-            <small>{count} questions — answer all before submitting</small>
+            <small>Choose exam length (answer all before submitting):</small>
+            <div class="mt-2">
+              <a class="btn btn-light btn-sm me-1" href="/mock-exam?count=25">25</a>
+              <a class="btn btn-light btn-sm me-1" href="/mock-exam?count=50">50</a>
+              <a class="btn btn-light btn-sm me-1" href="/mock-exam?count=75">75</a>
+              <a class="btn btn-light btn-sm" href="/mock-exam?count=100">100</a>
+              <span class="badge bg-dark ms-2">Selected: {count}</span>
+            </div>
           </div>
           <button id="submit" class="btn btn-success btn-sm btn-enhanced">Submit Exam</button>
         </div>
         <div class="card-body" id="quiz"></div>
-        <div class="card-footer text-end">
-          <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
-        </div>
       </div>
       <div id="results" class="mt-4"></div>
     </div></div>
@@ -675,27 +570,15 @@ def mock_exam_page():
           cont.appendChild(card);
         }});
       }}
-      function ensureAllAnswered() {{
-        const total = (QUIZ.questions||[]).length; const miss=[];
-        for (let i=0;i<total;i++) {{
-          const sel = document.querySelector('input[name="q'+i+'"]:checked');
-          if (!sel) miss.push(i+1);
-        }}
-        if (miss.length) {{
-          alert('Please answer all questions. Missing: Q' + miss.join(', Q'));
-          const first = document.getElementById('q'+(miss[0]-1));
-          if (first) first.scrollIntoView({{behavior:'smooth', block:'center'}});
-          return false;
-        }}
-        return true;
-      }}
       async function submitQuiz() {{
-        if (!ensureAllAnswered()) return;
         const answers = {{}};
+        const missing = [];
         (QUIZ.questions||[]).forEach((qq, idx) => {{
           const sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          if (!sel) missing.push(idx+1);
           answers[String(idx)] = sel ? sel.value : null;
         }});
+        if (missing.length) {{ alert('Please answer all questions. Missing: Q' + missing.join(', Q')); return; }}
         const res = await fetch('/api/submit-quiz', {{
           method:'POST', headers:{{'Content-Type':'application/json'}},
           body: JSON.stringify({{ quiz_type:'mock-exam', domain:'general', questions: QUIZ.questions, answers }})
@@ -704,48 +587,53 @@ def mock_exam_page():
         const out = document.getElementById('results');
         if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
 
+        // Summary
         let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
                  + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
                  + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
-                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '')
+                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '') 
                  + '</div></div>';
 
+        // Insights
         if (Array.isArray(data.performance_insights)) {{
-          html += '<div class="alert alert-info border-0 mt-3"><h6 class="mb-2">📈 Performance Summary</h6><ul class="mb-0">';
-          data.performance_insights.forEach(t=> html += '<li>'+t+'</li>');
+          html += '<div class="alert alert-info border-0 mt-3"><strong>📈 Performance:</strong><ul class="mb-0">';
+          data.performance_insights.forEach(i => {{ html += '<li>'+i+'</li>'; }});
           html += '</ul></div>';
         }}
 
+        // Detailed review
         if (Array.isArray(data.detailed_results)) {{
-          html += '<div class="mt-4"><h5 class="mb-3">Complete Review</h5>';
-          data.detailed_results.forEach((r)=>{{
-            const good = r.is_correct;
-            const icon = good ? '✅' : '❌';
-            html += '<div class="card mb-3 result-card ' + (good?'correct':'incorrect') + '"><div class="card-body">';
-            html += '<h6 class="card-title">'+icon+' Question '+r.index+'</h6>';
-            html += '<p class="card-text">'+(r.question||'')+'</p>';
-            if (good) {{
-              html += '<div class="answer-good"><strong>✅ Correct!</strong> '+r.correct_letter+') '+(r.correct_text||'')+'</div>';
-            }} else {{
-              html += '<div class="answer-bad"><strong>❌ Your answer:</strong> '+(r.user_letter? (r.user_letter + ') ' + (r.user_text||'')) : '— (No selection)')+'</div>';
-              html += '<div class="answer-correct mt-2"><strong>✅ Correct answer:</strong> '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+          html += '<div class="mt-4"><h5>📝 Question Review</h5>';
+          data.detailed_results.forEach(r => {{
+            const cls = r.is_correct ? 'correct' : 'incorrect';
+            html += '<div class="card mb-3 result-card '+cls+'"><div class="card-body">'
+                 +  '<div class="fw-bold mb-2">' + (r.is_correct ? '✅ Correct' : '❌ Incorrect') + ' — Question ' + r.index + '</div>'
+                 +  '<div class="mb-2">'+ (r.question || '') + '</div>';
+
+            if (!r.is_correct) {{
+              html += '<div class="alert alert-danger border-0 py-2 mb-2"><strong>Your answer:</strong> '
+                   +  (r.user_letter ? (r.user_letter + ') ') : '') + (r.user_text || '—') + '</div>';
             }}
-            if (r.explanation) {{ html += '<div class="explain mt-2"><strong>💡 Why:</strong> '+r.explanation+'</div>'; }}
+            html += '<div class="alert alert-success border-0 py-2"><strong>Correct answer:</strong> '
+                 +  (r.correct_letter ? (r.correct_letter + ') ') : '') + (r.correct_text || '') + '</div>';
+
+            if (r.explanation) {{
+              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> ' + r.explanation + '</div>';
+            }}
             html += '</div></div>';
           }});
           html += '</div>';
         }}
+
         out.innerHTML = html;
         window.scrollTo({{top: 0, behavior: 'smooth'}});
       }}
       document.getElementById('submit').addEventListener('click', submitQuiz);
-      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
       render();
     </script>
     """
     return base_layout("Mock Exam", body)
 
-# --- Submit Quiz API (server computes score + optional time) ---
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
     data = request.get_json() or {}
@@ -775,25 +663,14 @@ def submit_quiz_api():
         })
     pct = (correct / total * 100) if total else 0.0
 
-    # time taken (minutes) from session if available
-    time_taken = None
-    try:
-        started = session.get("quiz_started_at")
-        if started:
-            time_taken = int((time.time() - float(started)) // 60)
-            session.pop("quiz_started_at", None)
-    except Exception:
-        time_taken = None
-
     # record in session for Progress
     hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
         "date": datetime.utcnow().isoformat(),
-        "score": pct,
+        "score": round(pct, 1),
         "total": total,
         "correct": correct,
-        "time_taken": time_taken,
     })
     session["quiz_history"] = hist[-50:]  # keep last 50
 
@@ -803,74 +680,66 @@ def submit_quiz_api():
     elif pct >= 70: insights.append("📚 Fair — focus on weak concepts.")
     else: insights.append("⚠️ Needs improvement — study before a real exam.")
 
-    # pacing tip
-    if time_taken is not None and total > 0:
-        avg = time_taken / total
-        if avg < 1: insights.append("⚡ Great pace — under 1 minute per question on average.")
-        elif avg > 3: insights.append("🐌 Consider practicing to improve speed (over 3 minutes per question).")
-
     return jsonify({
         "success": True,
         "score": round(pct, 1),
         "correct": correct,
         "total": total,
-        "time_taken": time_taken,
         "performance_insights": insights,
         "detailed_results": detailed
     })
 
-# --- Progress (session-based) + speedometer dial ---
-@app.get("/progress")
+# --- Progress (session-based for now) + gauge ---
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
-    avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
+    avg = _session_average_score()
     rows = "".join([
         f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
         for h in reversed(hist)
     ]) or '<tr><td colspan="4" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
 
-    # Convert avg (0–100%) to needle degrees over a 180° arc: -90° (0%) to +90° (100%)
-    degree = -90 + int((avg/100.0) * 180)
+    gauge_html = f"""
+    <div class="gauge-wrap">
+      <div class="gauge-arc"></div>
+      <div class="gauge-needle" id="progNeedle"></div>
+      <div class="gauge-center">{avg}%</div>
+    </div>
+    <script>
+      (function() {{
+        var avg = {avg};
+        var deg = -90 + (avg/100)*180;
+        var needle = document.getElementById('progNeedle');
+        if (needle) needle.style.transform = 'rotate(' + deg + 'deg) translateX(-50%)';
+      }})();
+    </script>
+    """
 
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
-      <div class="card border-0 shadow mb-3">
-        <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
+      <div class="card border-0 shadow">
+        <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+          <h4 class="mb-0">📊 Progress</h4>
+          <div class="text-end">
+            {gauge_html}
+            <div class="small-muted">Average score (this browser session)</div>
+          </div>
+        </div>
         <div class="card-body">
-          <div class="row align-items-center">
-            <div class="col-md-5 text-center">
-              <div class="dial-wrap">
-                <div class="needle" id="needle"></div>
-                <div class="dial-center"></div>
-              </div>
-              <div class="dial-label">Average Score: <span id="avgPct">{avg}</span>%</div>
-            </div>
-            <div class="col-md-7">
-              <div class="table-responsive">
-                <table class="table table-sm align-middle mb-0">
-                  <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
-                  <tbody>{rows}</tbody>
-                </table>
-              </div>
-              <div class="text-end mt-2">
-                <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
-                  <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
-                </form>
-              </div>
-            </div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
+              <tbody>{rows}</tbody>
+            </table>
+          </div>
+          <div class="text-end">
+            <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+              <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
+            </form>
           </div>
         </div>
       </div>
     </div></div>
-    <script>
-      // rotate needle based on avg
-      const deg = {degree};
-      document.addEventListener('DOMContentLoaded', () => {{
-        const n = document.getElementById('needle');
-        if (n) n.style.transform = 'translateX(-50%) rotate(' + deg + 'deg)';
-      }});
-    </script>
     """
     return base_layout("Progress", body)
 
@@ -896,8 +765,3 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
-
-
-
-
-
