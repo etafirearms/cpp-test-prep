@@ -359,8 +359,9 @@ def flashcards_page():
 
 # --- Quiz (with count selector + detailed review) ---
 @app.get("/quiz")
+@app.get("/quiz")
 def quiz_page():
-    # Allow user to pick 5/10/15/20 via ?count=
+    # Read ?count= from the address (default 10). Allowed: 5,10,15,20
     try:
         count = int(request.args.get("count", "10"))
     except ValueError:
@@ -370,27 +371,20 @@ def quiz_page():
 
     q = build_quiz(count)
     q_json = json.dumps(q)
-
-    # start time for simple "time taken" (minutes) on server
-    session["quiz_started_at"] = time.time()
-
-    # Build count buttons
-    def btn(n):
-        active = " active" if n == count else ""
-        return f'<a class="btn btn-outline-light btn-sm{active}" href="/quiz?count={n}">{n}</a>'
-    btns = btn(5) + btn(10) + btn(15) + btn(20)
-
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
       <div class="card border-0 shadow">
-        <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-          <div>
-            <h4 class="mb-0">📝 Practice Quiz</h4>
-            <small>Choose how many questions, answer all, then submit to see detailed feedback.</small>
-          </div>
+        <div class="card-header bg-success text-white d-flex flex-wrap gap-2 justify-content-between align-items-center">
+          <div><h4 class="mb-0">📝 Practice Quiz</h4><small>{count} questions</small></div>
           <div class="d-flex align-items-center gap-2">
-            <div class="btn-group" role="group">{btns}</div>
-            <button id="submitTop" class="btn btn-light btn-sm btn-enhanced">Submit</button>
+            <label class="me-2 fw-semibold">Number of questions:</label>
+            <div class="btn-group" role="group">
+              <a class="btn btn-light btn-sm {'active' if count==5 else ''}" href="/quiz?count=5">5</a>
+              <a class="btn btn-light btn-sm {'active' if count==10 else ''}" href="/quiz?count=10">10</a>
+              <a class="btn btn-light btn-sm {'active' if count==15 else ''}" href="/quiz?count=15">15</a>
+              <a class="btn btn-light btn-sm {'active' if count==20 else ''}" href="/quiz?count=20">20</a>
+            </div>
+            <button id="submitTop" class="btn btn-warning btn-sm btn-enhanced ms-2">Submit</button>
           </div>
         </div>
         <div class="card-body" id="quiz"></div>
@@ -423,27 +417,55 @@ def quiz_page():
           cont.appendChild(card);
         }});
       }}
-      function ensureAllAnswered() {{
-        const total = (QUIZ.questions||[]).length; const miss=[];
-        for (let i=0;i<total;i++) {{
-          const sel = document.querySelector('input[name="q'+i+'"]:checked');
-          if (!sel) miss.push(i+1);
+
+      function renderDetailedResults(data) {{
+        let html = '<div class="card border-0 shadow"><div class="card-body text-center">';
+        html += '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>';
+        html += '<div class="text-muted mb-3">Correct: '+data.correct+' / '+data.total+'</div>';
+        if (Array.isArray(data.performance_insights)) {{
+          html += '<div class="alert alert-info border-0 text-start"><strong>📈 Insights</strong><ul class="mb-0">';
+          data.performance_insights.forEach(s => html += '<li>'+s+'</li>');
+          html += '</ul></div>';
         }}
-        if (miss.length) {{
-          alert('Please answer all questions. Missing: Q' + miss.join(', Q'));
-          const first = document.getElementById('q'+(miss[0]-1));
-          if (first) first.scrollIntoView({{behavior:'smooth', block:'center'}});
-          return false;
+        html += '</div></div>';
+
+        if (Array.isArray(data.detailed_results)) {{
+          html += '<div class="mt-3"><h5>📝 Question Review</h5>';
+          data.detailed_results.forEach(r => {{
+            const cls = r.is_correct ? 'correct' : 'incorrect';
+            const icon = r.is_correct ? '✅' : '❌';
+            html += '<div class="card mb-2 result-card '+cls+'"><div class="card-body">';
+            html += '<div class="fw-semibold mb-2">'+icon+' Question '+r.index+'</div>';
+            html += '<div class="mb-2">'+(r.question||'')+'</div>';
+
+            if (r.is_correct) {{
+              html += '<div class="answer correct mb-2">✅ Correct: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+            }} else {{
+              html += '<div class="answer wrong mb-1">❌ Your answer: '+(r.user_letter||'—')+(r.user_text?') '+r.user_text:'')+'</div>';
+              html += '<div class="answer correct mb-2">✅ Correct answer: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+            }}
+            if (r.explanation) {{
+              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> '+r.explanation+'</div>';
+            }}
+            html += '</div></div>';
+          }});
+          html += '</div>';
         }}
-        return true;
+        return html;
       }}
+
       async function submitQuiz() {{
-        if (!ensureAllAnswered()) return;
         const answers = {{}};
+        const unanswered = [];
         (QUIZ.questions||[]).forEach((qq, idx) => {{
           const sel = document.querySelector('input[name="q'+idx+'"]:checked');
           answers[String(idx)] = sel ? sel.value : null;
+          if (!sel) unanswered.push(idx+1);
         }});
+        if (unanswered.length) {{
+          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
+          return;
+        }}
         const res = await fetch('/api/submit-quiz', {{
           method:'POST', headers:{{'Content-Type':'application/json'}},
           body: JSON.stringify({{ quiz_type:'practice', domain:'general', questions: QUIZ.questions, answers }})
@@ -451,40 +473,7 @@ def quiz_page():
         const data = await res.json();
         const out = document.getElementById('results');
         if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-
-        // Build detailed review (green/red + correct answer + explanation)
-        let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
-                 + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
-                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '')
-                 + '</div></div>';
-
-        if (Array.isArray(data.performance_insights)) {{
-          html += '<div class="alert alert-info border-0 mt-3"><h6 class="mb-2">📈 Performance Summary</h6><ul class="mb-0">';
-          data.performance_insights.forEach(t=> html += '<li>'+t+'</li>');
-          html += '</ul></div>';
-        }}
-
-        if (Array.isArray(data.detailed_results)) {{
-          html += '<div class="mt-4"><h5 class="mb-3">Question-by-Question Review</h5>';
-          data.detailed_results.forEach((r)=>{{
-            const good = r.is_correct;
-            const icon = good ? '✅' : '❌';
-            html += '<div class="card mb-3 result-card ' + (good?'correct':'incorrect') + '"><div class="card-body">';
-            html += '<h6 class="card-title">'+icon+' Question '+r.index+'</h6>';
-            html += '<p class="card-text">'+(r.question||'')+'</p>';
-            if (good) {{
-              html += '<div class="answer-good"><strong>✅ Correct!</strong> '+r.correct_letter+') '+(r.correct_text||'')+'</div>';
-            }} else {{
-              html += '<div class="answer-bad"><strong>❌ Your answer:</strong> '+(r.user_letter? (r.user_letter + ') ' + (r.user_text||'')) : '— (No selection)')+'</div>';
-              html += '<div class="answer-correct mt-2"><strong>✅ Correct answer:</strong> '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-            }}
-            if (r.explanation) {{ html += '<div class="explain mt-2"><strong>💡 Why:</strong> '+r.explanation+'</div>'; }}
-            html += '</div></div>';
-          }});
-          html += '</div>';
-        }}
-        out.innerHTML = html;
+        out.innerHTML = renderDetailedResults(data);
         window.scrollTo({{top: 0, behavior: 'smooth'}});
       }}
       document.getElementById('submitTop').addEventListener('click', submitQuiz);
@@ -794,4 +783,5 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
