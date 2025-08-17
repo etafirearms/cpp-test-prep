@@ -1074,7 +1074,7 @@ def progress_page():
         function arc(cx, cy, r, a0, a1) {{
           const p0=polar(cx,cy,r,a0), p1=polar(cx,cy,r,a1);
           const large=(Math.abs(a1-a0)>180)?1:0, sweep=(a1>a0)?1:0;
-          return `M ${p0.x.toFixed(1)} ${p0.y.toFixed(1)} A ${r} ${r} 0 ${large} ${sweep} ${p1.x.toFixed(1)} ${p1.y.toFixed(1)}`;
+          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1) + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' ' + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
         }}
         function drawDial(id, avg, completion, size) {{
           const start=-120, sweep=240; const w=size, h=Math.round(size*0.66); const cx=w/2, cy=Math.round(h*0.95);
@@ -1125,3 +1125,4 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
