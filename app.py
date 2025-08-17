@@ -1,5 +1,4 @@
-# app.py — Stable MVP (no DB), with Tutor, Flashcards, Quiz/Mock, Progress
-# Upgraded speedometer dial, domain picks, keyboard nav, detailed reviews.
+# app.py — Stable MVP + Domains + Clean Tutor + Safe Gauge (no template backticks)
 
 from flask import Flask, request, jsonify, session, redirect, url_for
 from flask import Response
@@ -74,6 +73,7 @@ BASE_QUESTIONS = [
     },
 ]
 
+# Human-friendly domain names shown to the user
 DOMAINS = {
     "security-principles": "Security Principles & Practices",
     "business-principles": "Business Principles & Practices",
@@ -83,16 +83,7 @@ DOMAINS = {
     "information-security": "Information Security",
     "crisis-management": "Crisis Management",
 }
-
-# Study tips for the home page
-STUDY_TIPS = [
-    "Short sessions every day beat one long cram. 20–30 minutes counts.",
-    "Practice like the real test: timed, quiet, and phone away.",
-    "After each quiz, read the explanations—even for correct answers.",
-    "Plan your study week: 3 quiz days + 1 review day works well.",
-    "Teach someone a concept you learned—teaching locks it in.",
-    "If you miss a question twice, make a flashcard for it.",
-]
+DOMAIN_KEYS = list(DOMAINS.keys())
 
 # --- Helpers ---
 def base_layout(title: str, body_html: str) -> str:
@@ -121,6 +112,72 @@ def base_layout(title: str, body_html: str) -> str:
       </div>
     </div>
     """
+    # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
+    shared_js = """
+    <script>
+      // ---- SVG Gauge Drawer (no backticks) ----
+      function polar(cx, cy, r, aDeg) {
+        var a = (aDeg - 90) * Math.PI/180;
+        return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
+      }
+      function arcPath(cx, cy, r, a0, a1) {
+        var p0 = polar(cx, cy, r, a0);
+        var p1 = polar(cx, cy, r, a1);
+        var large = (a1 - a0) > 180 ? 1 : 0;
+        var sweep = 1;
+        return "M " + p0.x.toFixed(1) + " " + p0.y.toFixed(1)
+             + " A " + r.toFixed(1) + " " + r.toFixed(1)
+             + " 0 " + large + " " + sweep
+             + " " + p1.x.toFixed(1) + " " + p1.y.toFixed(1);
+      }
+      function gaugeSVG(percent) {
+        // percent: 0..100
+        var w = 260, h = 160, cx = w/2, cy = 130, r = 100;
+        var minA = -100, maxA = 100; // sweep 200 deg
+        var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
+        // Bands: Red 0–40, Orange 41–79, Green 80–100
+        // map percent to angle
+        function map(p) { return minA + (maxA - minA) * (p/100); }
+        function band(p0, p1, color) {
+          svg += '<path d="' + arcPath(cx,cy,r,map(p0),map(p1)) + '" fill="none" stroke="' + color + '" stroke-width="18" stroke-linecap="round"/>';
+        }
+        band(0,40,"#dc3545");   // red
+        band(40.1,79,"#fd7e14"); // orange (start slightly after 40 to avoid join artifact)
+        band(79,100,"#198754");  // green
+
+        // Ticks every 20%
+        for (var t=0;t<=100;t+=20) {
+          var a = map(t), p0 = polar(cx,cy,r-6,a), p1 = polar(cx,cy,r+6,a);
+          svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
+              +  '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
+              +  '" stroke="#999" stroke-width="2"/>';
+          var label = t + "%";
+          var lp = polar(cx, cy, r+18, a);
+          svg += '<text x="' + lp.x.toFixed(1) + '" y="' + lp.y.toFixed(1)
+              +  '" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="#666">' + label + '</text>';
+        }
+        // Needle
+        var pa = map(Math.max(0, Math.min(100, percent)));
+        var pN = polar(cx, cy, r, pa);
+        svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
+        svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + pN.x.toFixed(1) + '" y2="' + pN.y.toFixed(1)
+            +  '" stroke="#333" stroke-width="3"/>';
+        // Text
+        var color = (percent <= 40) ? "#dc3545" : (percent < 80 ? "#fd7e14" : "#198754");
+        svg += '<text x="' + cx + '" y="25" text-anchor="middle" font-size="16" fill="#444">Your Progress</text>';
+        svg += '<text x="' + cx + '" y="50" text-anchor="middle" font-size="22" font-weight="700" fill="' + color + '">' + percent.toFixed(1) + '%</text>';
+        svg += '</svg>';
+        return svg;
+      }
+
+      // Insert a gauge into a container by id
+      function mountGauge(divId, pct) {
+        var el = document.getElementById(divId);
+        if (!el) return;
+        el.innerHTML = gaugeSVG(pct || 0);
+      }
+    </script>
+    """
     return textwrap.dedent(f"""\
     <!DOCTYPE html>
     <html lang="en"><head>
@@ -136,12 +193,12 @@ def base_layout(title: str, body_html: str) -> str:
         }}
         .domain-chip.active {{ background:#1976d2; color:#fff; border-color:#1976d2; }}
         .btn-enhanced {{ border-radius:8px; font-weight:600; }}
-        .sticky-head {{ position: sticky; top: 0; background: #fff; z-index: 5; padding: 8px 0; border-bottom: 1px solid #eee; }}
-        .missing {{ border-color:#dc3545 !important; background:#fff5f5; }}
-        .result-card {{ border-left:4px solid; }}
-        .result-card.correct {{ border-left-color:#28a745; background:linear-gradient(90deg, rgba(40,167,69,0.05), transparent); }}
-        .result-card.incorrect {{ border-left-color:#dc3545; background:linear-gradient(90deg, rgba(220,53,69,0.05), transparent); }}
+        .chat-bubble {{ max-width: 85%; }}
+        .chat-bubble p {{ margin-bottom: .5rem; }}
+        .chat-bubble ul {{ margin: .5rem 0 .5rem 1.25rem; }}
+        .chat-bubble h1,.chat-bubble h2,.chat-bubble h3 {{ margin-top: .5rem; font-size:1.05rem; }}
       </style>
+      {shared_js}
     </head><body>
       {nav}
       <div class="container mt-4">
@@ -151,21 +208,25 @@ def base_layout(title: str, body_html: str) -> str:
     </body></html>
     """)
 
-def filter_pool_by_domain(pool, domain_key):
-    if not domain_key or domain_key == "all":
-        return pool[:]
-    return [q for q in pool if q.get("domain") == domain_key] or pool[:]
+def filter_questions(domain_key: str | None) -> list[dict]:
+    """Return all questions if domain_key is None/'random'; otherwise only that domain."""
+    if not domain_key or domain_key == "random":
+        return BASE_QUESTIONS[:]
+    return [q for q in BASE_QUESTIONS if q.get("domain") == domain_key]
 
-def expand_questions(pool, num):
+def build_quiz(num: int, domain_key: str | None) -> dict:
+    pool = filter_questions(domain_key)
     out = []
-    if not pool: return out
+    if not pool:
+        pool = BASE_QUESTIONS[:]
     while len(out) < num:
-        batch = pool[:]
-        random.shuffle(batch)
-        for q in batch:
-            if len(out) >= num: break
+        random.shuffle(pool)
+        for q in pool:
+            if len(out) >= num:
+                break
             out.append(q.copy())
-    return out[:num]
+    title = f"Practice ({num} questions)"
+    return {"title": title, "domain": domain_key or "random", "questions": out[:num]}
 
 def chat_with_ai(msgs: list[str]) -> str:
     """Simple, robust wrapper. Returns a string answer or a friendly error."""
@@ -174,7 +235,7 @@ def chat_with_ai(msgs: list[str]) -> str:
             return "OpenAI key is not configured. Please set OPENAI_API_KEY."
         payload = {
             "model": OPENAI_CHAT_MODEL,
-            "messages": [{"role": "system", "content": "You are a helpful CPP exam tutor."}]
+            "messages": [{"role": "system", "content": "You are a helpful CPP exam tutor. Format your answers for easy reading with short sections and bullet points where helpful."}]
                         + [{"role": "user", "content": m} for m in msgs][-10:],
             "temperature": 0.7,
             "max_tokens": 700,
@@ -200,7 +261,7 @@ def healthz():
 @app.get("/diag/openai")
 def diag_openai():
     try:
-        msg = chat_with_ai(["Say 'pong' if you can hear me." ])
+        msg = chat_with_ai(["Say 'pong' if you can hear me."])
         ok = "pong" in msg.lower()
         return jsonify({"success": ok, "preview": msg[:200]}), (200 if ok else 500)
     except Exception as e:
@@ -209,268 +270,225 @@ def diag_openai():
 # --- Home ---
 @app.get("/")
 def home():
-    # compute a quick average for the gauge (uses your existing session history)
+    # Compute simple average from session history for the gauge
     hist = session.get("quiz_history", [])
-    avg = round(sum(h["score"] for h in hist) / len(hist), 1) if hist else 0.0
-
-    # rotating tip on the home page
+    avg = round(sum(h.get("score", 0.0) for h in hist)/len(hist), 1) if hist else 0.0
+    # Motivational tips (random rotate client-side)
     tips = [
-        "Small, daily practice beats long, rare cram sessions.",
-        "Plan a short study block and stick to it — even 10 minutes counts.",
-        "Active recall: quiz yourself, don’t just re-read notes.",
-        "Missed questions are gold — they show you what to study next.",
-        "Set a target for today: 5 questions per domain you struggle with."
+        "Small daily practice beats cramming.",
+        "Review mistakes: that’s where learning sticks.",
+        "Mix domains to build stronger recall.",
+        "Teach someone else: it cements your knowledge.",
+        "Set a short timer (20–25 min) and focus."
     ]
-    tip = random.choice(tips)
-
-    body_top = """
+    tips_json = json.dumps(tips)
+    body = """
     <div class="row justify-content-center">
       <div class="col-md-10">
-        <div class="card border-0 shadow mb-3">
-          <div class="card-body">
-            <h1 class="mb-2">CPP Test Prep</h1>
-            <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams — ready to go.</p>
-
-            <div class="alert alert-info mb-4" role="alert">
-              <strong>Quick tip:</strong> """
-    body_mid = tip
-    body_mid2 = """</div>
-
-            <div class="d-flex gap-2 flex-wrap">
-              <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
-              <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
-              <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
-              <a class="btn btn-warning btn-lg btn-enhanced" href="/mock-exam">Mock Exam</a>
-              <a class="btn btn-info btn-lg btn-enhanced" href="/progress">Progress</a>
+        <div class="card border-0 shadow mb-4">
+          <div class="card-body d-flex flex-column flex-md-row align-items-center gap-3">
+            <div class="flex-grow-1">
+              <h1 class="mb-2">CPP Test Prep</h1>
+              <p class="text-muted mb-2" id="tip"></p>
+              <div class="d-flex gap-2 flex-wrap">
+                <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
+                <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
+                <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
+                <a class="btn btn-warning btn-lg btn-enhanced" href="/mock-exam">Mock Exam</a>
+              </div>
             </div>
-          </div>
-        </div>
-
-        <div class="card border-0 shadow">
-          <div class="card-header bg-light"><strong>Overall Progress</strong></div>
-          <div class="card-body">
-            <div id="gaugeHome" class="d-flex justify-content-center"></div>
-            <div class="text-center text-muted mt-2">Average of your saved attempts</div>
+            <div class="text-center">
+              <div id="homeGauge"></div>
+              <div class="small text-muted mt-2">Average of your recent quizzes</div>
+            </div>
           </div>
         </div>
       </div>
     </div>
-
     <script>
-      // Draw a half-circle gauge (0–100) with a needle.
-      (function () {
-        var pct = """
-    body_pct = str(avg)
-    body_bot = """;
-        if (isNaN(pct)) { pct = 0; }
-        if (pct < 0) pct = 0;
-        if (pct > 100) pct = 100;
-
-        var el = document.getElementById('gaugeHome');
-        var w = 320, h = 190;
-        var cx = w/2, cy = h - 10, r = Math.min(w, h*2) * 0.45; // nice sizing
-        var start = 180, end = 0; // left to right along a half circle
-
-        function polar(cx, cy, r, a) {
-          var rad = (a - 90) * Math.PI/180;
-          return {x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad)};
-        }
-        function arc(cx, cy, r, a0, a1) {
-          var p0 = polar(cx,cy,r,a0), p1 = polar(cx,cy,r,a1);
-          var large = ((a1 - a0 + 360) % 360) > 180 ? 1 : 0;
-          var sweep = a1 > a0 ? 1 : 0;
-          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1)
-               + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' '
-               + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
-        }
-
-        // Choose color by pct
-        var col = '#dc3545'; // red
-        if (pct >= 70) col = '#fd7e14'; // orange
-        if (pct >= 80) col = '#ffc107'; // yellow
-        if (pct >= 90) col = '#28a745'; // green
-
-        var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-
-        // background arc
-        svg += '<path d="' + arc(cx,cy,r,start,end) + '" fill="none" stroke="#e9ecef" stroke-width="16" stroke-linecap="round"/>';
-
-        // progress arc
-        var sweep = (end - start) * (pct/100);
-        svg += '<path d="' + arc(cx,cy,r,start,start+sweep) + '" fill="none" stroke="' + col + '" stroke-width="16" stroke-linecap="round"/>';
-
-        // tick marks (every 10%)
-        for (var t = 0; t <= 10; t++) {
-          var a = start + (end - start) * (t/10);
-          var p0 = polar(cx,cy,r+2,a);
-          var p1 = polar(cx,cy,r-10,a);
-          svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
-              + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
-              + '" stroke="#ced4da" stroke-width="2" />';
-        }
-
-        // needle
-        var na = start + (end - start) * (pct/100);
-        var pn = polar(cx,cy,r-6,na);
-        svg += '<line x1="' + cx.toFixed(1) + '" y1="' + cy.toFixed(1)
-            + '" x2="' + pn.x.toFixed(1) + '" y2="' + pn.y.toFixed(1)
-            + '" stroke="#343a40" stroke-width="3" />';
-        svg += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="5" fill="#343a40" />';
-
-        // label
-        svg += '<text x="' + cx.toFixed(1) + '" y="' + (cy-20).toFixed(1) + '" text-anchor="middle" font-size="20" font-weight="700" fill="#212529">' + pct.toFixed(1) + '%</text>';
-
-        svg += '</svg>';
-        el.innerHTML = svg;
-      })();
+      var HOME_AVG = """ + str(avg) + """;
+      var TIPS = """ + tips_json + """;
+      function pickTip() {
+        var i = Math.floor(Math.random() * TIPS.length);
+        var el = document.getElementById('tip');
+        if (el) el.textContent = TIPS[i];
+      }
+      pickTip();
+      mountGauge('homeGauge', HOME_AVG);
     </script>
     """
-    body = body_top + body_mid + body_mid2 + body_pct + body_bot
     return base_layout("Home", body)
 
 # --- Tutor ---
 @app.get("/study")
 def study_page():
-    chips = "".join([f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
-    # domain → suggestions
-    suggestions = {
+    # Build chips: Random + each domain
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+
+    # Simple suggestions per domain
+    SUGGESTIONS = {
         "security-principles": [
-            "Explain defense in depth with a quick example",
-            "What are the main steps in a risk assessment?",
-            "How do I pick security KPIs for a program?"
+            "Explain defense in depth with an example",
+            "Risk assessment steps and quick scenario",
+            "Least privilege vs. zero trust — differences",
+            "Common control categories (prevent/detect/correct)"
         ],
         "business-principles": [
-            "How do I build a risk-based security budget?",
-            "CapEx vs OpEx in security—when to use each?",
-            "Best practices for vendor management?"
+            "Risk-based budgeting in security",
+            "Build a business case for CCTV upgrade",
+            "ROI vs. risk reduction — how to explain",
+            "KPIs for a security program"
         ],
         "investigations": [
-            "Walk me through chain of custody basics",
-            "Interview vs interrogation—key differences?",
-            "What makes a solid investigation report?"
+            "Chain of custody — quick checklist",
+            "Interview vs. interrogation — differences",
+            "Evidence handling for digital media",
+            "Scene preservation basics"
         ],
         "personnel-security": [
-            "Outline a practical background check process",
-            "Early signs of insider threat to watch for",
-            "What should be on a termination checklist?"
+            "Termination checklist — access + property",
+            "Pre-employment screening best practices",
+            "Insider threat indicators",
+            "Visitor/contractor controls"
         ],
         "physical-security": [
-            "CPTED quick wins for a small site",
-            "How to layer access control effectively?",
-            "When to use barriers vs bollards?"
+            "CPTED quick wins for offices",
+            "Perimeter vs. internal controls",
+            "Locks and key control basics",
+            "Access control levels overview"
         ],
         "information-security": [
-            "Incident response phases in plain English",
-            "Password rules vs MFA—what’s better?",
-            "How to run a phishing awareness campaign?"
+            "Incident response phases",
+            "Phishing controls: people + tech",
+            "Backups: 3-2-1 rule",
+            "Security awareness ideas"
         ],
         "crisis-management": [
-            "BCP vs DR—what’s the difference?",
-            "How to design a tabletop exercise",
-            "What goes in a crisis comms plan?"
-        ],
+            "BCP vs. DR — differences",
+            "Crisis comms checklist",
+            "Tabletop exercise outline",
+            "Critical function identification"
+        ]
     }
-    # help text (no jargon)
-    help_html = """
-    <div class="card border-0 bg-light">
-      <div class="card-body small">
-        <strong>How to use the Tutor:</strong>
-        <ol class="mb-2">
-          <li>Click a blue domain button to set the topic (optional).</li>
-          <li>On the right, click one of the suggested questions.</li>
-          <li>It fills the box and sends it automatically.</li>
-          <li>Ask follow-ups: “give a short summary”, “show an example”, etc.</li>
-        </ol>
-        Tip: Save the best answers as notes you can review later.
-      </div>
-    </div>
-    """
-    body = f"""
+    sugg_json = json.dumps(SUGGESTIONS)
+
+    body = """
     <div class="row">
-      <div class="col-md-8">
+      <div class="col-md-10 mx-auto">
         <div class="card border-0 shadow">
           <div class="card-header bg-primary text-white"><h4 class="mb-0">🤖 AI Tutor</h4></div>
           <div class="card-body">
-            <div class="mb-3"><strong>Select a domain (optional):</strong><div class="mt-2">{chips}</div></div>
-            <div id="chat" style="height: 360px; overflow-y:auto; border:1px solid #e9ecef; border-radius:8px; padding:12px; background:#fafafa;"></div>
-            <div class="input-group mt-3">
-              <input type="text" id="userInput" class="form-control" placeholder="Ask anything about CPP domains..." />
-              <button id="sendBtn" class="btn btn-primary btn-enhanced">Send</button>
+            <div class="mb-3"><strong>Pick a domain:</strong>
+              <div class="mt-2">""" + "".join(chips) + """</div>
             </div>
-            <div class="small text-muted mt-2 text-center">Try: “Explain risk assessment with a quick example.”</div>
+            <div class="row">
+              <div class="col-md-8">
+                <div id="chat" style="height: 360px; overflow-y:auto; border:1px solid #e9ecef; border-radius:8px; padding:12px; background:#fafafa;"></div>
+                <div class="input-group mt-3">
+                  <input type="text" id="userInput" class="form-control" placeholder="Ask anything about CPP domains..." />
+                  <button id="sendBtn" class="btn btn-primary btn-enhanced">Send</button>
+                </div>
+                <div class="small text-muted mt-2">
+                  Tip: “Explain risk assessment steps with a quick example.”
+                </div>
+                <div class="mt-3 small">
+                  <strong>How to use Tutor:</strong>
+                  1) Pick a domain or keep Random. 2) Click a suggested topic or type your question.
+                  3) The reply appears formatted for easy reading. 4) Ask follow-ups to go deeper.
+                </div>
+              </div>
+              <div class="col-md-4">
+                <div class="border rounded p-2" style="background:#f8f9fa;">
+                  <div class="fw-bold mb-2">Suggested topics</div>
+                  <div id="suggestions" class="d-grid gap-2"></div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
-      </div>
-      <div class="col-md-4">
-        <div class="card border-0 shadow mb-3">
-          <div class="card-header bg-secondary text-white"><h6 class="mb-0">Suggested topics</h6></div>
-          <div class="card-body">
-            <ul id="sugList" class="mb-0 small" style="padding-left:18px; line-height:1.7;">
-              <li class="text-muted">Pick a domain to see suggestions.</li>
-            </ul>
-          </div>
-        </div>
-        {help_html}
       </div>
     </div>
+    <!-- Markdown -> HTML and Sanitizer -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.8/dist/purify.min.js"></script>
     <script>
-      const chatDiv = document.getElementById('chat');
-      const input = document.getElementById('userInput');
-      const sendBtn = document.getElementById('sendBtn');
-      const sugList = document.getElementById('sugList');
-      const suggestions = {json.dumps(suggestions)};
+      var SUGG = """ + sugg_json + """;
+      var chatDiv = document.getElementById('chat');
+      var input = document.getElementById('userInput');
+      var sendBtn = document.getElementById('sendBtn');
+      var domain = 'random';
 
-      let domain = null;
+      function setActiveChip(clicked) {
+        document.querySelectorAll('.domain-chip').forEach(function(c) { c.classList.remove('active'); });
+        clicked.classList.add('active');
+      }
 
-      document.querySelectorAll('.domain-chip').forEach(ch => {{
-        ch.addEventListener('click', () => {{
-          document.querySelectorAll('.domain-chip').forEach(c => c.classList.remove('active'));
-          ch.classList.add('active');
-          domain = ch.dataset.domain;
+      function renderSuggestions(d) {
+        var box = document.getElementById('suggestions');
+        if (!box) return;
+        var items = (SUGG[d] || []);
+        if (d === 'random') {
+          // show one suggestion from a few domains
+          items = [];
+          var keys = Object.keys(SUGG);
+          for (var i=0; i<keys.length && items.length<4; i++) {
+            var list = SUGG[keys[i]];
+            if (list && list.length) items.push(list[0]);
+          }
+        }
+        var html = '';
+        for (var i=0; i<items.length; i++) {
+          var t = items[i];
+          html += '<button class="btn btn-outline-secondary btn-sm text-start" onclick="useSuggestion(\\'' + t.replace(/'/g,"\\'") + '\\')">' + t + '</button>';
+        }
+        box.innerHTML = html || '<div class="text-muted small">Pick a domain to see suggestions.</div>';
+      }
+      window.useSuggestion = function(text) {
+        input.value = text;
+        send();
+      };
 
-          // Load suggestions
-          const list = suggestions[domain] || [];
-          if (!list.length) {{ sugList.innerHTML = '<li class="text-muted">No suggestions for this domain.</li>'; return; }}
-          sugList.innerHTML = '';
-          list.forEach(text => {{
-            const li = document.createElement('li');
-            const a = document.createElement('a');
-            a.href = '#'; a.textContent = text; a.className = 'text-decoration-none';
-            a.addEventListener('click', (e) => {{
-              e.preventDefault();
-              input.value = text;
-              send();
-            }});
-            li.appendChild(a);
-            sugList.appendChild(li);
-          }});
+      document.querySelectorAll('.domain-chip').forEach(function(ch) {
+        ch.addEventListener('click', function() {
+          setActiveChip(ch);
+          domain = ch.getAttribute('data-domain');
+          renderSuggestions(domain);
           input.focus();
-        }});
-      }});
+        });
+      });
+      renderSuggestions(domain);
 
-      function append(role, text) {{
-        const wrap = document.createElement('div');
+      function append(role, html, isHTML) {
+        var wrap = document.createElement('div');
         wrap.className = (role === 'user' ? 'text-end' : 'text-start') + ' mb-2';
-        wrap.innerHTML = '<span class="badge ' + (role==='user'?'bg-primary':'bg-secondary') + ' mb-1">' + (role==='user'?'You':'Tutor') + '</span>'
-          + '<div class="p-2 border rounded bg-white" style="max-width:85%; margin-' + (role==='user'?'left':'right') + ':auto;">'
-          + text.replace(/</g,'&lt;') + '</div>';
+        var badge = '<span class="badge ' + (role==='user'?'bg-primary':'bg-secondary') + ' mb-1">' + (role==='user'?'You':'Tutor') + '</span>';
+        var bubble = '<div class="p-2 border rounded bg-white chat-bubble" style="margin-' + (role==='user'?'left':'right') + ':auto;">' + html + '</div>';
+        wrap.innerHTML = badge + bubble;
         chatDiv.appendChild(wrap); chatDiv.scrollTop = chatDiv.scrollHeight;
-      }}
+      }
 
-      async function send() {{
-        const q = input.value.trim();
+      async function send() {
+        var q = (input.value || '').trim();
         if (!q) return;
-        append('user', q);
+        append('user', q.replace(/</g,'&lt;')); // simple escape
         input.value = ''; sendBtn.disabled = true; sendBtn.textContent = 'Thinking...';
-        try {{
-          const res = await fetch('/api/chat', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{message: q, domain}})}});
-          const data = await res.json();
-          append('assistant', data.response || data.error || 'Sorry, something went wrong.');
-        }} catch(e) {{ append('assistant', 'Network error.'); }}
-        finally {{ sendBtn.disabled = false; sendBtn.textContent = 'Send'; input.focus(); }}
-      }}
+        try {
+          var res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: q, domain: domain})});
+          var data = await res.json();
+          var raw = data.response || data.error || 'Sorry, something went wrong.';
+          // Convert markdown -> HTML, then sanitize
+          var parsed = (window.marked && typeof marked.parse === 'function') ? marked.parse(raw) : raw.replace(/\\n/g,'<br>');
+          var clean = (window.DOMPurify && DOMPurify.sanitize) ? DOMPurify.sanitize(parsed) : parsed;
+          append('assistant', clean, true);
+        } catch(e) {
+          append('assistant', 'Network error.');
+        } finally {
+          sendBtn.disabled = false; sendBtn.textContent = 'Send'; input.focus();
+        }
+      }
       sendBtn.addEventListener('click', send);
-      input.addEventListener('keydown', (e)=>{{ if(e.key==='Enter' && !sendBtn.disabled) send(); }});
+      input.addEventListener('keydown', function(e){ if(e.key==='Enter' && !sendBtn.disabled) send(); });
     </script>
     """
     return base_layout("Tutor", body)
@@ -488,463 +506,401 @@ def api_chat():
     reply = chat_with_ai([prefix + user_msg])
     return jsonify({"response": reply, "timestamp": datetime.utcnow().isoformat()})
 
-# --- Flashcards ---
+# --- Flashcards --- (ONLY here we show clickable left/right arrows)
 @app.get("/flashcards")
 def flashcards_page():
-    # Build ~20 cards from questions
-    cards = []
+    # Build cards from filtered questions by domain, default random
+    # We render domain chips and let the client rebuild the stack when the domain changes.
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    all_cards = []
     for q in BASE_QUESTIONS:
         ans = q["options"].get(q["correct"], "")
         back = "✅ Correct: " + ans + "\\n\\n💡 " + q["explanation"]
-        cards.append({"front": q["question"], "back": back})
-    cards = (cards * 3)[:20]
-    random.shuffle(cards)
-    cards_json = json.dumps(cards)
-    chips = "".join([f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
-    body = f"""
+        all_cards.append({"front": q["question"], "back": back, "domain": q["domain"]})
+    cards_json = json.dumps(all_cards)
+
+    body = """
     <div class="row">
-      <div class="col-md-9 mx-auto">
+      <div class="col-md-10 mx-auto">
         <div class="card border-0 shadow">
-          <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+          <div class="card-header bg-secondary text-white d-flex flex-wrap align-items-center justify-content-between">
             <h4 class="mb-0">🃏 Flashcards</h4>
-            <div><small><strong>Pick a domain (optional):</strong></small> <span class="ms-2">{chips}</span></div>
+            <div>""" + "".join(chips) + """</div>
           </div>
           <div class="card-body">
-            <div id="card" class="border rounded p-4" style="min-height:220px; background:#f8f9fa; cursor:pointer;"></div>
-            <div class="d-flex gap-2 justify-content-center mt-3">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <button id="prevBtn" class="btn btn-outline-secondary btn-sm" title="Previous (or K)">◀ Prev</button>
+              <div id="card" class="border rounded p-4 flex-grow-1 mx-2" style="min-height:220px; background:#f8f9fa; cursor:pointer;"></div>
+              <button id="nextBtn" class="btn btn-outline-secondary btn-sm" title="Next (or L)">Next ▶</button>
+            </div>
+            <div class="d-flex gap-2 justify-content-center mt-2">
               <button id="btnDK" class="btn btn-outline-danger btn-enhanced">❌ Don't Know</button>
               <button id="btnK" class="btn btn-outline-success btn-enhanced">✅ Know</button>
             </div>
-            <div class="text-center mt-2 small text-muted">Press J to flip, K for next.</div>
+            <div class="text-center mt-2 small text-muted">Click card to flip. Keys: J = flip, K = prev, L = next</div>
           </div>
         </div>
       </div>
     </div>
     <script>
-      const ALL_CARDS = {cards_json};
-      let CARDS = ALL_CARDS.slice(); // filtered as needed
-      let i = 0, back=false;
+      var ALL = """ + cards_json + """;
+      var domain = 'random';
+      var CARDS = [];
+      var i = 0, back=false, dk=0, k=0;
+      var el = document.getElementById('card');
 
-      const el = document.getElementById('card');
-      function render() {{
-        const c = CARDS[i] || {{front:'No cards', back:''}};
-        const txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
+      function rebuildCards() {
+        var pool = ALL.filter(function(c){ return domain==='random' ? true : c.domain===domain; });
+        if (pool.length===0) pool = ALL.slice(0);
+        // duplicate/shuffle to feel fuller
+        var stack = pool.slice(0);
+        while (stack.length < 20) { stack = stack.concat(pool); }
+        stack = stack.slice(0, 20);
+        for (var s=stack.length-1;s>0;--s){ var r=Math.floor(Math.random()*(s+1)); var tmp=stack[s]; stack[s]=stack[r]; stack[r]=tmp; }
+        CARDS = stack;
+        i=0; back=false; render();
+      }
+
+      function render() {
+        var c = CARDS[i] || {front:'No cards', back:''};
+        var txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
         el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
-      }}
-      function next() {{ back=false; i=(i+1)%CARDS.length; render(); }}
-      el.addEventListener('click', ()=>{{ back=!back; render(); }});
-      document.getElementById('btnDK').addEventListener('click', ()=>{{ next(); }});
-      document.getElementById('btnK').addEventListener('click', ()=>{{ next(); }});
-      document.addEventListener('keydown', (e)=>{{ if(e.key.toLowerCase()==='j') {{ back=!back; render(); }} if(e.key.toLowerCase()==='k') {{ next(); }} }});
+      }
+      function prev(){ back=false; i = (i - 1 + CARDS.length) % CARDS.length; render(); }
+      function next(){ back=false; i = (i + 1) % CARDS.length; render(); }
 
-      // domain filter (simple demo: rebuild from BASE_QUESTIONS client-side)
-      document.querySelectorAll('.domain-chip').forEach(ch => {{
-        ch.addEventListener('click', () => {{
-          document.querySelectorAll('.domain-chip').forEach(c => c.classList.remove('active'));
-          ch.classList.add('active');
-          // For now we just reshuffle; real filtering would rebuild from server/domain pool
-          i=0; back=false; render();
-        }});
-      }});
+      el.addEventListener('click', function(){ back=!back; render(); });
+      document.getElementById('btnDK').addEventListener('click', function(){ dk++; next(); });
+      document.getElementById('btnK').addEventListener('click', function(){ k++; next(); });
+      document.getElementById('prevBtn').addEventListener('click', prev);
+      document.getElementById('nextBtn').addEventListener('click', next);
+      document.addEventListener('keydown', function(e){
+        var key = e.key.toLowerCase();
+        if(key==='j') { back=!back; render(); }
+        if(key==='k') { prev(); }
+        if(key==='l') { next(); }
+      });
 
-      render();
+      function setActiveChip(clicked) {
+        document.querySelectorAll('.domain-chip').forEach(function(c){ c.classList.remove('active'); });
+        clicked.classList.add('active');
+      }
+      document.querySelectorAll('.domain-chip').forEach(function(ch){
+        ch.addEventListener('click', function(){
+          setActiveChip(ch);
+          domain = ch.getAttribute('data-domain');
+          rebuildCards();
+        })
+      });
+
+      rebuildCards();
     </script>
     """
     return base_layout("Flashcards", body)
 
-# --- Quiz (domain + count + keyboard + detailed review) ---
+# --- Quiz --- (no on-screen arrows)
 @app.get("/quiz")
 def quiz_page():
-    chips = "".join([f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
-    body = f"""
-    <div class="row"><div class="col-md-10 mx-auto">
+    # Domain chips
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    # default quiz
+    q = build_quiz(10, "random")
+    q_json = json.dumps(q)
+    body = """
+    <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
-        <div class="card-header bg-success text-white">
-          <div class="d-flex flex-wrap justify-content-between align-items-center">
-            <div><h4 class="mb-0">📝 Practice Quiz</h4></div>
-            <div class="small">Keyboard: <code>←</code>/<code>→</code> to move</div>
+        <div class="card-header bg-success text-white d-flex flex-wrap align-items-center justify-content-between">
+          <div>
+            <h4 class="mb-0">📝 Practice Quiz</h4>
+            <small id="countLabel">10 questions • Domain: <span id="domName">Random</span></small>
+          </div>
+          <div>""" + "".join(chips) + """</div>
+          <div class="ms-auto d-flex align-items-center gap-2">
+            <label class="small">#</label>
+            <select id="qCount" class="form-select form-select-sm" style="width:auto;">
+              <option selected>10</option>
+              <option>5</option>
+              <option>15</option>
+              <option>20</option>
+            </select>
+            <button id="reload" class="btn btn-light btn-sm btn-enhanced">Build Quiz</button>
+            <button id="submitTop" class="btn btn-light btn-sm btn-enhanced">Submit</button>
           </div>
         </div>
-        <div class="card-body">
-          <div class="sticky-head">
-            <div class="row g-2 align-items-center">
-              <div class="col-md-6">
-                <div class="mb-1"><strong>Choose a domain (optional):</strong></div>
-                {chips}
-              </div>
-              <div class="col-md-3">
-                <div class="mb-1"><strong>Questions:</strong></div>
-                <div class="btn-group" role="group">
-                  <input type="radio" class="btn-check" name="qcount" id="qc5" value="5">
-                  <label class="btn btn-outline-primary btn-sm" for="qc5">5</label>
-                  <input type="radio" class="btn-check" name="qcount" id="qc10" value="10" checked>
-                  <label class="btn btn-outline-primary btn-sm" for="qc10">10</label>
-                  <input type="radio" class="btn-check" name="qcount" id="qc15" value="15">
-                  <label class="btn btn-outline-primary btn-sm" for="qc15">15</label>
-                  <input type="radio" class="btn-check" name="qcount" id="qc20" value="20">
-                  <label class="btn btn-outline-primary btn-sm" for="qc20">20</label>
-                </div>
-              </div>
-              <div class="col-md-3 text-end">
-                <button id="startBtn" class="btn btn-success btn-sm btn-enhanced">Start Quiz</button>
-              </div>
-            </div>
-            <div class="d-flex justify-content-between align-items-center mt-2" id="navBar" style="display:none;">
-              <div class="small text-muted">Use <strong>← / →</strong> or the buttons</div>
-              <div>
-                <button id="prevBtn" class="btn btn-outline-secondary btn-sm me-2">← Prev</button>
-                <button id="nextBtn" class="btn btn-outline-secondary btn-sm">Next →</button>
-              </div>
-            </div>
-          </div>
-          <div id="quiz"></div>
-        </div>
-        <div class="card-footer d-flex justify-content-between">
-          <button id="submitTop" class="btn btn-light btn-enhanced" disabled>Submit (top)</button>
-          <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced" disabled>Submit Quiz</button>
+        <div class="card-body" id="quiz"></div>
+        <div class="card-footer text-end">
+          <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced">Submit Quiz</button>
         </div>
       </div>
       <div id="results" class="mt-4"></div>
     </div></div>
-
     <script>
-      const ALL = {json.dumps(BASE_QUESTIONS)};
-      let DOMAIN = 'all', COUNT = 10, QUIZ = null, currentIndex = 0, startedAt = null;
-
-      document.querySelectorAll('.domain-chip').forEach(ch => {{
-        ch.addEventListener('click', () => {{
-          document.querySelectorAll('.domain-chip').forEach(c => c.classList.remove('active'));
-          ch.classList.add('active');
-          DOMAIN = ch.dataset.domain;
-        }});
-      }});
-      document.querySelectorAll('input[name="qcount"]').forEach(r => {{
-        r.addEventListener('change', ()=>{{ COUNT = parseInt(document.querySelector('input[name="qcount"]:checked').value); }});
-      }});
-
-      function buildQuiz() {{
-        // filter & expand in the browser for simplicity
-        const pool = (DOMAIN==='all') ? ALL.slice() : ALL.filter(q => q.domain===DOMAIN);
-        const out = [];
-        while (out.length < COUNT) {{
-          const shuffled = pool.slice().sort(()=>Math.random()-0.5);
-          for (const q of shuffled) {{ if(out.length >= COUNT) break; out.push(structuredClone(q)); }}
-        }}
-        return {{title: 'Practice (' + COUNT + ' questions)', domain: DOMAIN, questions: out.slice(0, COUNT)}};
-      }}
-
-      const cont = document.getElementById('quiz');
-      const navBar = document.getElementById('navBar');
-      const prevBtn = document.getElementById('prevBtn');
-      const nextBtn = document.getElementById('nextBtn');
-      const submitTop = document.getElementById('submitTop');
-      const submitBottom = document.getElementById('submitBottom');
-
-      function render() {{
+      var QUIZ = """ + q_json + """;
+      var DOMAIN = 'random';
+      var DOMAIN_NAMES = """ + json.dumps({"random":"Random", **DOMAINS}) + """;
+      var cont = document.getElementById('quiz');
+      function render() {
         cont.innerHTML = '';
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const card = document.createElement('div');
+        (QUIZ.questions||[]).forEach(function(qq, idx){
+          var card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           card.id = 'q'+idx;
-          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
+          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + '</div>'
                          + '<div class="mb-2">'+ qq.question + '</div>';
-          const opts = qq.options || {{}};
-          for (const k in opts) {{
-            const id = 'q' + idx + '_' + k;
-            const row = document.createElement('div');
+          var opts = qq.options || {};
+          for (var k in opts) {
+            var id = 'q' + idx + '_' + k;
+            var row = document.createElement('div');
             row.className = 'form-check mb-1';
             row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
                           + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
-            row.querySelector('input').addEventListener('change', () => enableSubmitIfAllAnswered());
             card.appendChild(row);
-          }}
+          }
           cont.appendChild(card);
-        }});
-        currentIndex = 0;
-        scrollToIndex(currentIndex);
-        navBar.style.display = 'flex';
-        enableSubmitIfAllAnswered();
-      }}
-
-      function scrollToIndex(i) {{
-        const el = document.getElementById('q'+i);
-        if (el) el.scrollIntoView({{behavior:'smooth', block:'center'}});
-      }}
-
-      function enableSubmitIfAllAnswered() {{
-        const total = (QUIZ.questions||[]).length;
-        let answered = 0;
-        for (let i=0; i<total; i++) {{ if (document.querySelector('input[name="q'+i+'"]:checked')) answered++; }}
-        const ready = (answered === total);
-        submitTop.disabled = !ready; submitBottom.disabled = !ready;
-      }}
-
-      function firstUnanswered() {{
-        const total = (QUIZ.questions||[]).length;
-        for (let i=0; i<total; i++) {{ if (!document.querySelector('input[name="q'+i+'"]:checked')) return i; }}
-        return -1;
-      }}
-
-      async function submitQuiz() {{
-        // highlight missing & jump
-        const miss = firstUnanswered();
-        if (miss >= 0) {{
-          document.querySelectorAll('.missing').forEach(el => el.classList.remove('missing'));
-          for (let i=0;i<(QUIZ.questions||[]).length;i++) {{
-            const card = document.getElementById('q'+i);
-            if (!document.querySelector('input[name="q'+i+'"]:checked')) card.classList.add('missing');
-          }}
-          currentIndex = miss; scrollToIndex(currentIndex);
+        });
+      }
+      function build(domain, count) {
+        return fetch('/api/build-quiz', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({domain: domain, count: count})
+        }).then(function(r){ return r.json(); });
+      }
+      async function reloadQuiz() {
+        var cSel = document.getElementById('qCount');
+        var count = parseInt(cSel.value,10) || 10;
+        var data = await build(DOMAIN, count);
+        QUIZ = data;
+        document.getElementById('domName').textContent = DOMAIN_NAMES[DOMAIN] || 'Random';
+        document.getElementById('countLabel').innerHTML = count + ' questions • Domain: <span id="domName">' + (DOMAIN_NAMES[DOMAIN]||'Random') + '</span>';
+        render();
+        window.scrollTo({top:0, behavior:'smooth'});
+      }
+      async function submitQuiz() {
+        var answers = {};
+        var unanswered = [];
+        (QUIZ.questions||[]).forEach(function(qq, idx){
+          var sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          if(!sel) unanswered.push(idx+1);
+          answers[String(idx)] = sel ? sel.value : null;
+        });
+        if(unanswered.length){
+          // Jump to the first unanswered question
+          var first = unanswered[0] - 1;
+          var target = document.getElementById('q'+first);
+          if (target) { target.scrollIntoView({behavior:'smooth'}); }
+          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
-        }}
-
-        const answers = {{}};
-        (QUIZ.questions||[]).forEach((qq, idx)=>{{ const sel=document.querySelector('input[name="q'+idx+'"]:checked'); answers[String(idx)] = sel?sel.value:null; }});
-        const minutes = Math.max(0, Math.round((Date.now()-startedAt)/60000));
-
-        const res = await fetch('/api/submit-quiz', {{
-          method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{
-            quiz_type:'practice', domain: DOMAIN || 'general', questions: QUIZ.questions, answers: answers, time_taken: minutes
-          }})
-        }});
-        const data = await res.json();
-        const out = document.getElementById('results');
-        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-
-        // Build detailed results
-        let html = '<div class="card border-0 shadow"><div class="card-body">';
-        html += '<div class="text-center mb-3">';
-        html += '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>';
-        html += '<div class="text-muted">Correct: '+data.correct+' / '+data.total+(data.time_taken?(' • Time: '+data.time_taken+' min'):'')+'</div>';
-        html += '</div>';
-        html += '<h5 class="mb-2">Answer Review</h5>';
-        (data.detailed_results||[]).forEach(r=>{{
-          const ok = !!r.is_correct;
-          html += '<div class="card mb-3 result-card '+(ok?'correct':'incorrect')+'"><div class="card-body">';
-          html += '<h6 class="mb-2">'+(ok?'✅':'❌')+' Question '+r.index+'</h6>';
-          html += '<div class="mb-2">'+(r.question||'')+'</div>';
-          if (ok) {{
-            html += '<div class="alert alert-success py-2 mb-2"><strong>Correct:</strong> '+r.correct_letter+') '+(r.correct_text||'')+'</div>';
-          }} else {{
-            html += '<div class="alert alert-danger py-2 mb-2"><strong>Your answer:</strong> '+(r.user_letter||'—')+(r.user_text?') '+r.user_text:'')+'</div>';
-            html += '<div class="alert alert-success py-2 mb-2"><strong>Correct answer:</strong> '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-          }}
-          if (r.explanation) html += '<div class="small text-muted">💡 '+r.explanation+'</div>';
-          html += '</div></div>';
-        }});
+        }
+        var res = await fetch('/api/submit-quiz', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ quiz_type:'practice', domain: DOMAIN, questions: QUIZ.questions, answers })
+        });
+        var data = await res.json();
+        var out = document.getElementById('results');
+        if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+        // Build detailed review
+        var html = '<div class="card border-0 shadow"><div class="card-body">'
+                 + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
+        (data.detailed_results||[]).forEach(function(row, idx){
+          var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
+          var icon = row.is_correct ? '✅' : '❌';
+          html += '<div class="p-3 border rounded mb-2 '+cls+'">'
+               +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
+          var options = QUIZ.questions[idx].options || {};
+          // Show options with color on user choice vs correct
+          for (var key in options) {
+            var val = options[key];
+            var lineClass = '';
+            if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
+            if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
+            html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
+          }
+          html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
+               +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
+               + '</div>';
+        });
         html += '</div></div>';
         out.innerHTML = html;
-        out.scrollIntoView({{behavior:'smooth', block:'start'}});
-      }}
-
-      // Start button
-      document.getElementById('startBtn').addEventListener('click', () => {{
-        QUIZ = buildQuiz();
-        startedAt = Date.now();
-        render();
-      }});
-
-      // Submit buttons
-      submitTop.addEventListener('click', submitQuiz);
-      submitBottom.addEventListener('click', submitQuiz);
-
-      // Prev/Next controls + arrow keys
-      prevBtn.addEventListener('click', ()=>{{ currentIndex = Math.max(0, currentIndex-1); scrollToIndex(currentIndex); }});
-      nextBtn.addEventListener('click', ()=>{{ currentIndex = Math.min((QUIZ?.questions?.length||1)-1, currentIndex+1); scrollToIndex(currentIndex); }});
-      document.addEventListener('keydown', (e)=>{{
-        if (!QUIZ) return;
-        if (e.key === 'ArrowLeft') {{ e.preventDefault(); prevBtn.click(); }}
-        if (e.key === 'ArrowRight') {{ e.preventDefault(); nextBtn.click(); }}
-      }});
+        // Jump to results
+        out.scrollIntoView({behavior:'smooth'});
+      }
+      document.getElementById('reload').addEventListener('click', reloadQuiz);
+      document.getElementById('submitTop').addEventListener('click', submitQuiz);
+      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
+      function setActiveChip(clicked) {
+        document.querySelectorAll('.domain-chip').forEach(function(c){ c.classList.remove('active'); });
+        clicked.classList.add('active');
+      }
+      document.querySelectorAll('.domain-chip').forEach(function(ch){
+        ch.addEventListener('click', function(){
+          setActiveChip(ch);
+          DOMAIN = ch.getAttribute('data-domain');
+          reloadQuiz();
+        })
+      });
+      render();
     </script>
     """
     return base_layout("Quiz", body)
 
-# --- Mock Exam (same UX as quiz, with 25/50/75/100) ---
+# Build-quiz endpoint (used by quiz + mock to rebuild with chosen domain/count)
+@app.post("/api/build-quiz")
+def api_build_quiz():
+    data = request.get_json() or {}
+    domain = data.get("domain") or "random"
+    count = int(data.get("count") or 10)
+    return jsonify(build_quiz(count, domain))
+
+# --- Mock Exam --- (no on-screen arrows)
 @app.get("/mock-exam")
 def mock_exam_page():
-    chips = "".join([f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
-    body = f"""
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    q = build_quiz(25, "random")
+    q_json = json.dumps(q)
+    body = """
     <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
-        <div class="card-header bg-warning text-dark"><h4 class="mb-0">🏁 Mock Exam</h4></div>
-        <div class="card-body">
-          <div class="sticky-head">
-            <div class="row g-2 align-items-center">
-              <div class="col-md-6">
-                <div class="mb-1"><strong>Choose a domain (optional):</strong></div>
-                {chips}
-              </div>
-              <div class="col-md-3">
-                <div class="mb-1"><strong>Questions:</strong></div>
-                <div class="btn-group" role="group">
-                  <input type="radio" class="btn-check" name="mcount" id="mc25" value="25" checked>
-                  <label class="btn btn-outline-primary btn-sm" for="mc25">25</label>
-                  <input type="radio" class="btn-check" name="mcount" id="mc50" value="50">
-                  <label class="btn btn-outline-primary btn-sm" for="mc50">50</label>
-                  <input type="radio" class="btn-check" name="mcount" id="mc75" value="75">
-                  <label class="btn btn-outline-primary btn-sm" for="mc75">75</label>
-                  <input type="radio" class="btn-check" name="mcount" id="mc100" value="100">
-                  <label class="btn btn-outline-primary btn-sm" for="mc100">100</label>
-                </div>
-              </div>
-              <div class="col-md-3 text-end">
-                <button id="startBtn" class="btn btn-success btn-sm btn-enhanced">Start Exam</button>
-              </div>
-            </div>
-            <div class="d-flex justify-content-between align-items-center mt-2" id="navBar" style="display:none;">
-              <div class="small text-muted">Use <strong>← / →</strong> or the buttons</div>
-              <div>
-                <button id="prevBtn" class="btn btn-outline-secondary btn-sm me-2">← Prev</button>
-                <button id="nextBtn" class="btn btn-outline-secondary btn-sm">Next →</button>
-              </div>
-            </div>
+        <div class="card-header bg-warning text-dark d-flex flex-wrap align-items-center justify-content-between">
+          <div>
+            <h4 class="mb-0">🏁 Mock Exam</h4>
+            <small id="countLabel">25 questions • Domain: <span id="domName">Random</span></small>
           </div>
-          <div id="quiz"></div>
+          <div>""" + "".join(chips) + """</div>
+          <div class="ms-auto d-flex align-items-center gap-2">
+            <label class="small">#</label>
+            <select id="qCount" class="form-select form-select-sm" style="width:auto;">
+              <option>25</option>
+              <option>50</option>
+              <option>75</option>
+              <option>100</option>
+            </select>
+            <button id="reload" class="btn btn-dark btn-sm btn-enhanced">Build Exam</button>
+          </div>
         </div>
-        <div class="card-footer d-flex justify-content-between">
-          <button id="submitTop" class="btn btn-light btn-enhanced" disabled>Submit (top)</button>
-          <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced" disabled>Submit Exam</button>
+        <div class="card-body" id="quiz"></div>
+        <div class="card-footer text-end">
+          <button id="submit" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
         </div>
       </div>
       <div id="results" class="mt-4"></div>
     </div></div>
-
     <script>
-      const ALL = {json.dumps(BASE_QUESTIONS)};
-      let DOMAIN = 'all', COUNT = 25, QUIZ = null, currentIndex = 0, startedAt = null;
-
-      document.querySelectorAll('.domain-chip').forEach(ch => {{
-        ch.addEventListener('click', () => {{
-          document.querySelectorAll('.domain-chip').forEach(c => c.classList.remove('active'));
-          ch.classList.add('active');
-          DOMAIN = ch.dataset.domain;
-        }});
-      }});
-      document.querySelectorAll('input[name="mcount"]').forEach(r => {{ r.addEventListener('change', ()=>{{ COUNT = parseInt(document.querySelector('input[name="mcount"]:checked').value); }}); }});
-
-      function buildQuiz() {{
-        const pool = (DOMAIN==='all') ? ALL.slice() : ALL.filter(q => q.domain===DOMAIN);
-        const out = [];
-        while (out.length < COUNT) {{
-          const shuffled = pool.slice().sort(()=>Math.random()-0.5);
-          for (const q of shuffled) {{ if(out.length >= COUNT) break; out.push(structuredClone(q)); }}
-        }}
-        return {{title: 'Mock (' + COUNT + ' questions)', domain: DOMAIN, questions: out.slice(0, COUNT)}};
-      }}
-
-      const cont = document.getElementById('quiz');
-      const navBar = document.getElementById('navBar');
-      const prevBtn = document.getElementById('prevBtn');
-      const nextBtn = document.getElementById('nextBtn');
-      const submitTop = document.getElementById('submitTop');
-      const submitBottom = document.getElementById('submitBottom');
-
-      function render() {{
+      var QUIZ = """ + q_json + """;
+      var DOMAIN = 'random';
+      var DOMAIN_NAMES = """ + json.dumps({"random":"Random", **DOMAINS}) + """;
+      var cont = document.getElementById('quiz');
+      function render() {
         cont.innerHTML = '';
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const card = document.createElement('div');
+        (QUIZ.questions||[]).forEach(function(qq, idx){
+          var card = document.createElement('div');
           card.className = 'mb-3 p-3 border rounded';
           card.id = 'q'+idx;
           card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
                          + '<div class="mb-2">'+ qq.question + '</div>';
-          const opts = qq.options || {{}};
-          for (const k in opts) {{
-            const id = 'q' + idx + '_' + k;
-            const row = document.createElement('div');
+          var opts = qq.options || {};
+          for (var k in opts) {
+            var id = 'q' + idx + '_' + k;
+            var row = document.createElement('div');
             row.className = 'form-check mb-1';
             row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
                           + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
-            row.querySelector('input').addEventListener('change', () => enableSubmitIfAllAnswered());
             card.appendChild(row);
-          }}
+          }
           cont.appendChild(card);
-        }});
-        currentIndex = 0;
-        scrollToIndex(currentIndex);
-        navBar.style.display = 'flex';
-        enableSubmitIfAllAnswered();
-      }}
-
-      function scrollToIndex(i) {{ const el=document.getElementById('q'+i); if(el) el.scrollIntoView({{behavior:'smooth', block:'center'}}); }}
-      function enableSubmitIfAllAnswered() {{
-        const total=(QUIZ.questions||[]).length;
-        let answered=0;
-        for(let i=0;i<total;i++) if (document.querySelector('input[name="q'+i+'"]:checked')) answered++;
-        const ready = (answered===total);
-        submitTop.disabled=!ready; submitBottom.disabled=!ready;
-      }}
-      function firstUnanswered(){{ const total=(QUIZ.questions||[]).length; for(let i=0;i<total;i++) if(!document.querySelector('input[name="q'+i+'"]:checked')) return i; return -1; }}
-
-      async function submitQuiz() {{
-        const miss = firstUnanswered();
-        if (miss >= 0) {{
-          document.querySelectorAll('.missing').forEach(el => el.classList.remove('missing'));
-          for (let i=0;i<(QUIZ.questions||[]).length;i++) {{
-            const card=document.getElementById('q'+i);
-            if (!document.querySelector('input[name="q'+i+'"]:checked')) card.classList.add('missing');
-          }}
-          currentIndex = miss; scrollToIndex(currentIndex);
+        });
+      }
+      function build(domain, count) {
+        return fetch('/api/build-quiz', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({domain: domain, count: count})
+        }).then(function(r){ return r.json(); });
+      }
+      async function reloadQuiz() {
+        var cSel = document.getElementById('qCount');
+        var count = parseInt(cSel.value,10) || 25;
+        var data = await build(DOMAIN, count);
+        QUIZ = data;
+        document.getElementById('domName').textContent = DOMAIN_NAMES[DOMAIN] || 'Random';
+        document.getElementById('countLabel').innerHTML = count + ' questions • Domain: <span id="domName">' + (DOMAIN_NAMES[DOMAIN]||'Random') + '</span>';
+        render();
+        window.scrollTo({top:0, behavior:'smooth'});
+      }
+      async function submitQuiz() {
+        var answers = {};
+        var unanswered = [];
+        (QUIZ.questions||[]).forEach(function(qq, idx){
+          var sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          if(!sel) unanswered.push(idx+1);
+          answers[String(idx)] = sel ? sel.value : null;
+        });
+        if(unanswered.length){
+          var first = unanswered[0] - 1;
+          var target = document.getElementById('q'+first);
+          if (target) { target.scrollIntoView({behavior:'smooth'}); }
+          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
-        }}
-        const answers={{}};
-        (QUIZ.questions||[]).forEach((qq, idx)=>{{ const sel=document.querySelector('input[name="q'+idx+'"]:checked'); answers[String(idx)]=sel?sel.value:null; }});
-        const minutes = Math.max(0, Math.round((Date.now()-startedAt)/60000));
-
-        const res = await fetch('/api/submit-quiz', {{
-          method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{ quiz_type:'mock-exam', domain: DOMAIN||'general', questions: QUIZ.questions, answers, time_taken: minutes }})
-        }});
-        const data = await res.json();
-        const out = document.getElementById('results');
-        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-
-        let html = '<div class="card border-0 shadow"><div class="card-body">';
-        html += '<div class="text-center mb-3">';
-        html += '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>';
-        html += '<div class="text-muted">Correct: '+data.correct+' / '+data.total+(data.time_taken?(' • Time: '+data.time_taken+' min'):'')+'</div>';
-        html += '</div>';
-        html += '<h5 class="mb-2">Answer Review</h5>';
-        (data.detailed_results||[]).forEach(r=>{{
-          const ok = !!r.is_correct;
-          html += '<div class="card mb-3 result-card '+(ok?'correct':'incorrect')+'"><div class="card-body">';
-          html += '<h6 class="mb-2">'+(ok?'✅':'❌')+' Question '+r.index+'</h6>';
-          html += '<div class="mb-2">'+(r.question||'')+'</div>';
-          if (ok) {{
-            html += '<div class="alert alert-success py-2 mb-2"><strong>Correct:</strong> '+r.correct_letter+') '+(r.correct_text||'')+'</div>';
-          }} else {{
-            html += '<div class="alert alert-danger py-2 mb-2"><strong>Your answer:</strong> '+(r.user_letter||'—')+(r.user_text?') '+r.user_text:'')+'</div>';
-            html += '<div class="alert alert-success py-2 mb-2"><strong>Correct answer:</strong> '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
-          }}
-          if (r.explanation) html += '<div class="small text-muted">💡 '+r.explanation+'</div>';
-          html += '</div></div>';
-        }});
+        }
+        var res = await fetch('/api/submit-quiz', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, questions: QUIZ.questions, answers })
+        });
+        var data = await res.json();
+        var out = document.getElementById('results');
+        if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+        var html = '<div class="card border-0 shadow"><div class="card-body">'
+                 + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
+        (data.detailed_results||[]).forEach(function(row, idx){
+          var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
+          var icon = row.is_correct ? '✅' : '❌';
+          html += '<div class="p-3 border rounded mb-2 '+cls+'">'
+               +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
+          var options = QUIZ.questions[idx].options || {};
+          for (var key in options) {
+            var val = options[key];
+            var lineClass = '';
+            if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
+            if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
+            html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
+          }
+          html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
+               +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
+               + '</div>';
+        });
         html += '</div></div>';
         out.innerHTML = html;
-        out.scrollIntoView({{behavior:'smooth', block:'start'}});
-      }}
-
-      document.getElementById('startBtn').addEventListener('click', () => {{ QUIZ=buildQuiz(); startedAt=Date.now(); render(); }});
-      submitTop.addEventListener('click', submitQuiz);
-      submitBottom.addEventListener('click', submitQuiz);
-      prevBtn.addEventListener('click', ()=>{{ currentIndex=Math.max(0,currentIndex-1); scrollToIndex(currentIndex); }});
-      nextBtn.addEventListener('click', ()=>{{ currentIndex=Math.min((QUIZ?.questions?.length||1)-1,currentIndex+1); scrollToIndex(currentIndex); }});
-      document.addEventListener('keydown', (e)=>{{ if(!QUIZ) return; if(e.key==='ArrowLeft') {{e.preventDefault(); prevBtn.click();}} if(e.key==='ArrowRight') {{e.preventDefault(); nextBtn.click();}} }});
+        out.scrollIntoView({behavior:'smooth'});
+      }
+      document.getElementById('reload').addEventListener('click', reloadQuiz);
+      document.getElementById('submit').addEventListener('click', submitQuiz);
+      function setActiveChip(clicked) {
+        document.querySelectorAll('.domain-chip').forEach(function(c){ c.classList.remove('active'); });
+        clicked.classList.add('active');
+      }
+      document.querySelectorAll('.domain-chip').forEach(function(ch){
+        ch.addEventListener('click', function(){
+          setActiveChip(ch);
+          DOMAIN = ch.getAttribute('data-domain');
+          reloadQuiz();
+        })
+      });
+      render();
     </script>
     """
     return base_layout("Mock Exam", body)
 
-# --- Submit Quiz API (returns detailed review) ---
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
     data = request.get_json() or {}
     questions = data.get("questions") or []
     answers = data.get("answers") or {}
     quiz_type = data.get("quiz_type") or "practice"
-    domain = (data.get("domain") or "general").strip().lower()
-    time_taken = int(data.get("time_taken") or 0)
-
+    domain = data.get("domain") or "random"
+    # score
     total = len(questions)
     correct = 0
     detailed = []
@@ -967,7 +923,7 @@ def submit_quiz_api():
         })
     pct = (correct / total * 100) if total else 0.0
 
-    # record in session for Progress (now includes domain)
+    # record in session for Progress (include domain)
     hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
@@ -976,9 +932,8 @@ def submit_quiz_api():
         "score": pct,
         "total": total,
         "correct": correct,
-        "time": time_taken,
     })
-    session["quiz_history"] = hist[-200:]  # keep last 200 attempts
+    session["quiz_history"] = hist[-100:]  # keep last 100
 
     insights = []
     if pct >= 90: insights.append("🎯 Excellent — mastery level performance.")
@@ -991,123 +946,76 @@ def submit_quiz_api():
         "score": round(pct, 1),
         "correct": correct,
         "total": total,
-        "time_taken": time_taken,
         "performance_insights": insights,
         "detailed_results": detailed
     })
 
-# --- Progress (session-based) ---
+# --- Progress (session-based for now) ---
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
-    avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
+    overall = round(sum(h.get("score", 0.0) for h in hist)/len(hist), 1) if hist else 0.0
 
-    # table rows (same as before)
-    rows = "".join([
-        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h.get('type','')}</td><td>{h.get('correct',0)}/{h.get('total',0)}</td><td>{round(h.get('score',0.0),1)}%</td></tr>"
+    # Per-domain stats
+    per = {}
+    for h in hist:
+        d = h.get("domain") or "random"
+        per.setdefault(d, []).append(h.get("score", 0.0))
+    per_rows = []
+    for dkey, scores in per.items():
+        avg = round(sum(scores)/len(scores), 1) if scores else 0.0
+        name = DOMAINS.get(dkey, "All Domains")
+        per_rows.append((name, avg, len(scores)))
+    per_rows.sort(key=lambda x: x[0].lower())
+
+    hist_rows = "".join([
+        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h.get('domain','random')}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
         for h in reversed(hist)
-    ]) or '<tr><td colspan="4" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+    ]) or '<tr><td colspan="5" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
 
-    body_top = """
-    <div class="row"><div class="col-md-10 mx-auto">
+    per_table = "".join([
+        f"<tr><td>{name}</td><td>{count}</td><td>{avg}%</td></tr>"
+        for (name, avg, count) in per_rows
+    ]) or '<tr><td colspan="3" class="text-center text-muted">No domain data yet</td></tr>'
+
+    body = f"""
+    <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow mb-3">
         <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
         <div class="card-body">
           <div class="row align-items-center">
-            <div class="col-lg-6">
-              <div id="gaugeProgress" class="mb-2"></div>
-              <div class="text-muted small">Overall average of saved attempts</div>
+            <div class="col-md-8">
+              <div class="mb-3"><strong>Overall Average:</strong> {overall}%</div>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                  <thead class="table-light"><tr><th>When (UTC)</th><th>Domain</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
+                  <tbody>{hist_rows}</tbody>
+                </table>
+              </div>
+              <div class="table-responsive mt-3">
+                <table class="table table-sm align-middle">
+                  <thead class="table-light"><tr><th>Domain</th><th>Attempts</th><th>Avg Score</th></tr></thead>
+                  <tbody>{per_table}</tbody>
+                </table>
+              </div>
+              <div class="text-end mt-2">
+                <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+                  <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
+                </form>
+              </div>
             </div>
-            <div class="col-lg-6">
-              <div class="mb-2"><strong>Average Score:</strong> """
-    body_avg = str(avg)
-    body_mid = """%</div>
-              <p class="mb-0 text-muted">Tip: aim for steady improvement. Review missed questions first.</p>
+            <div class="col-md-4 text-center">
+              <div id="progGauge"></div>
+              <div class="small text-muted mt-2">Overall average</div>
             </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="card border-0 shadow">
-        <div class="card-header bg-light"><strong>History</strong></div>
-        <div class="card-body">
-          <div class="table-responsive">
-            <table class="table table-sm align-middle">
-              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
-              <tbody>"""
-    body_rows = rows
-    body_mid2 = """</tbody>
-            </table>
-          </div>
-          <div class="text-end">
-            <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
-              <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
-            </form>
           </div>
         </div>
       </div>
     </div></div>
-
     <script>
-      (function () {
-        var pct = """
-    body_pct = str(avg)
-    body_bot = """;
-        if (isNaN(pct)) { pct = 0; }
-        if (pct < 0) pct = 0;
-        if (pct > 100) pct = 100;
-
-        var el = document.getElementById('gaugeProgress');
-        var w = 360, h = 200;
-        var cx = w/2, cy = h - 10, r = Math.min(w, h*2) * 0.46;
-        var start = 180, end = 0;
-
-        function polar(cx, cy, r, a) {
-          var rad = (a - 90) * Math.PI/180;
-          return {x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad)};
-        }
-        function arc(cx, cy, r, a0, a1) {
-          var p0 = polar(cx,cy,r,a0), p1 = polar(cx,cy,r,a1);
-          var large = ((a1 - a0 + 360) % 360) > 180 ? 1 : 0;
-          var sweep = a1 > a0 ? 1 : 0;
-          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1)
-               + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' '
-               + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
-        }
-
-        var col = '#dc3545';
-        if (pct >= 70) col = '#fd7e14';
-        if (pct >= 80) col = '#ffc107';
-        if (pct >= 90) col = '#28a745';
-
-        var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-        svg += '<path d="' + arc(cx,cy,r,start,end) + '" fill="none" stroke="#e9ecef" stroke-width="18" stroke-linecap="round"/>';
-        var sweep = (end - start) * (pct/100);
-        svg += '<path d="' + arc(cx,cy,r,start,start+sweep) + '" fill="none" stroke="' + col + '" stroke-width="18" stroke-linecap="round"/>';
-
-        for (var t = 0; t <= 10; t++) {
-          var a = start + (end - start) * (t/10);
-          var p0 = polar(cx,cy,r+2,a);
-          var p1 = polar(cx,cy,r-12,a);
-          svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
-              + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
-              + '" stroke="#ced4da" stroke-width="2" />';
-        }
-
-        var na = start + (end - start) * (pct/100);
-        var pn = polar(cx,cy,r-8,na);
-        svg += '<line x1="' + cx.toFixed(1) + '" y1="' + cy.toFixed(1)
-            + '" x2="' + pn.x.toFixed(1) + '" y2="' + pn.y.toFixed(1)
-            + '" stroke="#343a40" stroke-width="3" />';
-        svg += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="5" fill="#343a40" />';
-
-        svg += '<text x="' + cx.toFixed(1) + '" y="' + (cy-20).toFixed(1) + '" text-anchor="middle" font-size="22" font-weight="700" fill="#212529">' + pct.toFixed(1) + '%</text>';
-        svg += '</svg>';
-        el.innerHTML = svg;
-      })();
+      mountGauge('progGauge', """ + str(overall) + """);
     </script>
     """
-    body = body_top + body_avg + body_mid + body_rows + body_mid2 + body_pct + body_bot
     return base_layout("Progress", body)
 
 @app.post("/progress/reset")
@@ -1132,11 +1040,3 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
-
-
-
-
-
-
-
-
