@@ -127,30 +127,29 @@ def base_layout(title: str, body_html: str) -> str:
         .domain-chip.active {{ background:#1976d2; color:#fff; border-color:#1976d2; }}
         .btn-enhanced {{ border-radius:8px; font-weight:600; }}
 
-        /* Detailed results styles */
-        .result-card {{ border-left: 4px solid; }}
-        .result-card.correct {{ border-left-color: #28a745; background: rgba(40,167,69,0.06); }}
-        .result-card.incorrect {{ border-left-color: #dc3545; background: rgba(220,53,69,0.06); }}
-        .answer-good {{ color:#155724; background:#d4edda; border:0; padding:.5rem .75rem; border-radius:.5rem; }}
-        .answer-bad  {{ color:#721c24; background:#f8d7da; border:0; padding:.5rem .75rem; border-radius:.5rem; }}
-        .answer-correct {{ color:#0f5132; background:#d1e7dd; border:0; padding:.5rem .75rem; border-radius:.5rem; }}
-        .explain {{ background:#f8f9fa; border-radius:.5rem; padding:.75rem; }}
+        /* Results styling */
+        .result-card {{ border-left: 4px solid #dee2e6; }}
+        .result-card.correct {{ border-left-color: #28a745; background: rgba(40,167,69,0.05); }}
+        .result-card.incorrect {{ border-left-color: #dc3545; background: rgba(220,53,69,0.05); }}
+        .answer.correct {{ color: #198754; font-weight: 600; }}
+        .answer.wrong {{ color: #dc3545; font-weight: 600; }}
 
-        /* Speedometer dial */
-        .speedo {{ width: 220px; height: 110px; position: relative; margin: 8px auto; }}
-        .speedo__arc {{
-          width: 220px; height: 110px; border-top-left-radius: 220px; border-top-right-radius: 220px;
+        /* Simple speedometer dial */
+        .dial-wrap {{
+          width: 220px; height: 120px; position: relative; margin: 0 auto;
           background: conic-gradient(#dc3545 0 60deg, #ffc107 60deg 120deg, #28a745 120deg 180deg);
-          -webkit-mask: radial-gradient(circle at 50% 100%, transparent 66px, black 67px);
-                  mask: radial-gradient(circle at 50% 100%, transparent 66px, black 67px);
+          border-bottom-left-radius: 220px; border-bottom-right-radius: 220px;
+          overflow: hidden;
         }}
-        .speedo__needle {{
-          position: absolute; bottom: 0; left: 50%;
-          width: 4px; height: 95px; background: #111; transform-origin: 50% 100%;
-          transform: rotate(-90deg); border-radius: 2px; transition: transform .6s ease;
+        .dial-center {{
+          position:absolute; left:50%; bottom:0; transform: translateX(-50%);
+          width: 12px; height: 12px; background:#212529; border-radius: 50%; z-index: 2;
         }}
-        .speedo__hub {{ position: absolute; bottom: 0; left: calc(50% - 8px); width: 16px; height: 16px; background: #111; border-radius: 50%; }}
-        .speedo__label {{ text-align: center; font-weight: 700; margin-top: .25rem; }}
+        .needle {{
+          position:absolute; bottom:0; left:50%; transform-origin: bottom center; transform: translateX(-50%) rotate(-90deg);
+          width: 2px; height: 100px; background:#212529; z-index:1;
+        }}
+        .dial-label {{ text-align:center; margin-top: 8px; font-weight:600; }}
       </style>
     </head><body>
       {nav}
@@ -795,3 +794,4 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
