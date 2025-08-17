@@ -770,8 +770,539 @@ def server_error(e):
 # -----------------------------------------------------------------------------
 def create_app():
     return app
+# === Feature Restore (Lite) — paste this ABOVE: if __name__ == '__main__': ===
+
+from markupsafe import Markup
+
+def _make_quiz(quiz_type='practice', domain='random', difficulty='medium', count=10):
+    # Use BASE_QUESTIONS if present; otherwise fall back to a tiny built-in pool
+    pool = []
+    try:
+        pool = BASE_QUESTIONS[:]  # defined earlier in this file
+    except Exception:
+        pool = [{
+            "question": "What is defense in depth?",
+            "options": {"A": "Single control", "B": "Layered controls", "C": "No controls", "D": "Outsourcing"},
+            "correct": "B",
+            "explanation": "Multiple layers ensure no single point of failure.",
+            "source_name": "Security Basics",
+            "domain": "security-principles",
+            "difficulty": "medium",
+        }]
+    # domain filter
+    if domain and domain not in ('random', 'general'):
+        filtered = [q for q in pool if q.get('domain') == domain]
+        if filtered:
+            pool = filtered
+    # build list
+    if not count or count <= 0:
+        count = 10
+    random.shuffle(pool)
+    out = []
+    while len(out) < count:
+        for q in pool:
+            if len(out) >= count:
+                break
+            out.append(q.copy())
+        if not pool:
+            break
+    title = f"CPP {quiz_type.title().replace('-', ' ')}"
+    return {
+        "title": title,
+        "quiz_type": quiz_type,
+        "domain": domain or 'general',
+        "difficulty": difficulty,
+        "questions": out[:count],
+    }
+
+def _safe_chat_call(messages):
+    # Use your existing chat_with_ai if present; otherwise return a helpful stub
+    try:
+        if 'chat_with_ai' in globals() and callable(chat_with_ai):
+            return chat_with_ai(messages)
+    except Exception as e:
+        print(f"AI call error: {e}")
+    return ("I’m up and running! The full AI tutor will answer as soon as your API is reachable. "
+            "Meanwhile, ask me about CPP domains, and I’ll give quick notes.")
+
+def _render_pill(text):
+    return f'<span class="domain-chip" data-domain="{text}">{text}</span>'
+
+# --------------------------- Tutor (Study) ---------------------------
+@app.route('/study')
+@login_required
+def study_page():
+    # Chips from CPP_DOMAINS if available
+    try:
+        chips = ''.join([f'<span class="domain-chip" data-domain="{k}">{v["name"]}</span>' for k, v in CPP_DOMAINS.items()])
+    except Exception:
+        chips = ''.join([_render_pill(k) for k in ["security-principles","business-principles","investigations",
+                                                   "personnel-security","physical-security","information-security","crisis-management"]])
+
+    content = f"""
+    <div class="row">
+      <div class="col-md-8 mx-auto">
+        <div class="card border-0 shadow">
+          <div class="card-header bg-primary text-white d-flex align-items-center gap-2">
+            <h4 class="mb-0">🤖 AI Tutor</h4>
+            <small class="ms-2">Pick a domain or just ask a question</small>
+          </div>
+          <div class="card-body">
+            <div class="mb-2"><strong>Domains:</strong></div>
+            <div class="mb-3">{chips}</div>
+
+            <div id="chat" style="height: 360px; overflow-y: auto; border:1px solid #e9ecef; border-radius:8px; padding:12px; background:#fafafa; margin-bottom:12px;"></div>
+            <div class="input-group">
+              <input id="userInput" class="form-control" placeholder="Ask about any CPP topic..." />
+              <button id="sendBtn" class="btn btn-primary btn-enhanced">Send</button>
+            </div>
+            <div class="small text-muted mt-2">Tip: Try “Explain incident response phases.”</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      const chatDiv = document.getElementById('chat');
+      const input = document.getElementById('userInput');
+      const btn = document.getElementById('sendBtn');
+      function add(role, text) {{
+        const wrap = document.createElement('div');
+        wrap.className = 'mb-2';
+        wrap.innerHTML = '<div class="small text-muted">{role}</div><div class="p-2 bg-white border rounded">{text}</div>'
+          .replace('{{role}}', role)
+          .replace('{{text}}', (text||'').replace(/</g,'&lt;').replace(/\\n/g,'<br>'));
+        chatDiv.appendChild(wrap);
+        chatDiv.scrollTop = chatDiv.scrollHeight;
+      }}
+      async function send() {{
+        const q = input.value.trim();
+        if(!q) return;
+        add('You', q);
+        input.value = '';
+        btn.disabled = true; btn.textContent = 'Thinking...';
+        try {{
+          const r = await fetch('/chat', {{method:'POST', headers:{{'Content-Type':'application/json'}}, body: JSON.stringify({{message:q}})}} );
+          const data = await r.json();
+          add('Tutor', data.response || data.error || 'Sorry, something went wrong.');
+        }} catch(e) {{
+          add('Tutor', 'Network error, please try again.');
+        }} finally {{
+          btn.disabled = false; btn.textContent = 'Send';
+        }}
+      }}
+      btn.addEventListener('click', send);
+      input.addEventListener('keydown', (e)=>{{ if(e.key==='Enter'&&!btn.disabled) send(); }});
+      document.querySelectorAll('.domain-chip').forEach(chip => {{
+        chip.addEventListener('click', () => {{
+          input.value = 'Explain key topics in ' + chip.textContent;
+          input.focus();
+        }});
+      }});
+    </script>
+    """
+    return render_base_template("AI Tutor", content, user=User.query.get(session['user_id']))
+
+@app.route('/chat', methods=['POST'])
+@login_required
+def chat_endpoint():
+    try:
+        data = request.get_json() or {}
+        msg = (data.get('message') or '').strip()
+        if not msg:
+            return jsonify({'error': 'Empty message'}), 400
+        # keep a tiny session chat log (no DB needed)
+        history = session.get('chat_history', [])
+        history.append({'role': 'user', 'content': msg})
+        # call AI (or stub)
+        ai = _safe_chat_call([{'role':'user','content':msg}])
+        history.append({'role': 'assistant', 'content': ai})
+        session['chat_history'] = history[-20:]
+        return jsonify({'response': ai})
+    except Exception as e:
+        print(f"/chat error: {e}")
+        return jsonify({'error': 'Tutor error. Please try again.'}), 500
+
+# --------------------------- Flashcards ---------------------------
+@app.route('/flashcards')
+@login_required
+def flashcards_page():
+    # Domain chips
+    try:
+        chips = ['<div class="domain-chip active" data-domain="random">🎲 Random</div>'] + \
+                [f'<div class="domain-chip" data-domain="{k}">{v["name"]}</div>' for k, v in CPP_DOMAINS.items()]
+    except Exception:
+        chips = ['<div class="domain-chip active" data-domain="random">🎲 Random</div>']
+    chips_html = ''.join(chips)
+
+    content = f"""
+    <div class="row">
+      <div class="col-md-3">
+        <div class="card border-0 shadow-sm">
+          <div class="card-header bg-info text-white"><strong>📂 Domains</strong></div>
+          <div class="card-body">{chips_html}</div>
+        </div>
+      </div>
+      <div class="col-md-9">
+        <div class="card border-0 shadow-sm">
+          <div class="card-body">
+            <div id="card" class="flashcard" style="height:300px; display:flex; align-items:center; justify-content:center;">
+              Loading...
+            </div>
+            <div class="text-center mt-3">
+              <button id="flip" class="btn btn-outline-primary btn-enhanced me-2">Flip</button>
+              <button id="next" class="btn btn-primary btn-enhanced">Next</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <script>
+      let domain = 'random', cards=[], i=0, back=false;
+      function render(){{
+        const c = cards[i] || {{front:'No cards yet', back:''}};
+        document.getElementById('card').innerHTML = (back?c.back:c.front).replace(/</g,'&lt;').replace(/\\n/g,'<br>');
+      }}
+      async function load(){{
+        document.getElementById('card').textContent='Loading...';
+        const r = await fetch('/api/flashcards?domain='+encodeURIComponent(domain)+'&count=50');
+        const data = await r.json();
+        cards = data.cards || []; i=0; back=false; render();
+      }}
+      document.getElementById('flip').addEventListener('click', ()=>{{back=!back; render();}});
+      document.getElementById('next').addEventListener('click', ()=>{{back=false; i=(i+1)%Math.max(1,cards.length); render();}});
+      document.querySelectorAll('.domain-chip').forEach(ch=>{{
+        ch.addEventListener('click', ()=>{
+          document.querySelectorAll('.domain-chip').forEach(x=>x.classList.remove('active'));
+          ch.classList.add('active');
+          domain = ch.getAttribute('data-domain'); load();
+        });
+      }});
+      load();
+    </script>
+    """
+    return render_base_template("Flashcards", content, user=User.query.get(session['user_id']))
+
+@app.get('/api/flashcards')
+@login_required
+def api_flashcards():
+    try:
+        domain = (request.args.get('domain') or 'random').strip().lower()
+        try:
+            cnt = int(request.args.get('count', '50'))
+        except ValueError:
+            cnt = 50
+        cnt = max(1, min(200, cnt))
+        base = BASE_QUESTIONS[:] if 'BASE_QUESTIONS' in globals() else []
+        if not base:
+            base = [{
+                "question":"What is risk assessment?",
+                "options":{"A":"Guessing","B":"Identifying & prioritizing risks","C":"Eliminating risk","D":"Blaming others"},
+                "correct":"B",
+                "explanation":"Identify, analyze, evaluate; choose cost-effective mitigations.",
+                "source_name":"CPP Intro",
+                "domain":"security-principles",
+                "difficulty":"easy"
+            }]
+        if domain not in ('random', 'general'):
+            filtered = [q for q in base if q.get('domain') == domain]
+            base = filtered or base
+        random.shuffle(base)
+        out=[]
+        for q in base[:cnt]:
+            opts = q.get('options', {}) or {}
+            corr = q.get('correct')
+            corr_text = opts.get(corr, '')
+            back_lines=[]
+            if corr_text: back_lines.append(f"✅ Correct: {corr_text}")
+            if q.get('explanation'): back_lines.append(f"💡 {q['explanation']}")
+            if q.get('source_name'): back_lines.append(f"📚 Source: {q['source_name']}")
+            out.append({"front": (q.get('question') or '').strip(),
+                        "back": "\\n\\n".join(back_lines) or "Correct answer available."})
+        return jsonify({"cards": out, "domain": domain, "count": len(out)})
+    except Exception as e:
+        print(f"/api/flashcards error: {e}")
+        return jsonify({"error":"Could not load flashcards."}), 500
+
+# --------------------------- Quizzes + Mock Exam ---------------------------
+@app.route('/quiz-selector')
+@login_required
+def quiz_selector():
+    try:
+        chips = ['<span class="domain-chip active" data-domain="random">🎲 All Domains</span>'] + \
+                [f'<span class="domain-chip" data-domain="{k}">{v["name"]}</span>' for k, v in CPP_DOMAINS.items()]
+    except Exception:
+        chips = ['<span class="domain-chip active" data-domain="random">🎲 All Domains</span>']
+    chips_html = ''.join(chips)
+    content = f"""
+    <div class="card border-0 shadow">
+      <div class="card-header bg-success text-white">
+        <h4 class="mb-0">📝 Build Your Quiz</h4>
+      </div>
+      <div class="card-body">
+        <div class="mb-3"><strong>Domain:</strong> {chips_html}</div>
+        <div class="mb-3">
+          <label class="form-label me-2">Questions:</label>
+          <select id="qcount" class="form-select" style="max-width:160px; display:inline-block;">
+            <option>5</option><option selected>10</option><option>15</option><option>20</option>
+          </select>
+        </div>
+        <div class="mb-3">
+          <label class="form-label me-2">Difficulty:</label>
+          <select id="diff" class="form-select" style="max-width:200px; display:inline-block;">
+            <option value="easy">Easy</option>
+            <option value="medium" selected>Medium</option>
+            <option value="hard">Hard</option>
+          </select>
+        </div>
+        <button id="start" class="btn btn-success btn-enhanced">Start Quiz</button>
+        <a href="/mock-exam" class="btn btn-outline-warning btn-enhanced ms-2">Mock Exam</a>
+      </div>
+    </div>
+    <script>
+      let domain='random';
+      document.querySelectorAll('.domain-chip').forEach(c=>{
+        c.addEventListener('click',()=>{
+          document.querySelectorAll('.domain-chip').forEach(x=>x.classList.remove('active'));
+          c.classList.add('active');
+          domain = c.getAttribute('data-domain');
+        });
+      });
+      document.getElementById('start').addEventListener('click', ()=>{
+        const count = document.getElementById('qcount').value;
+        const diff = document.getElementById('diff').value;
+        window.location.href = '/quiz/practice?domain='+encodeURIComponent(domain)+'&count='+count+'&difficulty='+diff;
+      });
+    </script>
+    """
+    return render_base_template("Quizzes", content, user=User.query.get(session['user_id']))
+
+@app.route('/quiz/<quiz_type>')
+@login_required
+def quiz_page(quiz_type):
+    domain = request.args.get('domain','random')
+    difficulty = request.args.get('difficulty','medium')
+    try:
+        count = int(request.args.get('count','10'))
+    except Exception:
+        count = 10
+    session['quiz_start_time'] = datetime.utcnow().timestamp()
+    data = _make_quiz(quiz_type, domain, difficulty, count)
+    qjson = json.dumps(data)
+
+    content = f"""
+    <div class="card border-0 shadow">
+      <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+        <div>
+          <h5 class="mb-0">📝 {data['title']}</h5>
+          <small>{len(data['questions'])} questions • {difficulty.title()}</small>
+        </div>
+        <button id="submitTop" class="btn btn-success btn-enhanced">Submit</button>
+      </div>
+      <div class="card-body" id="quizContainer"></div>
+      <div class="card-footer text-end">
+        <button id="submitBottom" class="btn btn-success btn-enhanced">Submit</button>
+      </div>
+    </div>
+    <div class="mt-3" id="results"></div>
+    <script>
+      const QUIZ_DATA = {qjson};
+      function render(){{
+        const c = document.getElementById('quizContainer');
+        c.innerHTML = '';
+        (QUIZ_DATA.questions||[]).forEach((q,i)=>{{
+          const card=document.createElement('div');
+          card.className='mb-3 p-3 border rounded';
+          card.id='q-'+i;
+          const h=document.createElement('h6');
+          h.textContent='Question '+(i+1)+' of '+(QUIZ_DATA.questions.length);
+          const p=document.createElement('p'); p.textContent=q.question||'';
+          card.appendChild(h); card.appendChild(p);
+          const opts=q.options||{{}};
+          Object.keys(opts).forEach(k=>{{
+            const id='i'+i+'_'+k;
+            const wrap=document.createElement('div'); wrap.className='form-check';
+            const inp=document.createElement('input'); inp.type='radio'; inp.className='form-check-input';
+            inp.name='q'+i; inp.id=id; inp.value=k;
+            const lab=document.createElement('label'); lab.className='form-check-label'; lab.htmlFor=id;
+            lab.textContent=k+') '+opts[k];
+            wrap.appendChild(inp); wrap.appendChild(lab); card.appendChild(wrap);
+          }});
+          c.appendChild(card);
+        }});
+      }}
+      async function submit(){{
+        const ans = {{}};
+        (QUIZ_DATA.questions||[]).forEach((q,i)=>{{
+          const sel=document.querySelector('input[name="q'+i+'"]:checked');
+          ans[String(i)] = sel? sel.value : null;
+        }});
+        const r = await fetch('/submit-quiz', {{
+          method:'POST', headers:{{'Content-Type':'application/json'}},
+          body: JSON.stringify({{
+            quiz_type: QUIZ_DATA.quiz_type,
+            domain: QUIZ_DATA.domain,
+            questions: QUIZ_DATA.questions,
+            answers: ans
+          }})
+        }});
+        const data = await r.json();
+        const div = document.getElementById('results');
+        if(data.error) {{ div.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
+        let html = '<div class="card border-0 shadow"><div class="card-body">';
+        html += '<h4 class="mb-2">Result: '+data.score.toFixed(1)+'%</h4>';
+        html += '<div class="text-muted mb-3">'+data.correct+' / '+data.total+' correct</div>';
+        if(Array.isArray(data.performance_insights)) {{
+          html += '<ul>'+data.performance_insights.map(x=>'<li>'+x+'</li>').join('')+'</ul>';
+        }}
+        html += '</div></div>';
+        div.innerHTML = html;
+        window.scrollTo({{top: div.offsetTop-40, behavior:'smooth'}});
+      }}
+      document.getElementById('submitTop').addEventListener('click', submit);
+      document.getElementById('submitBottom').addEventListener('click', submit);
+      render();
+    </script>
+    """
+    return render_base_template("Quiz", content, user=User.query.get(session['user_id']))
+
+@app.route('/submit-quiz', methods=['POST'])
+@login_required
+def submit_quiz_lite():
+    try:
+        data = request.get_json() or {}
+        quiz_type = data.get('quiz_type') or 'practice'
+        answers = data.get('answers', {})
+        questions = data.get('questions', [])
+        domain = data.get('domain', 'general')
+
+        if not questions:
+            return jsonify({'error':'Invalid quiz data'}), 400
+
+        # time taken (minutes)
+        time_taken = 0
+        if 'quiz_start_time' in session:
+            try:
+                start = datetime.fromtimestamp(session['quiz_start_time'])
+                time_taken = int((datetime.utcnow() - start).total_seconds()/60)
+            except Exception:
+                time_taken = 0
+            session.pop('quiz_start_time', None)
+
+        correct = 0
+        total = len(questions)
+        for i, q in enumerate(questions):
+            u = answers.get(str(i))
+            if u and u == q.get('correct'):
+                correct += 1
+
+        score = (correct/total)*100 if total else 0.0
+
+        # store a tiny progress snapshot in session for the Progress page
+        prog = session.get('progress_events', [])
+        for i, q in enumerate(questions):
+            u = answers.get(str(i))
+            is_ok = bool(u and u == q.get('correct'))
+            prog.append({"domain": q.get('domain', domain), "ok": is_ok})
+        session['progress_events'] = prog[-500:]  # cap
+
+        # simple feedback
+        insights = []
+        if score >= 90: insights.append("🎯 Excellent! You're demonstrating mastery.")
+        elif score >= 80: insights.append("✅ Good job! Review explanations to polish.")
+        elif score >= 70: insights.append("📚 Fair performance — focus on missed concepts.")
+        else: insights.append("⚠️ Consider focused study before the real exam.")
+        if time_taken and total:
+            avg = time_taken/total
+            if avg < 1: insights.append("⚡ Great pace! Very efficient.")
+            elif avg > 3: insights.append("🐌 Try to increase speed a bit.")
+
+        try:
+            # non-fatal activity log
+            log_activity(session['user_id'], 'quiz_completed',
+                         f'{quiz_type}: {correct}/{total} in {time_taken} min')
+        except Exception as e:
+            print(f"activity log (non-fatal): {e}")
+
+        return jsonify({
+            "success": True,
+            "score": round(score, 1),
+            "correct": correct,
+            "total": total,
+            "time_taken": time_taken,
+            "performance_insights": insights
+        })
+    except Exception as e:
+        print(f"/submit-quiz error: {e}")
+        return jsonify({"error":"Error processing quiz results."}), 500
+
+@app.route('/mock-exam')
+@login_required
+def mock_exam_page():
+    # Simple chooser; then links to quiz with chosen size
+    content = """
+    <div class="card border-0 shadow">
+      <div class="card-header bg-warning text-dark">
+        <h4 class="mb-0">🏁 Mock Exam</h4>
+        <small>Full simulation across domains</small>
+      </div>
+      <div class="card-body">
+        <div class="row g-3">
+          %BTN%
+        </div>
+      </div>
+    </div>
+    """
+    btn = lambda n: f"""<div class="col-6 col-md-3">
+      <a class="btn btn-{('primary','success','warning','danger')[(n//25)-1]} w-100 btn-enhanced"
+         href="/quiz/mock-exam?domain=random&count={n}&difficulty=medium">{n} Questions</a>
+    </div>"""
+    grid = ''.join([btn(n) for n in (25,50,75,100)])
+    return render_base_template("Mock Exam", content.replace('%BTN%', grid), user=User.query.get(session['user_id']))
+
+# --------------------------- Progress (session-based) ---------------------------
+@app.route('/progress')
+@login_required
+def progress_page_lite():
+    events = session.get('progress_events', [])
+    # aggregate by domain
+    stats = {}
+    for e in events:
+        d = e.get('domain','general') or 'general'
+        s = stats.setdefault(d, {"ok":0,"n":0})
+        s["n"] += 1
+        s["ok"] += 1 if e.get('ok') else 0
+    rows = []
+    for d, s in stats.items():
+        pct = int(round(100.0 * (s["ok"]/s["n"])) if s["n"] else 0)
+        level = "mastered" if pct>=90 else ("good" if pct>=75 else "needs practice")
+        rows.append(f"<tr><td><strong>{d}</strong></td><td>{pct}%</td><td>{level.title()}</td><td class='text-center'>{s['n']}</td></tr>")
+    rows_html = ''.join(rows) or "<tr><td colspan='4' class='text-center text-muted py-3'>No data yet. Take a quiz to see progress.</td></tr>"
+    overall = int(round(sum(int(r.split('<td>')[1].split('%')[0]) for r in rows)/len(rows))) if rows else 0
+
+    content = f"""
+    <div class="card border-0 shadow">
+      <div class="card-header bg-primary text-white"><h4 class="mb-0">📊 Progress by Domain</h4></div>
+      <div class="card-body">
+        <div class="table-responsive">
+          <table class="table align-middle">
+            <thead class="table-light"><tr><th>Domain</th><th>Average</th><th>Level</th><th class="text-center">Questions</th></tr></thead>
+            <tbody>{rows_html}</tbody>
+          </table>
+        </div>
+        <div class="mt-3 text-center">
+          <div class="gauge-wrap" style="--p:{overall}%;">
+            <span>{overall}%</span>
+          </div>
+          <div class="small text-muted mt-2">Overall Progress (goal: 80%+)</div>
+        </div>
+      </div>
+    </div>
+    """
+    return render_base_template("Progress", content, user=User.query.get(session['user_id']))
+# === End Feature Restore (Lite) ===
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
