@@ -800,54 +800,55 @@ def submit_quiz_api():
 
 # --- Progress (session-based) + speedometer dial ---
 @app.get("/progress")
+@app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
     avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
-
     rows = "".join([
-        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h['type']}</td><td>{h.get('correct',0)}/{h.get('total',0)}</td><td>{round(h.get('score',0.0),1)}%</td><td>{(h.get('time_taken') or '—')}</td></tr>"
+        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
         for h in reversed(hist)
-    ]) or '<tr><td colspan="5" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+    ]) or '<tr><td colspan="4" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+
+    # Convert avg (0–100%) to needle degrees over a 180° arc: -90° (0%) to +90° (100%)
+    degree = -90 + int((avg/100.0) * 180)
 
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
-      <div class="card border-0 shadow">
-        <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
-          <h4 class="mb-0">📊 Progress</h4>
-          <div class="text-end">
-            <div id="overallDial" class="speedo">
-              <div class="speedo__arc"></div>
-              <div class="speedo__needle" id="needleOverall"></div>
-              <div class="speedo__hub"></div>
-            </div>
-            <div class="speedo__label"><span id="overallPctText">{avg}%</span></div>
-          </div>
-        </div>
+      <div class="card border-0 shadow mb-3">
+        <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
         <div class="card-body">
-          <div class="mb-3"><strong>Average Score:</strong> {avg}%</div>
-          <div class="table-responsive">
-            <table class="table table-sm align-middle">
-              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th><th>Time (min)</th></tr></thead>
-              <tbody>{rows}</tbody>
-            </table>
-          </div>
-          <div class="text-end">
-            <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
-              <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
-            </form>
+          <div class="row align-items-center">
+            <div class="col-md-5 text-center">
+              <div class="dial-wrap">
+                <div class="needle" id="needle"></div>
+                <div class="dial-center"></div>
+              </div>
+              <div class="dial-label">Average Score: <span id="avgPct">{avg}</span>%</div>
+            </div>
+            <div class="col-md-7">
+              <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                  <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
+                  <tbody>{rows}</tbody>
+                </table>
+              </div>
+              <div class="text-end mt-2">
+                <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+                  <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
       </div>
     </div></div>
     <script>
-      (function(){{
-        var pct = {avg};
-        var deg = -90 + (pct * 1.8);
-        var needle = document.getElementById('needleOverall');
-        var label = document.getElementById('overallPctText');
-        if (needle) needle.style.transform = 'rotate(' + deg + 'deg)';
-        if (label) label.textContent = pct + '%';
-      }})();
+      // rotate needle based on avg
+      const deg = {degree};
+      document.addEventListener('DOMContentLoaded', () => {{
+        const n = document.getElementById('needle');
+        if (n) n.style.transform = 'translateX(-50%) rotate(' + deg + 'deg)';
+      }});
     </script>
     """
     return base_layout("Progress", body)
@@ -874,6 +875,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
