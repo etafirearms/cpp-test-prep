@@ -1,9 +1,10 @@
-# app.py — Stable MVP (no DB), with Tutor, Flashcards, Quiz/Mock, Progress
+# app.py — Stable MVP (no DB), with Tutor, Flashcards, Quiz/Mock (detailed review),
+# and Progress (with speedometer dial)
 
 from flask import Flask, request, jsonify, session, redirect, url_for
 from flask import Response
 from datetime import datetime
-import os, json, random, textwrap, requests
+import os, json, random, textwrap, requests, time
 
 app = Flask(__name__)
 
@@ -125,6 +126,31 @@ def base_layout(title: str, body_html: str) -> str:
         }}
         .domain-chip.active {{ background:#1976d2; color:#fff; border-color:#1976d2; }}
         .btn-enhanced {{ border-radius:8px; font-weight:600; }}
+
+        /* Detailed results styles */
+        .result-card {{ border-left: 4px solid; }}
+        .result-card.correct {{ border-left-color: #28a745; background: rgba(40,167,69,0.06); }}
+        .result-card.incorrect {{ border-left-color: #dc3545; background: rgba(220,53,69,0.06); }}
+        .answer-good {{ color:#155724; background:#d4edda; border:0; padding:.5rem .75rem; border-radius:.5rem; }}
+        .answer-bad  {{ color:#721c24; background:#f8d7da; border:0; padding:.5rem .75rem; border-radius:.5rem; }}
+        .answer-correct {{ color:#0f5132; background:#d1e7dd; border:0; padding:.5rem .75rem; border-radius:.5rem; }}
+        .explain {{ background:#f8f9fa; border-radius:.5rem; padding:.75rem; }}
+
+        /* Speedometer dial */
+        .speedo {{ width: 220px; height: 110px; position: relative; margin: 8px auto; }}
+        .speedo__arc {{
+          width: 220px; height: 110px; border-top-left-radius: 220px; border-top-right-radius: 220px;
+          background: conic-gradient(#dc3545 0 60deg, #ffc107 60deg 120deg, #28a745 120deg 180deg);
+          -webkit-mask: radial-gradient(circle at 50% 100%, transparent 66px, black 67px);
+                  mask: radial-gradient(circle at 50% 100%, transparent 66px, black 67px);
+        }}
+        .speedo__needle {{
+          position: absolute; bottom: 0; left: 50%;
+          width: 4px; height: 95px; background: #111; transform-origin: 50% 100%;
+          transform: rotate(-90deg); border-radius: 2px; transition: transform .6s ease;
+        }}
+        .speedo__hub {{ position: absolute; bottom: 0; left: calc(50% - 8px); width: 16px; height: 16px; background: #111; border-radius: 50%; }}
+        .speedo__label {{ text-align: center; font-weight: 700; margin-top: .25rem; }}
       </style>
     </head><body>
       {nav}
@@ -332,89 +358,45 @@ def flashcards_page():
     """
     return base_layout("Flashcards", body)
 
-# --- Quiz + Mock Exam ---
+# --- Quiz (with count selector + detailed review) ---
 @app.get("/quiz")
 def quiz_page():
-    q = build_quiz(10)
+    # Allow user to pick 5/10/15/20 via ?count=
+    try:
+        count = int(request.args.get("count", "10"))
+    except ValueError:
+        count = 10
+    if count not in (5, 10, 15, 20):
+        count = 10
+
+    q = build_quiz(count)
     q_json = json.dumps(q)
+
+    # start time for simple "time taken" (minutes) on server
+    session["quiz_started_at"] = time.time()
+
+    # Build count buttons
+    def btn(n):
+        active = " active" if n == count else ""
+        return f'<a class="btn btn-outline-light btn-sm{active}" href="/quiz?count={n}">{n}</a>'
+    btns = btn(5) + btn(10) + btn(15) + btn(20)
+
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
       <div class="card border-0 shadow">
         <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-          <div><h4 class="mb-0">📝 Practice Quiz</h4><small>10 questions</small></div>
-          <button id="submitTop" class="btn btn-light btn-sm btn-enhanced">Submit</button>
+          <div>
+            <h4 class="mb-0">📝 Practice Quiz</h4>
+            <small>Choose how many questions, answer all, then submit to see detailed feedback.</small>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <div class="btn-group" role="group">{btns}</div>
+            <button id="submitTop" class="btn btn-light btn-sm btn-enhanced">Submit</button>
+          </div>
         </div>
         <div class="card-body" id="quiz"></div>
         <div class="card-footer text-end">
           <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced">Submit Quiz</button>
-        </div>
-      </div>
-      <div id="results" class="mt-4"></div>
-    </div></div>
-    <script>
-      const QUIZ = {q_json};
-      const cont = document.getElementById('quiz');
-      function render() {{
-        cont.innerHTML = '';
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const card = document.createElement('div');
-          card.className = 'mb-3 p-3 border rounded';
-          card.id = 'q'+idx;
-          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + '</div>'
-                         + '<div class="mb-2">'+ qq.question + '</div>';
-          const opts = qq.options || {{}};
-          for (const k in opts) {{
-            const id = 'q' + idx + '_' + k;
-            const row = document.createElement('div');
-            row.className = 'form-check mb-1';
-            row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
-                          + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
-            card.appendChild(row);
-          }}
-          cont.appendChild(card);
-        }});
-      }}
-      async function submitQuiz() {{
-        const answers = {{}};
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
-          answers[String(idx)] = sel ? sel.value : null;
-        }});
-        const res = await fetch('/api/submit-quiz', {{
-          method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{ quiz_type:'practice', domain:'general', questions: QUIZ.questions, answers }})
-        }});
-        const data = await res.json();
-        const out = document.getElementById('results');
-        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-        // Save to session progress (display returned data)
-        out.innerHTML = '<div class="card border-0 shadow"><div class="card-body text-center">'
-                      + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                      + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
-                      + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '')
-                      + '</div></div>';
-        window.scrollTo({{top: 0, behavior: 'smooth'}});
-      }}
-      document.getElementById('submitTop').addEventListener('click', submitQuiz);
-      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
-      render();
-    </script>
-    """
-    return base_layout("Quiz", body)
-
-@app.get("/mock-exam")
-def mock_exam_page():
-    q = build_quiz(25)
-    q_json = json.dumps(q)
-    body = f"""
-    <div class="row"><div class="col-md-11 mx-auto">
-      <div class="card border-0 shadow">
-        <div class="card-header bg-warning text-dark">
-          <h4 class="mb-0">🏁 Mock Exam</h4><small>25 questions — answer all before submitting</small>
-        </div>
-        <div class="card-body" id="quiz"></div>
-        <div class="card-footer text-end">
-          <button id="submit" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
         </div>
       </div>
       <div id="results" class="mt-4"></div>
@@ -442,18 +424,178 @@ def mock_exam_page():
           cont.appendChild(card);
         }});
       }}
+      function ensureAllAnswered() {{
+        const total = (QUIZ.questions||[]).length; const miss=[];
+        for (let i=0;i<total;i++) {{
+          const sel = document.querySelector('input[name="q'+i+'"]:checked');
+          if (!sel) miss.push(i+1);
+        }}
+        if (miss.length) {{
+          alert('Please answer all questions. Missing: Q' + miss.join(', Q'));
+          const first = document.getElementById('q'+(miss[0]-1));
+          if (first) first.scrollIntoView({{behavior:'smooth', block:'center'}});
+          return false;
+        }}
+        return true;
+      }}
       async function submitQuiz() {{
+        if (!ensureAllAnswered()) return;
         const answers = {{}};
-        const unanswered = [];
         (QUIZ.questions||[]).forEach((qq, idx) => {{
           const sel = document.querySelector('input[name="q'+idx+'"]:checked');
-          if (!sel) unanswered.push(idx+1);
           answers[String(idx)] = sel ? sel.value : null;
         }});
-        if (unanswered.length) {{
-          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
-          return;
+        const res = await fetch('/api/submit-quiz', {{
+          method:'POST', headers:{{'Content-Type':'application/json'}},
+          body: JSON.stringify({{ quiz_type:'practice', domain:'general', questions: QUIZ.questions, answers }})
+        }});
+        const data = await res.json();
+        const out = document.getElementById('results');
+        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
+
+        // Build detailed review (green/red + correct answer + explanation)
+        let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
+                 + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
+                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '')
+                 + '</div></div>';
+
+        if (Array.isArray(data.performance_insights)) {{
+          html += '<div class="alert alert-info border-0 mt-3"><h6 class="mb-2">📈 Performance Summary</h6><ul class="mb-0">';
+          data.performance_insights.forEach(t=> html += '<li>'+t+'</li>');
+          html += '</ul></div>';
         }}
+
+        if (Array.isArray(data.detailed_results)) {{
+          html += '<div class="mt-4"><h5 class="mb-3">Question-by-Question Review</h5>';
+          data.detailed_results.forEach((r)=>{{
+            const good = r.is_correct;
+            const icon = good ? '✅' : '❌';
+            html += '<div class="card mb-3 result-card ' + (good?'correct':'incorrect') + '"><div class="card-body">';
+            html += '<h6 class="card-title">'+icon+' Question '+r.index+'</h6>';
+            html += '<p class="card-text">'+(r.question||'')+'</p>';
+            if (good) {{
+              html += '<div class="answer-good"><strong>✅ Correct!</strong> '+r.correct_letter+') '+(r.correct_text||'')+'</div>';
+            }} else {{
+              html += '<div class="answer-bad"><strong>❌ Your answer:</strong> '+(r.user_letter? (r.user_letter + ') ' + (r.user_text||'')) : '— (No selection)')+'</div>';
+              html += '<div class="answer-correct mt-2"><strong>✅ Correct answer:</strong> '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+            }}
+            if (r.explanation) {{ html += '<div class="explain mt-2"><strong>💡 Why:</strong> '+r.explanation+'</div>'; }}
+            html += '</div></div>';
+          }});
+          html += '</div>';
+        }}
+        out.innerHTML = html;
+        window.scrollTo({{top: 0, behavior: 'smooth'}});
+      }}
+      document.getElementById('submitTop').addEventListener('click', submitQuiz);
+      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
+      render();
+    </script>
+    """
+    return base_layout("Quiz", body)
+
+# --- Mock Exam (landing + detailed review) ---
+@app.get("/mock-exam")
+def mock_exam_page():
+    # Pick 25/50/75/100 via ?count=
+    requested = request.args.get("count")
+    try:
+        count = int(requested) if requested else None
+    except ValueError:
+        count = None
+
+    valid = [25, 50, 75, 100]
+    if count not in valid:
+        # Landing screen
+        cards = "".join([
+            f'<div class="col-6 col-md-3"><a class="btn btn-outline-warning w-100 py-3" href="/mock-exam?count={n}">Start {n} Questions</a></div>'
+            for n in valid
+        ])
+        content = f"""
+        <div class="row">
+          <div class="col-md-10 mx-auto">
+            <div class="card border-0 shadow">
+              <div class="card-header bg-warning text-dark">
+                <h4 class="mb-0">🏁 Mock Exam</h4>
+                <small>Simulate the real exam with full, detailed feedback.</small>
+              </div>
+              <div class="card-body">
+                <div class="row g-3">{cards}</div>
+                <div class="mt-3 text-muted small">Tip: Try 25 first to gauge your level, then scale up.</div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Mock Exam", content)
+
+    # Generate exam
+    q = build_quiz(count)
+    q_json = json.dumps(q)
+    session["quiz_started_at"] = time.time()
+
+    body = f"""
+    <div class="row"><div class="col-md-11 mx-auto">
+      <div class="card border-0 shadow">
+        <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+          <div>
+            <h4 class="mb-0">🏁 Mock Exam</h4>
+            <small>{count} questions — answer all before submitting</small>
+          </div>
+          <button id="submit" class="btn btn-success btn-sm btn-enhanced">Submit Exam</button>
+        </div>
+        <div class="card-body" id="quiz"></div>
+        <div class="card-footer text-end">
+          <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
+        </div>
+      </div>
+      <div id="results" class="mt-4"></div>
+    </div></div>
+    <script>
+      const QUIZ = {q_json};
+      const cont = document.getElementById('quiz');
+      function render() {{
+        cont.innerHTML = '';
+        (QUIZ.questions||[]).forEach((qq, idx) => {{
+          const card = document.createElement('div');
+          card.className = 'mb-3 p-3 border rounded';
+          card.id = 'q'+idx;
+          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
+                         + '<div class="mb-2">'+ qq.question + '</div>';
+          const opts = qq.options || {{}};
+          for (const k in opts) {{
+            const id = 'q' + idx + '_' + k;
+            const row = document.createElement('div');
+            row.className = 'form-check mb-1';
+            row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
+                          + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
+            card.appendChild(row);
+          }}
+          cont.appendChild(card);
+        }});
+      }}
+      function ensureAllAnswered() {{
+        const total = (QUIZ.questions||[]).length; const miss=[];
+        for (let i=0;i<total;i++) {{
+          const sel = document.querySelector('input[name="q'+i+'"]:checked');
+          if (!sel) miss.push(i+1);
+        }}
+        if (miss.length) {{
+          alert('Please answer all questions. Missing: Q' + miss.join(', Q'));
+          const first = document.getElementById('q'+(miss[0]-1));
+          if (first) first.scrollIntoView({{behavior:'smooth', block:'center'}});
+          return false;
+        }}
+        return true;
+      }}
+      async function submitQuiz() {{
+        if (!ensureAllAnswered()) return;
+        const answers = {{}};
+        (QUIZ.questions||[]).forEach((qq, idx) => {{
+          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          answers[String(idx)] = sel ? sel.value : null;
+        }});
         const res = await fetch('/api/submit-quiz', {{
           method:'POST', headers:{{'Content-Type':'application/json'}},
           body: JSON.stringify({{ quiz_type:'mock-exam', domain:'general', questions: QUIZ.questions, answers }})
@@ -461,19 +603,49 @@ def mock_exam_page():
         const data = await res.json();
         const out = document.getElementById('results');
         if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
-        out.innerHTML = '<div class="card border-0 shadow"><div class="card-body text-center">'
-                      + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                      + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
-                      + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '')
-                      + '</div></div>';
+
+        let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
+                 + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
+                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '')
+                 + '</div></div>';
+
+        if (Array.isArray(data.performance_insights)) {{
+          html += '<div class="alert alert-info border-0 mt-3"><h6 class="mb-2">📈 Performance Summary</h6><ul class="mb-0">';
+          data.performance_insights.forEach(t=> html += '<li>'+t+'</li>');
+          html += '</ul></div>';
+        }}
+
+        if (Array.isArray(data.detailed_results)) {{
+          html += '<div class="mt-4"><h5 class="mb-3">Complete Review</h5>';
+          data.detailed_results.forEach((r)=>{{
+            const good = r.is_correct;
+            const icon = good ? '✅' : '❌';
+            html += '<div class="card mb-3 result-card ' + (good?'correct':'incorrect') + '"><div class="card-body">';
+            html += '<h6 class="card-title">'+icon+' Question '+r.index+'</h6>';
+            html += '<p class="card-text">'+(r.question||'')+'</p>';
+            if (good) {{
+              html += '<div class="answer-good"><strong>✅ Correct!</strong> '+r.correct_letter+') '+(r.correct_text||'')+'</div>';
+            }} else {{
+              html += '<div class="answer-bad"><strong>❌ Your answer:</strong> '+(r.user_letter? (r.user_letter + ') ' + (r.user_text||'')) : '— (No selection)')+'</div>';
+              html += '<div class="answer-correct mt-2"><strong>✅ Correct answer:</strong> '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+            }}
+            if (r.explanation) {{ html += '<div class="explain mt-2"><strong>💡 Why:</strong> '+r.explanation+'</div>'; }}
+            html += '</div></div>';
+          }});
+          html += '</div>';
+        }}
+        out.innerHTML = html;
         window.scrollTo({{top: 0, behavior: 'smooth'}});
       }}
       document.getElementById('submit').addEventListener('click', submitQuiz);
+      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
       render();
     </script>
     """
     return base_layout("Mock Exam", body)
 
+# --- Submit Quiz API (server computes score + optional time) ---
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
     data = request.get_json() or {}
@@ -503,6 +675,16 @@ def submit_quiz_api():
         })
     pct = (correct / total * 100) if total else 0.0
 
+    # time taken (minutes) from session if available
+    time_taken = None
+    try:
+        started = session.get("quiz_started_at")
+        if started:
+            time_taken = int((time.time() - float(started)) // 60)
+            session.pop("quiz_started_at", None)
+    except Exception:
+        time_taken = None
+
     # record in session for Progress
     hist = session.get("quiz_history", [])
     hist.append({
@@ -511,6 +693,7 @@ def submit_quiz_api():
         "score": pct,
         "total": total,
         "correct": correct,
+        "time_taken": time_taken,
     })
     session["quiz_history"] = hist[-50:]  # keep last 50
 
@@ -520,33 +703,52 @@ def submit_quiz_api():
     elif pct >= 70: insights.append("📚 Fair — focus on weak concepts.")
     else: insights.append("⚠️ Needs improvement — study before a real exam.")
 
+    # pacing tip
+    if time_taken is not None and total > 0:
+        avg = time_taken / total
+        if avg < 1: insights.append("⚡ Great pace — under 1 minute per question on average.")
+        elif avg > 3: insights.append("🐌 Consider practicing to improve speed (over 3 minutes per question).")
+
     return jsonify({
         "success": True,
         "score": round(pct, 1),
         "correct": correct,
         "total": total,
+        "time_taken": time_taken,
         "performance_insights": insights,
         "detailed_results": detailed
     })
 
-# --- Progress (session-based for now) ---
+# --- Progress (session-based) + speedometer dial ---
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
     avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
+
     rows = "".join([
-        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
+        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h['type']}</td><td>{h.get('correct',0)}/{h.get('total',0)}</td><td>{round(h.get('score',0.0),1)}%</td><td>{(h.get('time_taken') or '—')}</td></tr>"
         for h in reversed(hist)
-    ]) or '<tr><td colspan="4" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+    ]) or '<tr><td colspan="5" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
       <div class="card border-0 shadow">
-        <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
+        <div class="card-header bg-info text-white d-flex justify-content-between align-items-center">
+          <h4 class="mb-0">📊 Progress</h4>
+          <div class="text-end">
+            <div id="overallDial" class="speedo">
+              <div class="speedo__arc"></div>
+              <div class="speedo__needle" id="needleOverall"></div>
+              <div class="speedo__hub"></div>
+            </div>
+            <div class="speedo__label"><span id="overallPctText">{avg}%</span></div>
+          </div>
+        </div>
         <div class="card-body">
           <div class="mb-3"><strong>Average Score:</strong> {avg}%</div>
           <div class="table-responsive">
             <table class="table table-sm align-middle">
-              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
+              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th><th>Time (min)</th></tr></thead>
               <tbody>{rows}</tbody>
             </table>
           </div>
@@ -558,6 +760,16 @@ def progress_page():
         </div>
       </div>
     </div></div>
+    <script>
+      (function(){{
+        var pct = {avg};
+        var deg = -90 + (pct * 1.8);
+        var needle = document.getElementById('needleOverall');
+        var label = document.getElementById('overallPctText');
+        if (needle) needle.style.transform = 'rotate(' + deg + 'deg)';
+        if (label) label.textContent = pct + '%';
+      }})();
+    </script>
     """
     return base_layout("Progress", body)
 
