@@ -213,12 +213,26 @@ def diag_openai():
 
 # --- Home ---
 @app.get("/")
+@app.get("/")
 def home():
-    body = """
+    hist = session.get("quiz_history", [])
+    avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
+    degree = -90 + int((avg/100.0) * 180)
+
+    body = f"""
     <div class="row justify-content-center">
       <div class="col-md-8 text-center">
         <h1 class="mb-3">CPP Test Prep</h1>
         <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams — ready to go.</p>
+
+        <div class="my-4">
+          <div class="dial-wrap">
+            <div class="needle" id="needle"></div>
+            <div class="dial-center"></div>
+          </div>
+          <div class="dial-label">Your Session Average: <strong><span id="avgPct">{avg}</span>%</strong></div>
+        </div>
+
         <div class="d-flex gap-2 justify-content-center mt-3">
           <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
           <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
@@ -227,6 +241,13 @@ def home():
         </div>
       </div>
     </div>
+    <script>
+      const deg = {degree};
+      document.addEventListener('DOMContentLoaded', () => {{
+        const n = document.getElementById('needle');
+        if (n) n.style.transform = 'translateX(-50%) rotate(' + deg + 'deg)';
+      }});
+    </script>
     """
     return base_layout("Home", body)
 
@@ -875,6 +896,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
