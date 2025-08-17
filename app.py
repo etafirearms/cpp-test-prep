@@ -485,38 +485,129 @@ def quiz_page():
 
 # --- Mock Exam (landing + detailed review) ---
 @app.get("/mock-exam")
+@app.get("/mock-exam")
 def mock_exam_page():
-    # Pick 25/50/75/100 via ?count=
-    requested = request.args.get("count")
+    # Read ?count= from the address (default 25). Allowed: 25,50,75,100
     try:
-        count = int(requested) if requested else None
+        count = int(request.args.get("count", "25"))
     except ValueError:
-        count = None
+        count = 25
+    if count not in (25, 50, 75, 100):
+        count = 25
 
-    valid = [25, 50, 75, 100]
-    if count not in valid:
-        # Landing screen
-        cards = "".join([
-            f'<div class="col-6 col-md-3"><a class="btn btn-outline-warning w-100 py-3" href="/mock-exam?count={n}">Start {n} Questions</a></div>'
-            for n in valid
-        ])
-        content = f"""
-        <div class="row">
-          <div class="col-md-10 mx-auto">
-            <div class="card border-0 shadow">
-              <div class="card-header bg-warning text-dark">
-                <h4 class="mb-0">🏁 Mock Exam</h4>
-                <small>Simulate the real exam with full, detailed feedback.</small>
-              </div>
-              <div class="card-body">
-                <div class="row g-3">{cards}</div>
-                <div class="mt-3 text-muted small">Tip: Try 25 first to gauge your level, then scale up.</div>
-              </div>
+    q = build_quiz(count)
+    q_json = json.dumps(q)
+    body = f"""
+    <div class="row"><div class="col-md-11 mx-auto">
+      <div class="card border-0 shadow">
+        <div class="card-header bg-warning text-dark d-flex flex-wrap gap-2 justify-content-between align-items-center">
+          <div>
+            <h4 class="mb-0">🏁 Mock Exam</h4>
+            <small>{count} questions — answer all before submitting</small>
+          </div>
+          <div class="d-flex align-items-center gap-2">
+            <label class="me-2 fw-semibold">Exam size:</label>
+            <div class="btn-group" role="group">
+              <a class="btn btn-light btn-sm {'active' if count==25 else ''}" href="/mock-exam?count=25">25</a>
+              <a class="btn btn-light btn-sm {'active' if count==50 else ''}" href="/mock-exam?count=50">50</a>
+              <a class="btn btn-light btn-sm {'active' if count==75 else ''}" href="/mock-exam?count=75">75</a>
+              <a class="btn btn-light btn-sm {'active' if count==100 else ''}" href="/mock-exam?count=100">100</a>
             </div>
+            <button id="submit" class="btn btn-success btn-sm btn-enhanced ms-2">Submit Exam</button>
           </div>
         </div>
-        """
-        return base_layout("Mock Exam", content)
+        <div class="card-body" id="quiz"></div>
+      </div>
+      <div id="results" class="mt-4"></div>
+    </div></div>
+    <script>
+      const QUIZ = {q_json};
+      const cont = document.getElementById('quiz');
+      function render() {{
+        cont.innerHTML = '';
+        (QUIZ.questions||[]).forEach((qq, idx) => {{
+          const card = document.createElement('div');
+          card.className = 'mb-3 p-3 border rounded';
+          card.id = 'q'+idx;
+          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
+                         + '<div class="mb-2">'+ qq.question + '</div>';
+          const opts = qq.options || {{}};
+          for (const k in opts) {{
+            const id = 'q' + idx + '_' + k;
+            const row = document.createElement('div');
+            row.className = 'form-check mb-1';
+            row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
+                          + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
+            card.appendChild(row);
+          }}
+          cont.appendChild(card);
+        }});
+      }}
+
+      function renderDetailedResults(data) {{
+        let html = '<div class="card border-0 shadow"><div class="card-body text-center">';
+        const ready = data.score>=80 ? '✅ Exam Ready' : (data.score>=70 ? '📚 Needs More Study' : '⚠️ Keep Practicing');
+        html += '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">'+data.score.toFixed(1)+'% — '+ready+'</h3>';
+        html += '<div class="text-muted mb-3">Correct: '+data.correct+' / '+data.total+'</div>';
+        if (Array.isArray(data.performance_insights)) {{
+          html += '<div class="alert alert-info border-0 text-start"><strong>📈 Insights</strong><ul class="mb-0">';
+          data.performance_insights.forEach(s => html += '<li>'+s+'</li>');
+          html += '</ul></div>';
+        }}
+        html += '</div></div>';
+
+        if (Array.isArray(data.detailed_results)) {{
+          html += '<div class="mt-3"><h5>📝 Complete Review</h5>';
+          data.detailed_results.forEach(r => {{
+            const cls = r.is_correct ? 'correct' : 'incorrect';
+            const icon = r.is_correct ? '✅' : '❌';
+            html += '<div class="card mb-2 result-card '+cls+'"><div class="card-body">';
+            html += '<div class="fw-semibold mb-2">'+icon+' Question '+r.index+'</div>';
+            html += '<div class="mb-2">'+(r.question||'')+'</div>';
+
+            if (r.is_correct) {{
+              html += '<div class="answer correct mb-2">✅ Correct: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+            }} else {{
+              html += '<div class="answer wrong mb-1">❌ Your answer: '+(r.user_letter||'—')+(r.user_text?') '+r.user_text:'')+'</div>';
+              html += '<div class="answer correct mb-2">✅ Correct answer: '+(r.correct_letter||'?')+') '+(r.correct_text||'')+'</div>';
+            }}
+            if (r.explanation) {{
+              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> '+r.explanation+'</div>';
+            }}
+            html += '</div></div>';
+          }});
+          html += '</div>';
+        }}
+        return html;
+      }}
+
+      async function submitQuiz() {{
+        const answers = {{}};
+        const unanswered = [];
+        (QUIZ.questions||[]).forEach((qq, idx) => {{
+          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          answers[String(idx)] = sel ? sel.value : null;
+          if (!sel) unanswered.push(idx+1);
+        }});
+        if (unanswered.length) {{
+          alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
+          return;
+        }}
+        const res = await fetch('/api/submit-quiz', {{
+          method:'POST', headers:{{'Content-Type':'application/json'}},
+          body: JSON.stringify({{ quiz_type:'mock-exam', domain:'general', questions: QUIZ.questions, answers }})
+        }});
+        const data = await res.json();
+        const out = document.getElementById('results');
+        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
+        out.innerHTML = renderDetailedResults(data);
+        window.scrollTo({{top: 0, behavior: 'smooth'}});
+      }}
+      document.getElementById('submit').addEventListener('click', submitQuiz);
+      render();
+    </script>
+    """
+    return base_layout("Mock Exam", body)
 
     # Generate exam
     q = build_quiz(count)
@@ -783,5 +874,6 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
