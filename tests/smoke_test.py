@@ -1,3 +1,11 @@
+import os, sys, json
+
+# Make sure Python can see your repo root (the folder that contains app.py)
+REPO_ROOT = os.path.dirname(os.path.dirname(__file__))
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+
+from app import app  # now this import will work
 # tests/smoke_test.py
 # This file checks that the app starts and key pages work.
 # It does NOT call the AI endpoint, so no real API key needed.
