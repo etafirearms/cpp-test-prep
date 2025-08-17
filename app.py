@@ -1,9 +1,9 @@
-# app.py — Stable MVP (no DB) with Tutor, Flashcards, Quiz/Mock (with review), Progress + Speedometer Gauge
+# app.py — MVP with domains on all blocks, speedometer gauge, bottom submit buttons, missing-answer jump, auto-scroll to review
 
 from flask import Flask, request, jsonify, session, redirect, url_for
-from flask import Response
 from datetime import datetime
 import os, json, random, textwrap, requests
+from urllib.parse import urlencode
 
 app = Flask(__name__)
 
@@ -13,7 +13,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-# --- Simple in-memory base questions (domain, difficulty tags kept lightweight) ---
+# --- Questions (sample set; you can add more later) ---
 BASE_QUESTIONS = [
     {
         "question": "What is the primary purpose of a security risk assessment?",
@@ -85,53 +85,150 @@ DOMAINS = {
 
 # --- Helpers ---
 def _session_average_score() -> float:
-    """Average score (%) from session quiz history."""
     hist = session.get("quiz_history", [])
     if not hist:
         return 0.0
     return round(sum(h["score"] for h in hist) / len(hist), 1)
 
+def _domain_label(key: str) -> str:
+    return DOMAINS.get(key, "All Domains")
+
+def build_quiz(num: int, domain: str | None = None) -> dict:
+    # Filter by domain if provided (not "all")
+    if domain and domain != "all":
+        pool = [q for q in BASE_QUESTIONS if q.get("domain") == domain]
+    else:
+        pool = BASE_QUESTIONS[:]
+    if not pool:
+        pool = BASE_QUESTIONS[:]
+    out = []
+    temp = pool[:]
+    while len(out) < num:
+        random.shuffle(temp)
+        for q in temp:
+            if len(out) >= num:
+                break
+            out.append(q.copy())
+    return {"title": f"Practice ({num} questions)", "domain": domain or "all", "questions": out[:num]}
+
+def chat_with_ai(msgs: list[str]) -> str:
+    try:
+        if not OPENAI_API_KEY:
+            return "OpenAI key is not configured. Please set OPENAI_API_KEY."
+        payload = {
+            "model": OPENAI_CHAT_MODEL,
+            "messages": [{"role": "system", "content": "You are a helpful CPP exam tutor."}]
+                        + [{"role": "user", "content": m} for m in msgs][-10:],
+            "temperature": 0.7,
+            "max_tokens": 700,
+        }
+        r = requests.post(
+            f"{OPENAI_API_BASE}/chat/completions",
+            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=30,
+        )
+        if r.status_code != 200:
+            return f"AI error ({r.status_code}). Please try again."
+        data = r.json()
+        return data["choices"][0]["message"]["content"]
+    except Exception as e:
+        return f"AI request failed: {e}"
+
+def _domain_chips_as_links(base_path: str, selected: str, extra: dict) -> str:
+    """Build clickable chips that reload the page with a domain selected."""
+    items = [("all", "All Domains")] + list(DOMAINS.items())
+    chips = []
+    for key, label in items:
+        qs = extra.copy()
+        qs["domain"] = key
+        href = f"{base_path}?{urlencode(qs)}" if qs else base_path
+        cls = "domain-chip active" if key == (selected or "all") else "domain-chip"
+        chips.append(f'<a class="{cls}" href="{href}">{label}</a>')
+    return "".join(chips)
+
 def base_layout(title: str, body_html: str) -> str:
-    # Simple speedometer (half-circle) styles + result card styles
     css = """
     <style>
       .domain-chip {
         display:inline-block; margin:4px 6px 4px 0; padding:8px 12px; border-radius:20px;
-        background:#e3f2fd; color:#1976d2; border:1px solid #bbdefb; cursor:pointer; user-select:none;
+        background:#e3f2fd; color:#1976d2; border:1px solid #bbdefb; user-select:none; text-decoration:none;
       }
       .domain-chip.active { background:#1976d2; color:#fff; border-color:#1976d2; }
       .btn-enhanced { border-radius:8px; font-weight:600; }
 
-      /* Result cards */
+      /* Review cards */
       .result-card { border-left: 4px solid; transition: all 0.2s ease; }
-      .result-card.correct {
-        border-left-color: #28a745;
-        background: linear-gradient(90deg, rgba(40,167,69,0.07) 0%, transparent 100%);
-      }
-      .result-card.incorrect {
-        border-left-color: #dc3545;
-        background: linear-gradient(90deg, rgba(220,53,69,0.07) 0%, transparent 100%);
-      }
+      .result-card.correct { border-left-color: #28a745; background: linear-gradient(90deg, rgba(40,167,69,0.07) 0%, transparent 100%); }
+      .result-card.incorrect { border-left-color: #dc3545; background: linear-gradient(90deg, rgba(220,53,69,0.07) 0%, transparent 100%); }
+      .unanswered { outline: 2px solid #dc3545; background:#fff5f5; }
 
-      /* Speedometer gauge */
-      .gauge-wrap { width: 200px; margin: 12px auto; position: relative; }
-      .gauge-arc {
-        width: 200px; height: 200px; border-radius: 50%;
+      .small-muted { color:#6c757d; font-size:0.9rem; }
+
+      /* SPEEDOMETER (needle + ticks) */
+      .speedo { width: 240px; height: 120px; position: relative; margin: 8px auto; }
+      .speedo-arc {
+        width: 100%; height: 100%; border-radius: 240px 240px 0 0 / 120px 120px 0 0;
         background: conic-gradient(#dc3545 0deg 60deg, #ffc107 60deg 120deg, #28a745 120deg 180deg, transparent 180deg 360deg);
         clip-path: inset(0 0 50% 0);
-        transform: rotate(-90deg);
+        box-shadow: inset 0 0 0 8px #fff, 0 2px 8px rgba(0,0,0,0.08);
       }
-      .gauge-needle {
-        position: absolute; left: 50%; bottom: 0; transform-origin: bottom center;
-        width: 2px; height: 96px; background: #111; transform: rotate(0deg) translateX(-50%);
+      .speedo-ticks .tick {
+        position: absolute; bottom: 0; left: 50%;
+        width: 2px; height: 12px; background:#444;
+        transform-origin: bottom center;
+        opacity: 0.8;
       }
-      .gauge-center {
-        position: absolute; left: 50%; bottom: 0; transform: translate(-50%, 10px);
-        background: #fff; padding: 6px 10px; border-radius: 12px; border:1px solid #e9ecef; font-weight: 700;
-        box-shadow: 0 2px 6px rgba(0,0,0,0.05);
+      .speedo-needle {
+        position: absolute; bottom: 0; left: 50%;
+        width: 3px; height: 95px; background: #111; transform-origin: bottom center;
+        transform: rotate(-90deg) translateX(-50%);
+        filter: drop-shadow(0 1px 1px rgba(0,0,0,0.4));
       }
-      .small-muted { color:#6c757d; font-size:0.9rem; }
+      .speedo-hub {
+        position: absolute; bottom: -6px; left: 50%; transform: translateX(-50%);
+        width: 18px; height: 18px; background:#111; border-radius:50%; border:3px solid #fff;
+      }
+      .speedo-value {
+        position: absolute; left: 50%; bottom: 10px; transform: translateX(-50%);
+        background: #fff; padding: 4px 10px; border-radius: 12px; border:1px solid #e9ecef; font-weight: 700;
+      }
     </style>
+    <script>
+      function setupGauge(rootId, percent) {
+        const root = document.getElementById(rootId);
+        if (!root) return;
+        // ticks
+        const ticksWrap = document.createElement('div');
+        ticksWrap.className = 'speedo-ticks';
+        for (let i=0; i<=10; i++) {
+          const t = document.createElement('div');
+          t.className = 'tick';
+          const angle = -90 + i * 18; // 11 ticks -> 10 intervals
+          t.style.transform = 'rotate(' + angle + 'deg) translateX(-50%)';
+          ticksWrap.appendChild(t);
+        }
+        root.appendChild(ticksWrap);
+        // needle
+        const needle = root.querySelector('.speedo-needle');
+        const p = Math.max(0, Math.min(100, percent || 0));
+        const angle = -90 + (p/100) * 180;
+        needle.style.transform = 'rotate(' + angle + 'deg) translateX(-50%)';
+        const label = root.querySelector('.speedo-value');
+        if (label) label.textContent = p.toFixed(1) + '%';
+      }
+      function scrollToEl(id) {
+        const el = document.getElementById(id);
+        if (el) el.scrollIntoView({behavior:'smooth', block:'start'});
+      }
+      function highlightAndScroll(cardId) {
+        const el = document.getElementById(cardId);
+        if (!el) return;
+        el.classList.add('unanswered');
+        el.scrollIntoView({behavior:'smooth', block:'center'});
+        setTimeout(()=>el.classList.remove('unanswered'), 1500);
+      }
+    </script>
     """
 
     nav = textwrap.dedent(f"""
@@ -159,7 +256,7 @@ def base_layout(title: str, body_html: str) -> str:
       </div>
     </div>
     """
-    return textwrap.dedent(f"""\
+    return textwrap.dedent(f"""
     <!DOCTYPE html>
     <html lang="en"><head>
       <meta charset="utf-8" />
@@ -177,83 +274,36 @@ def base_layout(title: str, body_html: str) -> str:
     </body></html>
     """)
 
-def build_quiz(num: int) -> dict:
-    # Expand the pool to hit the requested size (repeat shuffled blocks)
-    out = []
-    pool = BASE_QUESTIONS[:]
-    while len(out) < num:
-        random.shuffle(pool)
-        for q in pool:
-            if len(out) >= num:
-                break
-            out.append(q.copy())
-    return {"title": f"Practice ({num} questions)", "questions": out[:num]}
-
-def chat_with_ai(msgs: list[str]) -> str:
-    """Simple, robust wrapper. Returns a string answer or a friendly error."""
-    try:
-        if not OPENAI_API_KEY:
-            return "OpenAI key is not configured. Please set OPENAI_API_KEY."
-        payload = {
-            "model": OPENAI_CHAT_MODEL,
-            "messages": [{"role": "system", "content": "You are a helpful CPP exam tutor."}]
-                        + [{"role": "user", "content": m} for m in msgs][-10:],
-            "temperature": 0.7,
-            "max_tokens": 700,
-        }
-        r = requests.post(
-            f"{OPENAI_API_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=30,
-        )
-        if r.status_code != 200:
-            return f"AI error ({r.status_code}). Please try again."
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"AI request failed: {e}"
-
-# --- Health/diag ---
+# --- Health/diagnostics ---
 @app.get("/healthz")
 def healthz():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
 
 @app.get("/diag/openai")
 def diag_openai():
-    try:
-        msg = chat_with_ai(["Say 'pong' if you can hear me."])
-        ok = "pong" in msg.lower()
-        return jsonify({"success": ok, "preview": msg[:200]}), (200 if ok else 500)
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+    msg = chat_with_ai(["Say 'pong' if you can hear me."])
+    ok = "pong" in msg.lower()
+    return jsonify({"success": ok, "preview": msg[:200]}), (200 if ok else 500)
 
-# --- Home (with gauge) ---
+# --- Home (with true speedometer) ---
 @app.get("/")
 def home():
     avg = _session_average_score()
-    # Simple dial with needle set via inline style
-    gauge_html = f"""
-    <div class="gauge-wrap">
-      <div class="gauge-arc"></div>
-      <div class="gauge-needle" id="homeNeedle"></div>
-      <div class="gauge-center">{avg}%</div>
+    gauge = f"""
+    <div class="speedo" id="homeGauge">
+      <div class="speedo-arc"></div>
+      <div class="speedo-needle"></div>
+      <div class="speedo-hub"></div>
+      <div class="speedo-value">{avg}%</div>
     </div>
-    <script>
-      (function() {{
-        var avg = {avg};
-        var deg = -90 + (avg/100)*180; // -90deg (0%) to +90deg (100%)
-        var needle = document.getElementById('homeNeedle');
-        if (needle) needle.style.transform = 'rotate(' + deg + 'deg) translateX(-50%)';
-      }})();
-    </script>
+    <script>setupGauge('homeGauge', {avg});</script>
     """
     body = f"""
     <div class="row justify-content-center">
       <div class="col-md-8 text-center">
         <h1 class="mb-2">CPP Test Prep</h1>
-        <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams — ready to go.</p>
-        <div class="my-3">{gauge_html}<div class="small-muted">Average score (this browser session)</div></div>
+        <p class="lead text-muted">AI tutor, flashcards, quizzes, and mock exams.</p>
+        <div class="my-2">{gauge}<div class="small-muted">Average score (this browser session)</div></div>
         <div class="d-flex gap-2 justify-content-center mt-3">
           <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
           <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
@@ -265,7 +315,7 @@ def home():
     """
     return base_layout("Home", body)
 
-# --- Tutor ---
+# --- Tutor (with domain chips already in-page) ---
 @app.get("/study")
 def study_page():
     chips = "".join([f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
@@ -341,38 +391,46 @@ def api_chat():
     reply = chat_with_ai([prefix + user_msg])
     return jsonify({"response": reply, "timestamp": datetime.utcnow().isoformat()})
 
-# --- Flashcards ---
+# --- Flashcards (with domain choice) ---
 @app.get("/flashcards")
 def flashcards_page():
-    # Build ~20 cards from questions
+    selected = request.args.get("domain", "all")
+    # filter by domain
+    pool = BASE_QUESTIONS if selected == "all" else [q for q in BASE_QUESTIONS if q.get("domain") == selected]
+    if not pool:
+        pool = BASE_QUESTIONS[:]
     cards = []
-    for q in BASE_QUESTIONS:
+    for q in pool:
         ans = q["options"].get(q["correct"], "")
         back = "✅ Correct: " + ans + "\\n\\n💡 " + q["explanation"]
         cards.append({"front": q["question"], "back": back})
-    # Duplicate/shuffle to feel fuller
-    cards = (cards * 3)[:20]
+    cards = (cards * 3)[:20]  # make it feel fuller
     random.shuffle(cards)
+    chips = _domain_chips_as_links("/flashcards", selected, {})
+
     cards_json = json.dumps(cards)
     body = f"""
     <div class="row">
       <div class="col-md-9 mx-auto">
         <div class="card border-0 shadow">
-          <div class="card-header bg-secondary text-white"><h4 class="mb-0">🃏 Flashcards</h4></div>
+          <div class="card-header bg-secondary text-white d-flex justify-content-between align-items-center">
+            <div><h4 class="mb-0">🃏 Flashcards</h4><small>Pick a domain:</small><div class="mt-2">{chips}</div></div>
+          </div>
           <div class="card-body">
+            <div class="small-muted mb-2">Current: {_domain_label(selected)}</div>
             <div id="card" class="border rounded p-4" style="min-height:220px; background:#f8f9fa; cursor:pointer;"></div>
             <div class="d-flex gap-2 justify-content-center mt-3">
               <button id="btnDK" class="btn btn-outline-danger btn-enhanced">❌ Don't Know</button>
               <button id="btnK" class="btn btn-outline-success btn-enhanced">✅ Know</button>
             </div>
-            <div class="text-center mt-2 small text-muted">Press J to flip, K for next.</div>
+            <div class="text-center mt-2 small-muted">Press J to flip, K for next.</div>
           </div>
         </div>
       </div>
     </div>
     <script>
       const CARDS = {cards_json};
-      let i = 0, back=false, dk=0, k=0;
+      let i = 0, back=false;
       const el = document.getElementById('card');
       function render() {{
         const c = CARDS[i] || {{front:'No cards', back:''}};
@@ -381,8 +439,8 @@ def flashcards_page():
       }}
       function next() {{ back=false; i=(i+1)%CARDS.length; render(); }}
       el.addEventListener('click', ()=>{{ back=!back; render(); }});
-      document.getElementById('btnDK').addEventListener('click', ()=>{{ dk++; next(); }});
-      document.getElementById('btnK').addEventListener('click', ()=>{{ k++; next(); }});
+      document.getElementById('btnDK').addEventListener('click', ()=>{{ next(); }});
+      document.getElementById('btnK').addEventListener('click', ()=>{{ next(); }});
       document.addEventListener('keydown', (e)=>{{
         if(e.key.toLowerCase()==='j') {{ back=!back; render(); }}
         if(e.key.toLowerCase()==='k') {{ next(); }}
@@ -392,33 +450,38 @@ def flashcards_page():
     """
     return base_layout("Flashcards", body)
 
-# --- Quiz + Mock Exam (with selection + detailed review) ---
+# --- Quiz (domain + count + review + missing jump + bottom submit) ---
 @app.get("/quiz")
 def quiz_page():
-    # Choose number of questions via ?count= (5,10,15,20)
+    # count
     try:
         count = int(request.args.get("count", "10"))
     except ValueError:
         count = 10
     if count not in (5, 10, 15, 20):
         count = 10
-
-    q = build_quiz(count)
+    # domain
+    domain = request.args.get("domain", "all")
+    q = build_quiz(count, domain)
     q_json = json.dumps(q)
+    chips = _domain_chips_as_links("/quiz", domain, {"count": count})
+
     body = f"""
     <div class="row"><div class="col-md-10 mx-auto">
       <div class="card border-0 shadow">
         <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
           <div>
             <h4 class="mb-0">📝 Practice Quiz</h4>
-            <small>Choose how many questions:</small>
+            <div class="small">Pick a domain, then how many questions:</div>
+            <div class="mt-2">{chips}</div>
             <div class="mt-2">
-              <a class="btn btn-light btn-sm me-1" href="/quiz?count=5">5</a>
-              <a class="btn btn-light btn-sm me-1" href="/quiz?count=10">10</a>
-              <a class="btn btn-light btn-sm me-1" href="/quiz?count=15">15</a>
-              <a class="btn btn-light btn-sm" href="/quiz?count=20">20</a>
+              <a class="btn btn-light btn-sm me-1" href="/quiz?{urlencode({'count':5,'domain':domain})}">5</a>
+              <a class="btn btn-light btn-sm me-1" href="/quiz?{urlencode({'count':10,'domain':domain})}">10</a>
+              <a class="btn btn-light btn-sm me-1" href="/quiz?{urlencode({'count':15,'domain':domain})}">15</a>
+              <a class="btn btn-light btn-sm" href="/quiz?{urlencode({'count':20,'domain':domain})}">20</a>
               <span class="badge bg-dark ms-2">Selected: {count}</span>
             </div>
+            <div class="small-muted mt-1">Current domain: {_domain_label(domain)}</div>
           </div>
           <button id="submitTop" class="btn btn-light btn-sm btn-enhanced">Submit</button>
         </div>
@@ -431,7 +494,9 @@ def quiz_page():
     </div></div>
     <script>
       const QUIZ = {q_json};
+      const SELECTED_DOMAIN = {json.dumps(domain)};
       const cont = document.getElementById('quiz');
+
       function render() {{
         cont.innerHTML = '';
         (QUIZ.questions||[]).forEach((qq, idx) => {{
@@ -452,146 +517,42 @@ def quiz_page():
           cont.appendChild(card);
         }});
       }}
-      async function submitQuiz() {{
-        const answers = {{}};
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
-          answers[String(idx)] = sel ? sel.value : null;
-        }});
-        const res = await fetch('/api/submit-quiz', {{
-          method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{ quiz_type:'practice', domain:'general', questions: QUIZ.questions, answers }})
-        }});
-        const data = await res.json();
-        const out = document.getElementById('results');
-        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
 
-        // Summary
-        let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
-                 + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
-                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '') 
-                 + '</div></div>';
-
-        // Insights (bullets)
-        if (Array.isArray(data.performance_insights)) {{
-          html += '<div class="alert alert-info border-0 mt-3"><strong>📈 Performance:</strong><ul class="mb-0">';
-          data.performance_insights.forEach(i => {{ html += '<li>'+i+'</li>'; }});
-          html += '</ul></div>';
-        }}
-
-        // Detailed review
-        if (Array.isArray(data.detailed_results)) {{
-          html += '<div class="mt-4"><h5>📝 Question Review</h5>';
-          data.detailed_results.forEach(r => {{
-            const cls = r.is_correct ? 'correct' : 'incorrect';
-            html += '<div class="card mb-3 result-card '+cls+'"><div class="card-body">'
-                 +  '<div class="fw-bold mb-2">' + (r.is_correct ? '✅ Correct' : '❌ Incorrect') + ' — Question ' + r.index + '</div>'
-                 +  '<div class="mb-2">'+ (r.question || '') + '</div>';
-
-            if (!r.is_correct) {{
-              html += '<div class="alert alert-danger border-0 py-2 mb-2"><strong>Your answer:</strong> '
-                   +  (r.user_letter ? (r.user_letter + ') ') : '') + (r.user_text || '—') + '</div>';
-            }}
-            html += '<div class="alert alert-success border-0 py-2"><strong>Correct answer:</strong> '
-                 +  (r.correct_letter ? (r.correct_letter + ') ') : '') + (r.correct_text || '') + '</div>';
-
-            if (r.explanation) {{
-              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> ' + r.explanation + '</div>';
-            }}
-            html += '</div></div>';
-          }});
-          html += '</div>';
-        }}
-
-        out.innerHTML = html;
-        window.scrollTo({{top: 0, behavior: 'smooth'}});
-      }}
-      document.getElementById('submitTop').addEventListener('click', submitQuiz);
-      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
-      render();
-    </script>
-    """
-    return base_layout("Quiz", body)
-
-@app.get("/mock-exam")
-def mock_exam_page():
-    # Choose number of questions via ?count= (25,50,75,100)
-    try:
-        count = int(request.args.get("count", "25"))
-    except ValueError:
-        count = 25
-    if count not in (25, 50, 75, 100):
-        count = 25
-
-    q = build_quiz(count)
-    q_json = json.dumps(q)
-    body = f"""
-    <div class="row"><div class="col-md-11 mx-auto">
-      <div class="card border-0 shadow">
-        <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
-          <div>
-            <h4 class="mb-0">🏁 Mock Exam</h4>
-            <small>Choose exam length (answer all before submitting):</small>
-            <div class="mt-2">
-              <a class="btn btn-light btn-sm me-1" href="/mock-exam?count=25">25</a>
-              <a class="btn btn-light btn-sm me-1" href="/mock-exam?count=50">50</a>
-              <a class="btn btn-light btn-sm me-1" href="/mock-exam?count=75">75</a>
-              <a class="btn btn-light btn-sm" href="/mock-exam?count=100">100</a>
-              <span class="badge bg-dark ms-2">Selected: {count}</span>
-            </div>
-          </div>
-          <button id="submit" class="btn btn-success btn-sm btn-enhanced">Submit Exam</button>
-        </div>
-        <div class="card-body" id="quiz"></div>
-      </div>
-      <div id="results" class="mt-4"></div>
-    </div></div>
-    <script>
-      const QUIZ = {q_json};
-      const cont = document.getElementById('quiz');
-      function render() {{
-        cont.innerHTML = '';
-        (QUIZ.questions||[]).forEach((qq, idx) => {{
-          const card = document.createElement('div');
-          card.className = 'mb-3 p-3 border rounded';
-          card.id = 'q'+idx;
-          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
-                         + '<div class="mb-2">'+ qq.question + '</div>';
-          const opts = qq.options || {{}};
-          for (const k in opts) {{
-            const id = 'q' + idx + '_' + k;
-            const row = document.createElement('div');
-            row.className = 'form-check mb-1';
-            row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
-                          + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
-            card.appendChild(row);
-          }}
-          cont.appendChild(card);
-        }});
-      }}
-      async function submitQuiz() {{
-        const answers = {{}};
+      function findUnanswered() {{
         const missing = [];
+        (QUIZ.questions||[]).forEach((_, idx) => {{
+          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          if (!sel) missing.push(idx);
+        }});
+        return missing;
+      }}
+
+      async function submitQuiz() {{
+        const answers = {{}};
         (QUIZ.questions||[]).forEach((qq, idx) => {{
           const sel = document.querySelector('input[name="q'+idx+'"]:checked');
-          if (!sel) missing.push(idx+1);
           answers[String(idx)] = sel ? sel.value : null;
         }});
-        if (missing.length) {{ alert('Please answer all questions. Missing: Q' + missing.join(', Q')); return; }}
+
+        const missing = findUnanswered();
+        if (missing.length) {{
+          // jump to first missing and highlight it
+          highlightAndScroll('q' + missing[0]);
+          return;
+        }}
+
         const res = await fetch('/api/submit-quiz', {{
           method:'POST', headers:{{'Content-Type':'application/json'}},
-          body: JSON.stringify({{ quiz_type:'mock-exam', domain:'general', questions: QUIZ.questions, answers }})
+          body: JSON.stringify({{ quiz_type:'practice', domain: SELECTED_DOMAIN, questions: QUIZ.questions, answers }})
         }});
         const data = await res.json();
         const out = document.getElementById('results');
         if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
 
         // Summary
-        let html = '<div class="card border-0 shadow"><div class="card-body text-center">'
+        let html = '<a id="reviewTop"></a><div class="card border-0 shadow"><div class="card-body text-center">'
                  + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
                  + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
-                 + (data.time_taken ? '<div class="text-muted">Time: '+data.time_taken+' min</div>' : '') 
                  + '</div></div>';
 
         // Insights
@@ -609,14 +570,12 @@ def mock_exam_page():
             html += '<div class="card mb-3 result-card '+cls+'"><div class="card-body">'
                  +  '<div class="fw-bold mb-2">' + (r.is_correct ? '✅ Correct' : '❌ Incorrect') + ' — Question ' + r.index + '</div>'
                  +  '<div class="mb-2">'+ (r.question || '') + '</div>';
-
             if (!r.is_correct) {{
               html += '<div class="alert alert-danger border-0 py-2 mb-2"><strong>Your answer:</strong> '
                    +  (r.user_letter ? (r.user_letter + ') ') : '') + (r.user_text || '—') + '</div>';
             }}
             html += '<div class="alert alert-success border-0 py-2"><strong>Correct answer:</strong> '
                  +  (r.correct_letter ? (r.correct_letter + ') ') : '') + (r.correct_text || '') + '</div>';
-
             if (r.explanation) {{
               html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> ' + r.explanation + '</div>';
             }}
@@ -624,23 +583,162 @@ def mock_exam_page():
           }});
           html += '</div>';
         }}
-
         out.innerHTML = html;
-        window.scrollTo({{top: 0, behavior: 'smooth'}});
+        // jump straight to the review
+        scrollToEl('reviewTop');
       }}
-      document.getElementById('submit').addEventListener('click', submitQuiz);
+
+      document.getElementById('submitTop').addEventListener('click', submitQuiz);
+      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
+      render();
+    </script>
+    """
+    return base_layout("Quiz", body)
+
+# --- Mock Exam (domain + count + review + missing jump + bottom submit) ---
+@app.get("/mock-exam")
+def mock_exam_page():
+    try:
+        count = int(request.args.get("count", "25"))
+    except ValueError:
+        count = 25
+    if count not in (25, 50, 75, 100):
+        count = 25
+    domain = request.args.get("domain", "all")
+    q = build_quiz(count, domain)
+    q_json = json.dumps(q)
+    chips = _domain_chips_as_links("/mock-exam", domain, {"count": count})
+
+    body = f"""
+    <div class="row"><div class="col-md-11 mx-auto">
+      <div class="card border-0 shadow">
+        <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+          <div>
+            <h4 class="mb-0">🏁 Mock Exam</h4>
+            <div class="small">Pick a domain, then exam length:</div>
+            <div class="mt-2">{chips}</div>
+            <div class="mt-2">
+              <a class="btn btn-light btn-sm me-1" href="/mock-exam?{urlencode({'count':25,'domain':domain})}">25</a>
+              <a class="btn btn-light btn-sm me-1" href="/mock-exam?{urlencode({'count':50,'domain':domain})}">50</a>
+              <a class="btn btn-light btn-sm me-1" href="/mock-exam?{urlencode({'count':75,'domain':domain})}">75</a>
+              <a class="btn btn-light btn-sm" href="/mock-exam?{urlencode({'count':100,'domain':domain})}">100</a>
+              <span class="badge bg-dark ms-2">Selected: {count}</span>
+            </div>
+            <div class="small-muted mt-1">Current domain: {_domain_label(domain)}</div>
+          </div>
+          <button id="submitTop" class="btn btn-success btn-sm btn-enhanced">Submit Exam</button>
+        </div>
+        <div class="card-body" id="quiz"></div>
+        <div class="card-footer text-end">
+          <button id="submitBottom" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
+        </div>
+      </div>
+      <div id="results" class="mt-4"></div>
+    </div></div>
+    <script>
+      const QUIZ = {q_json};
+      const SELECTED_DOMAIN = {json.dumps(domain)};
+      const cont = document.getElementById('quiz');
+
+      function render() {{
+        cont.innerHTML = '';
+        (QUIZ.questions||[]).forEach((qq, idx) => {{
+          const card = document.createElement('div');
+          card.className = 'mb-3 p-3 border rounded';
+          card.id = 'q'+idx;
+          card.innerHTML = '<div class="fw-bold text-primary mb-2">Question ' + (idx+1) + ' of ' + (QUIZ.questions||[]).length + '</div>'
+                         + '<div class="mb-2">'+ qq.question + '</div>';
+          const opts = qq.options || {{}};
+          for (const k in opts) {{
+            const id = 'q' + idx + '_' + k;
+            const row = document.createElement('div');
+            row.className = 'form-check mb-1';
+            row.innerHTML = '<input class="form-check-input" type="radio" name="q'+idx+'" id="'+id+'" value="'+k+'">'
+                          + '<label class="form-check-label" for="'+id+'">'+k+') '+opts[k]+'</label>';
+            card.appendChild(row);
+          }}
+          cont.appendChild(card);
+        }});
+      }}
+
+      function findUnanswered() {{
+        const missing = [];
+        (QUIZ.questions||[]).forEach((_, idx) => {{
+          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          if (!sel) missing.push(idx);
+        }});
+        return missing;
+      }}
+
+      async function submitQuiz() {{
+        const answers = {{}};
+        const missing = [];
+        (QUIZ.questions||[]).forEach((qq, idx) => {{
+          const sel = document.querySelector('input[name="q'+idx+'"]:checked');
+          if (!sel) missing.push(idx);
+          answers[String(idx)] = sel ? sel.value : null;
+        }});
+        if (missing.length) {{ highlightAndScroll('q' + missing[0]); return; }}
+
+        const res = await fetch('/api/submit-quiz', {{
+          method:'POST', headers:{{'Content-Type':'application/json'}},
+          body: JSON.stringify({{ quiz_type:'mock-exam', domain: SELECTED_DOMAIN, questions: QUIZ.questions, answers }})
+        }});
+        const data = await res.json();
+        const out = document.getElementById('results');
+        if (data.error) {{ out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }}
+
+        let html = '<a id="reviewTop"></a><div class="card border-0 shadow"><div class="card-body text-center">'
+                 + '<h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div>'
+                 + '</div></div>';
+
+        if (Array.isArray(data.performance_insights)) {{
+          html += '<div class="alert alert-info border-0 mt-3"><strong>📈 Performance:</strong><ul class="mb-0">';
+          data.performance_insights.forEach(i => {{ html += '<li>'+i+'</li>'; }});
+          html += '</ul></div>';
+        }}
+
+        if (Array.isArray(data.detailed_results)) {{
+          html += '<div class="mt-4"><h5>📝 Question Review</h5>';
+          data.detailed_results.forEach(r => {{
+            const cls = r.is_correct ? 'correct' : 'incorrect';
+            html += '<div class="card mb-3 result-card '+cls+'"><div class="card-body">'
+                 +  '<div class="fw-bold mb-2">' + (r.is_correct ? '✅ Correct' : '❌ Incorrect') + ' — Question ' + r.index + '</div>'
+                 +  '<div class="mb-2">'+ (r.question || '') + '</div>';
+            if (!r.is_correct) {{
+              html += '<div class="alert alert-danger border-0 py-2 mb-2"><strong>Your answer:</strong> '
+                   +  (r.user_letter ? (r.user_letter + ') ') : '') + (r.user_text || '—') + '</div>';
+            }}
+            html += '<div class="alert alert-success border-0 py-2"><strong>Correct answer:</strong> '
+                 +  (r.correct_letter ? (r.correct_letter + ') ') : '') + (r.correct_text || '') + '</div>';
+            if (r.explanation) {{
+              html += '<div class="mt-2 p-2 bg-light rounded"><strong>💡 Why:</strong> ' + r.explanation + '</div>';
+            }}
+            html += '</div></div>';
+          }});
+          html += '</div>';
+        }}
+        out.innerHTML = html;
+        scrollToEl('reviewTop');
+      }}
+
+      document.getElementById('submitTop').addEventListener('click', submitQuiz);
+      document.getElementById('submitBottom').addEventListener('click', submitQuiz);
       render();
     </script>
     """
     return base_layout("Mock Exam", body)
 
+# --- Submit API (stores domain too) ---
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
     data = request.get_json() or {}
     questions = data.get("questions") or []
     answers = data.get("answers") or {}
     quiz_type = data.get("quiz_type") or "practice"
-    # score
+    domain = data.get("domain") or "all"
+
     total = len(questions)
     correct = 0
     detailed = []
@@ -667,6 +765,7 @@ def submit_quiz_api():
     hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
+        "domain": domain,
         "date": datetime.utcnow().isoformat(),
         "score": round(pct, 1),
         "total": total,
@@ -689,30 +788,24 @@ def submit_quiz_api():
         "detailed_results": detailed
     })
 
-# --- Progress (session-based for now) + gauge ---
+# --- Progress (with speedometer) ---
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
     avg = _session_average_score()
     rows = "".join([
-        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
+        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h.get('type','')}</td><td>{_domain_label(h.get('domain','all'))}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
         for h in reversed(hist)
-    ]) or '<tr><td colspan="4" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+    ]) or '<tr><td colspan="5" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
 
     gauge_html = f"""
-    <div class="gauge-wrap">
-      <div class="gauge-arc"></div>
-      <div class="gauge-needle" id="progNeedle"></div>
-      <div class="gauge-center">{avg}%</div>
+    <div class="speedo" id="progGauge">
+      <div class="speedo-arc"></div>
+      <div class="speedo-needle"></div>
+      <div class="speedo-hub"></div>
+      <div class="speedo-value">{avg}%</div>
     </div>
-    <script>
-      (function() {{
-        var avg = {avg};
-        var deg = -90 + (avg/100)*180;
-        var needle = document.getElementById('progNeedle');
-        if (needle) needle.style.transform = 'rotate(' + deg + 'deg) translateX(-50%)';
-      }})();
-    </script>
+    <script>setupGauge('progGauge', {avg});</script>
     """
 
     body = f"""
@@ -728,7 +821,7 @@ def progress_page():
         <div class="card-body">
           <div class="table-responsive">
             <table class="table table-sm align-middle">
-              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
+              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Domain</th><th>Correct</th><th>Score</th></tr></thead>
               <tbody>{rows}</tbody>
             </table>
           </div>
@@ -748,7 +841,7 @@ def reset_progress():
     session.pop("quiz_history", None)
     return redirect(url_for("progress_page"))
 
-# --- Error pages ---
+# --- Errors ---
 @app.errorhandler(404)
 def nf(e):
     return base_layout("Not Found", """
@@ -761,7 +854,7 @@ def se(e):
       <div class="text-center"><h1 class="display-5 text-muted">500</h1><p>Something went wrong.</p>
       <a href="/" class="btn btn-primary btn-enhanced">Go Home</a></div>"""), 500
 
-# --- Entrypoint for local runs ---
+# --- Local run ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
