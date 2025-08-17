@@ -1000,116 +1000,114 @@ def submit_quiz_api():
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
-    overall_avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
-    total_answered = sum(h["total"] for h in hist)
-    completion_goal = 200
-    completion_pct = min(100, int((total_answered / completion_goal) * 100)) if completion_goal else 0
+    avg = round(sum(h["score"] for h in hist)/len(hist), 1) if hist else 0.0
 
-    # Per-domain stats
-    per = {}
-    for h in hist:
-        d = h.get("domain") or "general"
-        if d not in per:
-            per[d] = {"score_sum": 0.0, "n": 0, "answered": 0}
-        per[d]["score_sum"] += h["score"]
-        per[d]["n"] += 1
-        per[d]["answered"] += h.get("total", 0)
-
-    rows = []
-    for d, s in per.items():
-        avg = round(s["score_sum"] / s["n"], 1) if s["n"] else 0.0
-        rows.append(f"<tr><td>{DOMAINS.get(d, d)}</td><td>{s['answered']}</td><td>{avg}%</td></tr>")
-    if not rows:
-        rows = ['<tr><td colspan="3" class="text-center text-muted">No data yet — take a quiz!</td></tr>']
-    rows_html = "".join(rows)
-
-    # History table
-    hist_rows = "".join([
-        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{DOMAINS.get(h.get('domain','general'), h.get('domain','general'))}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
+    # table rows (same as before)
+    rows = "".join([
+        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h.get('type','')}</td><td>{h.get('correct',0)}/{h.get('total',0)}</td><td>{round(h.get('score',0.0),1)}%</td></tr>"
         for h in reversed(hist)
-    ]) or '<tr><td colspan="5" class="text-center text-muted">No attempts yet.</td></tr>'
+    ]) or '<tr><td colspan="4" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
 
-    body = f"""
-    <div class="row">
-      <div class="col-md-5">
-        <div class="card border-0 shadow h-100">
-          <div class="card-header bg-info text-white text-center"><h5 class="mb-0">🎯 Overall Progress</h5></div>
-          <div class="card-body">
-            <div id="bigGauge" style="max-width:520px; margin:0 auto;"></div>
-            <div class="text-center small text-muted mt-2">
-              <strong>Needle</strong> = average score &nbsp; • &nbsp; <strong>Thin inner ring</strong> = completion
-              (answered {total_answered} of {completion_goal})
+    body_top = """
+    <div class="row"><div class="col-md-10 mx-auto">
+      <div class="card border-0 shadow mb-3">
+        <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
+        <div class="card-body">
+          <div class="row align-items-center">
+            <div class="col-lg-6">
+              <div id="gaugeProgress" class="mb-2"></div>
+              <div class="text-muted small">Overall average of saved attempts</div>
+            </div>
+            <div class="col-lg-6">
+              <div class="mb-2"><strong>Average Score:</strong> """
+    body_avg = str(avg)
+    body_mid = """%</div>
+              <p class="mb-0 text-muted">Tip: aim for steady improvement. Review missed questions first.</p>
             </div>
           </div>
         </div>
       </div>
 
-      <div class="col-md-7">
-        <div class="card border-0 shadow">
-          <div class="card-header bg-info text-white"><h5 class="mb-0">📚 Per-Domain Progress</h5></div>
-          <div class="card-body">
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead class="table-light"><tr><th>Domain</th><th>Questions Answered</th><th>Avg Score</th></tr></thead>
-                <tbody>{rows_html}</tbody>
-              </table>
-            </div>
+      <div class="card border-0 shadow">
+        <div class="card-header bg-light"><strong>History</strong></div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
+              <tbody>"""
+    body_rows = rows
+    body_mid2 = """</tbody>
+            </table>
           </div>
-        </div>
-
-        <div class="card border-0 shadow mt-3">
-          <div class="card-header bg-secondary text-white"><h5 class="mb-0">🗂️ History</h5></div>
-          <div class="card-body">
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead class="table-light"><tr><th>When (UTC)</th><th>Domain</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
-                <tbody>{hist_rows}</tbody>
-              </table>
-            </div>
-            <div class="text-end">
-              <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
-                <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
-              </form>
-            </div>
+          <div class="text-end">
+            <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+              <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
+            </form>
           </div>
         </div>
       </div>
-    </div>
+    </div></div>
 
     <script>
-      (function() {{
-        function toRad(d) {{ return d*Math.PI/180; }}
-        function polar(cx, cy, r, ang) {{ ang=toRad(ang); return {{x: cx+r*Math.cos(ang), y: cy+r*Math.sin(ang)}}; }}
-        function arc(cx, cy, r, a0, a1) {{
-          const p0=polar(cx,cy,r,a0), p1=polar(cx,cy,r,a1);
-          const large=(Math.abs(a1-a0)>180)?1:0, sweep=(a1>a0)?1:0;
-          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1) + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' ' + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
-        }}
-        function drawDial(id, avg, completion, size) {{
-          const start=-120, sweep=240; const w=size, h=Math.round(size*0.66); const cx=w/2, cy=Math.round(h*0.95);
-          const r=Math.round(w*0.40), rInner=r-8;
-          let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-          const segs=[{{pct0:0,pct1:40,color:'#28a745'}},{{pct0:40,pct1:65,color:'#ffc107'}},{{pct0:65,pct1:85,color:'#fd7e14'}},{{pct0:85,pct1:100,color:'#dc3545'}}];
-          svg += `<path d="${arc(cx,cy,r,start,start+sweep)}" fill="none" stroke="#eee" stroke-width="18" stroke-linecap="round"/>`;
-          segs.forEach(s=>{{ const a0=start+sweep*(s.pct0/100), a1=start+sweep*(s.pct1/100); svg += `<path d="${arc(cx,cy,r,a0,a1)}" fill="none" stroke="${s.color}" stroke-width="18" stroke-linecap="butt"/>`; }});
-          const compEnd = start + sweep*(Math.max(0,Math.min(100,completion))/100);
-          svg += `<path d="${arc(cx,cy,rInner,start,compEnd)}" fill="none" stroke="#0d6efd" stroke-width="4" stroke-linecap="round"/>`;
-          for(let t=0;t<=100;t+=5){{ const ang=start+sweep*(t/100); const outer=polar(cx,cy,r,ang); const len=(t%10===0)?16:8; const inner=polar(cx,cy,r-len,ang);
-            svg += `<line x1="${outer.x.toFixed(1)}" y1="${outer.y.toFixed(1)}" x2="${inner.x.toFixed(1)}" y2="${inner.y.toFixed(1)}" stroke="#cfd4da" stroke-width="2"/>`;
-            if(t%20===0){{ const lab=polar(cx,cy,r-30,ang); svg+=`<text x="${lab.x.toFixed(1)}" y="${lab.y.toFixed(1)}" text-anchor="middle" dominant-baseline="middle" font-size="11" fill="#6c757d">${{t}}</text>`; }}
-          }}
-          const angNeedle=start+sweep*(Math.max(0,Math.min(100,avg))/100); const tip=polar(cx,cy,r-18,angNeedle);
-          svg += `<line x1="${cx}" y1="${cy}" x2="${tip.x.toFixed(1)}" y2="${tip.y.toFixed(1)}" stroke="#000" stroke-width="3"/>`;
-          svg += `<circle cx="${cx}" cy="${cy}" r="7" fill="#000"/>`;
-          svg += `<text x="${cx}" y="${cy-34}" text-anchor="middle" font-size="28" font-weight="700" fill="#212529">${{Math.round(avg)}}%</text>`;
-          svg += `<text x="${cx}" y="${cy-14}" text-anchor="middle" font-size="12" fill="#6c757d">Average score</text>`;
-          svg += `<text x="${cx}" y="${cy+12}" text-anchor="middle" font-size="12" fill="#6c757d">Completion: ${{Math.round(completion)}}%</text>`;
-          svg += `</svg>`; document.getElementById(id).innerHTML = svg;
-        }}
-        drawDial('bigGauge', {overall_avg}, {completion_pct}, 520);
-      }})();
+      (function () {
+        var pct = """
+    body_pct = str(avg)
+    body_bot = """;
+        if (isNaN(pct)) { pct = 0; }
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+
+        var el = document.getElementById('gaugeProgress');
+        var w = 360, h = 200;
+        var cx = w/2, cy = h - 10, r = Math.min(w, h*2) * 0.46;
+        var start = 180, end = 0;
+
+        function polar(cx, cy, r, a) {
+          var rad = (a - 90) * Math.PI/180;
+          return {x: cx + r * Math.cos(rad), y: cy + r * Math.sin(rad)};
+        }
+        function arc(cx, cy, r, a0, a1) {
+          var p0 = polar(cx,cy,r,a0), p1 = polar(cx,cy,r,a1);
+          var large = ((a1 - a0 + 360) % 360) > 180 ? 1 : 0;
+          var sweep = a1 > a0 ? 1 : 0;
+          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1)
+               + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' '
+               + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
+        }
+
+        var col = '#dc3545';
+        if (pct >= 70) col = '#fd7e14';
+        if (pct >= 80) col = '#ffc107';
+        if (pct >= 90) col = '#28a745';
+
+        var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
+        svg += '<path d="' + arc(cx,cy,r,start,end) + '" fill="none" stroke="#e9ecef" stroke-width="18" stroke-linecap="round"/>';
+        var sweep = (end - start) * (pct/100);
+        svg += '<path d="' + arc(cx,cy,r,start,start+sweep) + '" fill="none" stroke="' + col + '" stroke-width="18" stroke-linecap="round"/>';
+
+        for (var t = 0; t <= 10; t++) {
+          var a = start + (end - start) * (t/10);
+          var p0 = polar(cx,cy,r+2,a);
+          var p1 = polar(cx,cy,r-12,a);
+          svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
+              + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
+              + '" stroke="#ced4da" stroke-width="2" />';
+        }
+
+        var na = start + (end - start) * (pct/100);
+        var pn = polar(cx,cy,r-8,na);
+        svg += '<line x1="' + cx.toFixed(1) + '" y1="' + cy.toFixed(1)
+            + '" x2="' + pn.x.toFixed(1) + '" y2="' + pn.y.toFixed(1)
+            + '" stroke="#343a40" stroke-width="3" />';
+        svg += '<circle cx="' + cx.toFixed(1) + '" cy="' + cy.toFixed(1) + '" r="5" fill="#343a40" />';
+
+        svg += '<text x="' + cx.toFixed(1) + '" y="' + (cy-20).toFixed(1) + '" text-anchor="middle" font-size="22" font-weight="700" fill="#212529">' + pct.toFixed(1) + '%</text>';
+        svg += '</svg>';
+        el.innerHTML = svg;
+      })();
     </script>
     """
+    body = body_top + body_avg + body_mid + body_rows + body_mid2 + body_pct + body_bot
     return base_layout("Progress", body)
 
 @app.post("/progress/reset")
@@ -1134,6 +1132,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
