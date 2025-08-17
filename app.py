@@ -148,8 +148,14 @@ BASE_QUESTIONS = [
 def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
-        if "user_id" not in session:
+        uid = session.get("user_id")
+        if not uid:
             flash("Please log in first.", "warning")
+            return redirect(url_for("login"))
+        user = User.query.get(uid)
+        if not user:
+            session.clear()
+            flash("Your session expired. Please log in again.", "warning")
             return redirect(url_for("login"))
         return fn(*args, **kwargs)
     return wrapper
@@ -768,3 +774,4 @@ def create_app():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=True)
+
