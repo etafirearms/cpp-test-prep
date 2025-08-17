@@ -1,0 +1,32 @@
+name: Smoke Test
+
+on:
+  pull_request:
+    branches: [ production ]  # change to [ main ] if your protected branch is named main
+  workflow_dispatch:          # lets you run it by hand from the Actions tab
+
+jobs:
+  smoke:
+    name: Smoke Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run smoke test
+        env:
+          # We give safe dummy values so the app starts.
+          SECRET_KEY: test-secret
+          OPENAI_API_KEY: dummy
+        run: |
+          python tests/smoke_test.py
