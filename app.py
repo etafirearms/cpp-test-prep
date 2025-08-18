@@ -313,6 +313,9 @@ welcome_name = profile.get("name")
               """ + header_html + """
               <div id="tip" class="mt-2 p-2 rounded" style="background:#f8f9fa; border:1px solid #eee;"></div>
               <div class="d-flex gap-2 flex-wrap mt-3">
+              <div class="mb-2" style="font-weight:600;">
+  """ + (f"Welcome, {welcome_name}!" if welcome_name else "Welcome!") + """
+</div>
                 <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
                 <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
                 <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
@@ -1185,6 +1188,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
