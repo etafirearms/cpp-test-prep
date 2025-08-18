@@ -1220,8 +1220,7 @@ def settings_page():
               <label for="prefName" class="form-label fw-semibold">Your name</label>
               <input type="text" id="prefName" class="form-control" placeholder="e.g., Alex">
               <div class="form-text">Shown on the Home page as “Welcome, [your name]”.</div>
-            </div>
-
+            
             <div class="mb-3">
               <label for="prefTZ" class="form-label fw-semibold">Time zone</label>
               <select id="prefTZ" class="form-select">
@@ -1330,6 +1329,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
