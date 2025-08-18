@@ -1200,6 +1200,132 @@ def reset_progress():
     session.pop("quiz_history", None)
     return redirect(url_for("progress_page"))
 
+@app.get("/settings")
+def settings_page():
+    # Build domain options including "random" first
+    domain_opts = ['<option value="random">Random (all domains)</option>'] + [
+        f'<option value="{k}">{v}</option>' for k, v in DOMAINS.items()
+    ]
+    domain_select = "\n".join(domain_opts)
+
+    # Simple timezone list
+    tz_list = [
+        "UTC",
+        "America/New_York",
+        "America/Chicago",
+        "America/Denver",
+        "America/Los_Angeles",
+        "Europe/London",
+        "Europe/Paris",
+        "Asia/Dubai",
+        "Asia/Kolkata",
+        "Asia/Singapore",
+        "Australia/Sydney"
+    ]
+    tz_options = "\n".join([f'<option value="{tz}">{tz}</option>' for tz in tz_list])
+
+    body = """
+    <div class="row">
+      <div class="col-md-8 mx-auto">
+        <div class="card border-0 shadow">
+          <div class="card-header bg-dark text-white"><h4 class="mb-0">Settings</h4></div>
+          <div class="card-body">
+            <div class="mb-3">
+              <label for="prefName" class="form-label fw-semibold">Your name</label>
+              <input type="text" id="prefName" class="form-control" placeholder="e.g., Alex">
+              <div class="form-text">Shown on the Home page as “Welcome, {name}”.</div>
+            </div>
+
+            <div class="mb-3">
+              <label for="prefTZ" class="form-label fw-semibold">Time zone</label>
+              <select id="prefTZ" class="form-select">
+                """ + tz_options + """
+              </select>
+              <div class="form-text">Used for showing dates/times in your Progress area.</div>
+            </div>
+
+            <div class="mb-3">
+              <label for="prefDomain" class="form-label fw-semibold">Default domain</label>
+              <select id="prefDomain" class="form-select">
+                """ + domain_select + """
+              </select>
+              <div class="form-text">Pre-selected domain for Tutor and Quizzes. “Random” includes all domains.</div>
+            </div>
+
+            <div class="form-check form-switch mb-4">
+              <input class="form-check-input" type="checkbox" id="prefTips">
+              <label class="form-check-label" for="prefTips">Show rotating study tips on Home</label>
+            </div>
+
+            <div class="d-flex gap-2">
+              <button id="saveBtn" class="btn btn-primary btn-enhanced">Save changes</button>
+              <button id="resetBtn" class="btn btn-outline-secondary btn-enhanced">Reset to defaults</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      (function() {
+        // Elements
+        var nameEl = document.getElementById('prefName');
+        var tzEl = document.getElementById('prefTZ');
+        var domEl = document.getElementById('prefDomain');
+        var tipsEl = document.getElementById('prefTips');
+        var saveBtn = document.getElementById('saveBtn');
+        var resetBtn = document.getElementById('resetBtn');
+
+        // Load from localStorage with defaults
+        function loadPrefs() {
+          try {
+            var name = localStorage.getItem('pref.name') || '';
+            var tz = localStorage.getItem('pref.tz') || 'UTC';
+            var dom = localStorage.getItem('pref.default_domain') || 'random';
+            var tips = localStorage.getItem('pref.tips_on');
+            if (tips === null || tips === undefined) { tips = '1'; } // default ON
+
+            nameEl.value = name;
+            tzEl.value = tz;
+            domEl.value = dom;
+            tipsEl.checked = (tips === '1');
+          } catch (e) {
+            console.warn('Could not load settings:', e);
+          }
+        }
+
+        // Save to localStorage
+        function savePrefs() {
+          try {
+            localStorage.setItem('pref.name', (nameEl.value || '').trim());
+            localStorage.setItem('pref.tz', tzEl.value);
+            localStorage.setItem('pref.default_domain', domEl.value);
+            localStorage.setItem('pref.tips_on', tipsEl.checked ? '1' : '0');
+            alert('Saved! Your preferences will be used across pages on this browser.');
+          } catch (e) {
+            alert('Could not save settings in this browser.');
+          }
+        }
+
+        // Reset
+        function resetPrefs() {
+          if (!confirm('Reset settings to defaults?')) return;
+          localStorage.removeItem('pref.name');
+          localStorage.setItem('pref.tz', 'UTC');
+          localStorage.setItem('pref.default_domain', 'random');
+          localStorage.setItem('pref.tips_on', '1');
+          loadPrefs();
+          alert('Reset to defaults.');
+        }
+
+        saveBtn.addEventListener('click', savePrefs);
+        resetBtn.addEventListener('click', resetPrefs);
+        loadPrefs();
+      })();
+    </script>
+    """
+    return base_layout("Settings", body)
+
 # --- Error pages ---
 @app.errorhandler(404)
 def nf(e):
@@ -1217,6 +1343,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
