@@ -1050,86 +1050,116 @@ def progress_page():
     rows = "\n".join(rows_html) or '<tr><td colspan="3" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
 
     # Build the page
-    body = f"""
-    <div class="row"><div class="col-lg-10 mx-auto">
-      <div class="card border-0 shadow mb-4">
-        <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
-        <div class="card-body">
+    domains_json = json.dumps(DOMAINS)             # readable domain names for the table
+per_domain_json = json.dumps(domain_stats)     # numbers for each domain (built earlier in 4a)
+   body = f"""
+<div class="row"><div class="col-md-10 mx-auto">
+  <div class="card border-0 shadow">
+    <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
+    <div class="card-body">
 
-          <!-- Overall Gauge -->
-          <div class="text-center mb-2" style="font-weight:600;">Your Progress</div>
-          <div id="gaugeWrap" class="d-flex justify-content-center">
-            <div id="gauge"></div>
-          </div>
-          <div class="text-center mt-1" style="font-size:1.1rem; font-weight:700;">
-            {overall}% average of your recent quizzes
-          </div>
-
-          <!-- Per-domain table -->
-          <h6 class="mt-4">Per-domain progress</h6>
-          <div class="table-responsive">
-            <table class="table table-sm align-middle">
-              <thead class="table-light">
-                <tr><th>Domain</th><th>Attempts</th><th>Average Score</th></tr>
-              </thead>
-              <tbody>{rows}</tbody>
-            </table>
-          </div>
-
-          <div class="text-end">
-            <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
-              <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
-            </form>
-          </div>
+      <!-- Overall Speedometer -->
+      <div class="text-center mb-3">
+        <div id="gaugeWrap"></div>
+        <div class="mt-2">
+          <div class="fw-bold" id="gaugeLabel"></div>
+          <div class="text-muted small">Average of your recent quizzes</div>
         </div>
       </div>
-    </div></div>
 
-    <script>
-      (function() {{
-        var percent = {overall};
+      <!-- Overall table -->
+      <div class="table-responsive mb-4">
+        <table class="table table-sm align-middle">
+          <thead class="table-light"><tr><th>When (UTC)</th><th>Type</th><th>Domain</th><th>Correct</th><th>Score</th></tr></thead>
+          <tbody>{rows}</tbody>
+        </table>
+      </div>
 
-        function polar(cx, cy, r, deg) {{
-          var rad = Math.PI * deg / 180;
-          return {{ x: cx + r * Math.cos(rad), y: cy - r * Math.sin(rad) }};
-        }}
+      <!-- 4b: Per-domain summary -->
+      <h5 class="mb-2">Per-domain progress</h5>
+      <div class="table-responsive">
+        <table class="table table-sm align-middle">
+          <thead class="table-light">
+            <tr><th>Domain</th><th>Attempts</th><th>Average</th></tr>
+          </thead>
+          <tbody id="perDomainRows"></tbody>
+        </table>
+      </div>
 
-        function arcPath(cx, cy, r, a0, a1) {{
-          var p0 = polar(cx, cy, r, a0);
-          var p1 = polar(cx, cy, r, a1);
-          var large = (Math.abs(a1 - a0) > 180) ? 1 : 0;
-          var sweep = (a1 < a0) ? 1 : 0; // draw clockwise from left to right
-          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1)
-               + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' '
-               + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
-        }}
+      <div class="text-end mt-3">
+        <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+          <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div></div>
 
-        function gaugeSVG(pct) {{
-          var w = 300, h = 180, cx = w/2, cy = h - 10, r = Math.min(w/2 - 10, h - 20);
-          var aStart = 180, a0 = aStart;
-          var aRedEnd = 180 - 180 * 0.40;  // 40%
-          var aOrgEnd = 180 - 180 * 0.79;  // 79%
-          var aGreenEnd = 0;               // 100%
+<script>
+  // ----- Speedometer (already working) -----
+  (function() {{
+    const avg = {avg};          // overall %
+    const g = document.getElementById('gaugeWrap');
+    const w = 320, h = 190, cx = w/2, cy = h-10, r = 150;
+    function deg(a) {{ return a * Math.PI / 180; }}
+    function polar(cx, cy, r, ang) {{ return {{x: cx + r*Math.cos(ang), y: cy + r*Math.sin(ang)}}; }}
+    function arc(cx, cy, r, a0, a1) {{
+      const p0 = polar(cx, cy, r, a0), p1 = polar(cx, cy, r, a1);
+      const large = (a1 - a0) > Math.PI ? 1 : 0, sweep = 1;
+      return "M " + p0.x.toFixed(1) + " " + p0.y.toFixed(1)
+           + " A " + r + " " + r + " 0 " + large + " " + sweep + " "
+           + p1.x.toFixed(1) + " " + p1.y.toFixed(1);
+    }}
+    let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
+    const bands = [
+      {{from:180, to:252, color:'#dc3545'}}, // 0-40 red
+      {{from:252, to:338.4, color:'#fd7e14'}}, // 41-79 orange
+      {{from:338.4, to:360, color:'#198754'}} // 80-100 green
+    ];
+    bands.forEach(b => {{
+      svg += '<path d="' + arc(cx,cy,r,deg(b.from),deg(b.to)) + '" fill="none" stroke="' + b.color + '" stroke-width="18" stroke-linecap="round"/>';
+    }});
+    [0,20,80,100].forEach(p => {{
+      const a = deg(180 + p*1.8), p0 = polar(cx,cy,r-12,a), p1 = polar(cx,cy,r-2,a);
+      svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1) + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1) + '" stroke="#b0b0b0" stroke-width="3"/>';
+      const pt = polar(cx,cy,r-28,a);
+      svg += '<text x="' + pt.x.toFixed(1) + '" y="' + pt.y.toFixed(1) + '" font-size="10" text-anchor="middle" fill="#6c757d">' + p + '%</text>';
+    }});
+    const ang = deg(180 + Math.max(0, Math.min(100, avg)) * 1.8);
+    const tip = polar(cx,cy,r-24, ang);
+    svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + tip.x.toFixed(1) + '" y2="' + tip.y.toFixed(1) + '" stroke="#333" stroke-width="3"/>';
+    svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
+    svg += '</svg>';
+    g.innerHTML = svg;
+    // Label below the dial (not on top)
+    const lbl = document.getElementById('gaugeLabel');
+    lbl.innerHTML = '<span style="font-size:1.6rem; font-weight:700;">' + avg.toFixed(1) + '%</span>';
+  }})();
 
-          var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-          svg += '<path d="' + arcPath(cx,cy,r,a0,aRedEnd) + '" fill="none" stroke="#dc3545" stroke-width="18" stroke-linecap="round"/>';
-          svg += '<path d="' + arcPath(cx,cy,r,aRedEnd,aOrgEnd) + '" fill="none" stroke="#fd7e14" stroke-width="18" stroke-linecap="round"/>';
-          svg += '<path d="' + arcPath(cx,cy,r,aOrgEnd,aGreenEnd) + '" fill="none" stroke="#198754" stroke-width="18" stroke-linecap="round"/>';
-
-          // Needle
-          var angle = 180 - (pct * 1.8);
-          var tip = polar(cx, cy, r - 8, angle);
-          svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + tip.x.toFixed(1) + '" y2="' + tip.y.toFixed(1) + '" stroke="#333" stroke-width="3"/>';
-          svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
-          svg += '</svg>';
-          return svg;
-        }}
-
-        document.getElementById('gauge').innerHTML = gaugeSVG(percent);
-      }})();
-    </script>
-    """
-    return base_layout("Progress", body)
+  // ----- 4b: build Per-domain table -----
+  (function() {{
+    const NAMES = {domains_json};
+    const DATA = {per_domain_json};
+    const tb = document.getElementById('perDomainRows');
+    const keys = Object.keys(DATA);
+    if (!keys.length) {{
+      tb.innerHTML = '<tr><td colspan="3" class="text-center text-muted">No domain data yet — take a quiz.</td></tr>';
+      return;
+    }}
+    keys.sort();
+    keys.forEach(k => {{
+      const d = DATA[k];
+      const tr = document.createElement('tr');
+      tr.innerHTML =
+        '<td>' + (NAMES[k] || k) + '</td>' +
+        '<td>' + d.attempts + '</td>' +
+        '<td><strong>' + (d.avg || 0).toFixed(1) + '%</strong></td>';
+      tb.appendChild(tr);
+    }});
+  }})();
+</script>
+"""
+return base_layout("Progress", body)
 
 @app.post("/progress/reset")
 def reset_progress():
@@ -1153,6 +1183,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
