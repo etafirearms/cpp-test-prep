@@ -533,6 +533,23 @@ def api_chat():
     reply = chat_with_ai([prefix + user_msg])
     return jsonify({"response": reply, "timestamp": datetime.utcnow().isoformat()})
 
+@app.post("/api/flashcards/mark")
+def flashcards_mark():
+    data = request.get_json() or {}
+    know = bool(data.get("know"))
+    domain = (data.get("domain") or "random").strip() or "random"
+
+    stats = session.get("flashcard_stats", {})
+    by_dom = stats.get(domain, {"know": 0, "dont": 0, "viewed": 0})
+    if know:
+        by_dom["know"] += 1
+    else:
+        by_dom["dont"] += 1
+    by_dom["viewed"] += 1
+    stats[domain] = by_dom
+    session["flashcard_stats"] = stats
+    return jsonify({"ok": True, "stats": by_dom})
+
 # --- Flashcards --- (ONLY here we show clickable left/right arrows)
 @app.get("/flashcards")
 def flashcards_page():
@@ -543,7 +560,7 @@ def flashcards_page():
     all_cards = []
     for q in BASE_QUESTIONS:
         ans = q["options"].get(q["correct"], "")
-        back = "✅ Correct: " + ans + "\\n\\n💡 " + q["explanation"]
+        back = "✅ Correct: " + ans + "\n\n💡 " + q["explanation"]
         all_cards.append({"front": q["question"], "back": back, "domain": q["domain"]})
     cards_json = json.dumps(all_cards)
 
@@ -561,11 +578,16 @@ def flashcards_page():
               <div id="card" class="border rounded p-4 flex-grow-1 mx-2" style="min-height:220px; background:#f8f9fa; cursor:pointer;"></div>
               <button id="nextBtn" class="btn btn-outline-secondary btn-sm" title="Next (or L)">Next ▶</button>
             </div>
-            <div class="d-flex gap-2 justify-content-center mt-2">
-              <button id="btnDK" class="btn btn-outline-danger btn-enhanced">❌ Don't Know</button>
-              <button id="btnK" class="btn btn-outline-success btn-enhanced">✅ Know</button>
-            </div>
-            <div class="text-center mt-2 small text-muted">Click card to flip. Keys: J = flip, K = prev, L = next</div>
+            <div class="d-flex gap-2 justify-content-center mt-3">
+  <button id="btnDK" class="btn btn-outline-danger btn-enhanced">❌ Don't Know</button>
+  <button id="btnK" class="btn btn-outline-success btn-enhanced">✅ Know</button>
+</div>
+<div id="fcStats" class="text-center mt-2 small">
+  <span class="badge bg-light text-dark me-2">Viewed: <span id="vCount">0</span></span>
+  <span class="badge bg-success me-2">Know: <span id="kCount">0</span></span>
+  <span class="badge bg-danger">Don't Know: <span id="dCount">0</span></span>
+</div>
+<div class="text-center mt-2 small text-muted">Press J to flip, K for next.</div>
           </div>
         </div>
       </div>
@@ -1067,5 +1089,6 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
