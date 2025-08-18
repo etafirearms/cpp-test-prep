@@ -100,6 +100,7 @@ def base_layout(title: str, body_html: str) -> str:
             <a class="nav-link" href="/quiz">Quiz</a>
             <a class="nav-link" href="/mock-exam">Mock Exam</a>
             <a class="nav-link" href="/progress">Progress</a>
+            <a class="nav-link" href="/settings">Settings</a>
           </div>
         </div>
       </div>
@@ -1152,6 +1153,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
