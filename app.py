@@ -272,27 +272,44 @@ def diag_openai():
 # --- Home ---
 @app.get("/")
 def home():
+    # OPTIONAL: allow setting name via query once (demo until DB)
+    qname = request.args.get("name")
+    if qname:
+        session["user_name"] = qname
+    name = session.get("user_name")
+
     # Compute simple average from session history for the gauge
     hist = session.get("quiz_history", [])
     avg = round(sum(h.get("score", 0.0) for h in hist)/len(hist), 1) if hist else 0.0
-    # Motivational tips (random rotate client-side)
-    tips = [
-        "Small daily practice beats cramming.",
-        "Review mistakes: that’s where learning sticks.",
-        "Mix domains to build stronger recall.",
-        "Teach someone else: it cements your knowledge.",
-        "Set a short timer (20–25 min) and focus."
+
+    # Header text (escape < > in the name)
+    display_name = (name or "")
+    display_name = display_name.replace("<", "&lt;").replace(">", "&gt;")
+    if display_name:
+        header_html = f'<h1 class="mb-1">Welcome, {display_name} 👋</h1><div class="text-muted">CPP Test Prep</div>'
+    else:
+        header_html = '<h1 class="mb-2">CPP Test Prep</h1>'
+
+    # Encouragement messages (HTML-safe, we control content)
+    messages = [
+        "<strong>Study tip:</strong> Use 15-minute bursts. Set a timer, focus, then take a short break.",
+        "<strong>Make mistakes matter:</strong> Review every wrong answer and jot the why in one sentence.",
+        "<strong>Mix it up:</strong> Rotate domains—small chunks improve recall and reduce burnout.",
+        "<strong>Mini-plan:</strong> Pick 1 domain, 2 flashcards, and 3 quiz questions. Done in ~15 minutes!",
+        "<strong>Positive cue:</strong> Tell yourself: “I improve a little every session.”",
+        "<strong>Teach it:</strong> Explain one concept out loud or to a friend—it locks in learning.",
     ]
-    tips_json = json.dumps(tips)
+    messages_json = json.dumps(messages)
+
     body = """
     <div class="row justify-content-center">
       <div class="col-md-10">
         <div class="card border-0 shadow mb-4">
           <div class="card-body d-flex flex-column flex-md-row align-items-center gap-3">
             <div class="flex-grow-1">
-              <h1 class="mb-2">CPP Test Prep</h1>
-              <p class="text-muted mb-2" id="tip"></p>
-              <div class="d-flex gap-2 flex-wrap">
+              """ + header_html + """
+              <div id="tip" class="mt-2 p-2 rounded" style="background:#f8f9fa; border:1px solid #eee;"></div>
+              <div class="d-flex gap-2 flex-wrap mt-3">
                 <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
                 <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
                 <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
@@ -309,13 +326,21 @@ def home():
     </div>
     <script>
       var HOME_AVG = """ + str(avg) + """;
-      var TIPS = """ + tips_json + """;
-      function pickTip() {
-        var i = Math.floor(Math.random() * TIPS.length);
+      var MSGS = """ + messages_json + """;
+      function showMsg() {
         var el = document.getElementById('tip');
-        if (el) el.textContent = TIPS[i];
+        if (!el || !MSGS.length) return;
+        // rotate messages in order
+        var idx = parseInt(el.getAttribute('data-idx') || '0', 10);
+        el.innerHTML = MSGS[idx];
+        idx = (idx + 1) % MSGS.length;
+        el.setAttribute('data-idx', String(idx));
       }
-      pickTip();
+      showMsg();
+      // change message every 8 seconds
+      setInterval(showMsg, 8000);
+
+      // draw gauge
       mountGauge('homeGauge', HOME_AVG);
     </script>
     """
@@ -1042,4 +1067,5 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
