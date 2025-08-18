@@ -1008,66 +1008,124 @@ def submit_quiz_api():
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
-    overall = round(sum(h.get("score", 0.0) for h in hist)/len(hist), 1) if hist else 0.0
+    overall = round(sum(h["score"] for h in hist) / len(hist), 1) if hist else 0.0
 
-    # Per-domain stats
-    per = {}
+    # Aggregate by domain
+    domain_totals = {}
+    for d_key in list(DOMAINS.keys()) + ["random"]:
+        domain_totals[d_key] = {"sum": 0.0, "n": 0}
     for h in hist:
-        d = h.get("domain") or "random"
-        per.setdefault(d, []).append(h.get("score", 0.0))
-    per_rows = []
-    for dkey, scores in per.items():
-        avg = round(sum(scores)/len(scores), 1) if scores else 0.0
-        name = DOMAINS.get(dkey, "All Domains")
-        per_rows.append((name, avg, len(scores)))
-    per_rows.sort(key=lambda x: x[0].lower())
+        d = (h.get("domain") or "random")
+        if d not in domain_totals:
+            domain_totals[d] = {"sum": 0.0, "n": 0}
+        domain_totals[d]["sum"] += float(h.get("score", 0.0))
+        domain_totals[d]["n"] += 1
 
-    hist_rows = "".join([
-        f"<tr><td>{h['date'][:19].replace('T',' ')}</td><td>{h.get('domain','random')}</td><td>{h['type']}</td><td>{h['correct']}/{h['total']}</td><td>{round(h['score'],1)}%</td></tr>"
-        for h in reversed(hist)
-    ]) or '<tr><td colspan="5" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+    # Build table rows
+    def bar_class(p):
+        if p >= 80: return "bg-success"
+        if p >= 41: return "bg-warning"
+        return "bg-danger"
 
-    per_table = "".join([
-        f"<tr><td>{name}</td><td>{count}</td><td>{avg}%</td></tr>"
-        for (name, avg, count) in per_rows
-    ]) or '<tr><td colspan="3" class="text-center text-muted">No domain data yet</td></tr>'
+    rows_html = []
+    for d_key, agg in domain_totals.items():
+        n = agg["n"]
+        if n == 0:
+            avg = 0.0
+        else:
+            avg = round(agg["sum"] / n, 1)
+        name = DOMAINS.get(d_key, "All Domains (Random)") if d_key != "random" else "All Domains (Random)"
+        rows_html.append(f"""
+          <tr>
+            <td>{name}</td>
+            <td>{n}</td>
+            <td style="width:55%;">
+              <div class="progress" style="height: 18px;">
+                <div class="progress-bar {bar_class(avg)}" role="progressbar" style="width: {avg}%" aria-valuenow="{avg}" aria-valuemin="0" aria-valuemax="100">{avg}%</div>
+              </div>
+            </td>
+          </tr>
+        """)
+    rows = "\n".join(rows_html) or '<tr><td colspan="3" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
 
+    # Build the page
     body = f"""
-    <div class="row"><div class="col-md-11 mx-auto">
-      <div class="card border-0 shadow mb-3">
+    <div class="row"><div class="col-lg-10 mx-auto">
+      <div class="card border-0 shadow mb-4">
         <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
         <div class="card-body">
-          <div class="row align-items-center">
-            <div class="col-md-8">
-              <div class="mb-3"><strong>Overall Average:</strong> {overall}%</div>
-              <div class="table-responsive">
-                <table class="table table-sm align-middle">
-                  <thead class="table-light"><tr><th>When (UTC)</th><th>Domain</th><th>Type</th><th>Correct</th><th>Score</th></tr></thead>
-                  <tbody>{hist_rows}</tbody>
-                </table>
-              </div>
-              <div class="table-responsive mt-3">
-                <table class="table table-sm align-middle">
-                  <thead class="table-light"><tr><th>Domain</th><th>Attempts</th><th>Avg Score</th></tr></thead>
-                  <tbody>{per_table}</tbody>
-                </table>
-              </div>
-              <div class="text-end mt-2">
-                <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
-                  <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
-                </form>
-              </div>
-            </div>
-            <div class="col-md-4 text-center">
-              <div id="progGauge"></div>
-              <div class="small text-muted mt-2">Overall average</div>
-            </div>
+
+          <!-- Overall Gauge -->
+          <div class="text-center mb-2" style="font-weight:600;">Your Progress</div>
+          <div id="gaugeWrap" class="d-flex justify-content-center">
+            <div id="gauge"></div>
+          </div>
+          <div class="text-center mt-1" style="font-size:1.1rem; font-weight:700;">
+            {overall}% average of your recent quizzes
+          </div>
+
+          <!-- Per-domain table -->
+          <h6 class="mt-4">Per-domain progress</h6>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead class="table-light">
+                <tr><th>Domain</th><th>Attempts</th><th>Average Score</th></tr>
+              </thead>
+              <tbody>{rows}</tbody>
+            </table>
+          </div>
+
+          <div class="text-end">
+            <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+              <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
+            </form>
           </div>
         </div>
       </div>
     </div></div>
+
     <script>
-      mountGauge('progGauge', """ + str(overall) + """);
+      (function() {{
+        var percent = {overall};
+
+        function polar(cx, cy, r, deg) {{
+          var rad = Math.PI * deg / 180;
+          return {{ x: cx + r * Math.cos(rad), y: cy - r * Math.sin(rad) }};
+        }}
+
+        function arcPath(cx, cy, r, a0, a1) {{
+          var p0 = polar(cx, cy, r, a0);
+          var p1 = polar(cx, cy, r, a1);
+          var large = (Math.abs(a1 - a0) > 180) ? 1 : 0;
+          var sweep = (a1 < a0) ? 1 : 0; // draw clockwise from left to right
+          return 'M ' + p0.x.toFixed(1) + ' ' + p0.y.toFixed(1)
+               + ' A ' + r + ' ' + r + ' 0 ' + large + ' ' + sweep + ' '
+               + p1.x.toFixed(1) + ' ' + p1.y.toFixed(1);
+        }}
+
+        function gaugeSVG(pct) {{
+          var w = 300, h = 180, cx = w/2, cy = h - 10, r = Math.min(w/2 - 10, h - 20);
+          var aStart = 180, a0 = aStart;
+          var aRedEnd = 180 - 180 * 0.40;  // 40%
+          var aOrgEnd = 180 - 180 * 0.79;  // 79%
+          var aGreenEnd = 0;               // 100%
+
+          var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
+          svg += '<path d="' + arcPath(cx,cy,r,a0,aRedEnd) + '" fill="none" stroke="#dc3545" stroke-width="18" stroke-linecap="round"/>';
+          svg += '<path d="' + arcPath(cx,cy,r,aRedEnd,aOrgEnd) + '" fill="none" stroke="#fd7e14" stroke-width="18" stroke-linecap="round"/>';
+          svg += '<path d="' + arcPath(cx,cy,r,aOrgEnd,aGreenEnd) + '" fill="none" stroke="#198754" stroke-width="18" stroke-linecap="round"/>';
+
+          // Needle
+          var angle = 180 - (pct * 1.8);
+          var tip = polar(cx, cy, r - 8, angle);
+          svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + tip.x.toFixed(1) + '" y2="' + tip.y.toFixed(1) + '" stroke="#333" stroke-width="3"/>';
+          svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
+          svg += '</svg>';
+          return svg;
+        }}
+
+        document.getElementById('gauge').innerHTML = gaugeSVG(percent);
+      }})();
     </script>
     """
     return base_layout("Progress", body)
@@ -1094,6 +1152,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
