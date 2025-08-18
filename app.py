@@ -1287,7 +1287,367 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
 
+@app.get("/admin")
+def admin_home():
+    # Enable dev admin quickly: /admin?admin=1
+    if request.args.get("admin") == "1":
+        session["is_admin"] = True
+    tab = request.args.get("tab", "questions")
 
+    # Build rows for Questions table
+    q_rows = []
+    for q in QUESTIONS:
+        opts = q.get("options", [])
+        domain = q.get("domain", "random")
+        q_rows.append(
+            "<tr>"
+            "<td>" + domain + "</td>"
+            "<td>" + (q.get("question","")[:120]).replace("<","&lt;").replace(">","&gt;") + "</td>"
+            "<td>" + (",".join([str(i+1)+") "+o for i,o in enumerate(opts)])[:120]).replace("<","&lt;").replace(">","&gt;") + "</td>"
+            "<td>" + str(q.get("answer","")) + "</td>"
+            "<td>"
+              '<form method="post" action="/admin/questions/delete" style="display:inline;">'
+              '<input type="hidden" name="id" value="' + str(q.get("id","")) + '"/>'
+              '<button class="btn btn-sm btn-outline-danger">Delete</button>'
+              "</form>"
+            "</td>"
+            "</tr>"
+        )
+    q_table = "\n".join(q_rows) or '<tr><td colspan="5" class="text-center text-muted">No questions yet.</td></tr>'
+
+    # Build rows for Flashcards table
+    f_rows = []
+    for fc in FLASHCARDS:
+        domain = fc.get("domain", "random")
+        f_rows.append(
+            "<tr>"
+            "<td>" + domain + "</td>"
+            "<td>" + (fc.get("front","")[:120]).replace("<","&lt;").replace(">","&gt;") + "</td>"
+            "<td>" + (fc.get("back","")[:120]).replace("<","&lt;").replace(">","&gt;") + "</td>"
+            "<td>"
+              '<form method="post" action="/admin/flashcards/delete" style="display:inline;">'
+              '<input type="hidden" name="id" value="' + str(fc.get("id","")) + '"/>'
+              '<button class="btn btn-sm btn-outline-danger">Delete</button>'
+              "</form>"
+            "</td>"
+            "</tr>"
+        )
+    f_table = "\n".join(f_rows) or '<tr><td colspan="4" class="text-center text-muted">No flashcards yet.</td></tr>'
+
+    # Build rows for Users table (simple list until auth is wired)
+    u_rows = []
+    for u in USERS:
+        usage = u.get("usage", {})
+        last_active = usage.get("last_active") or ""
+        u_rows.append(
+            "<tr>"
+            "<td>" + (u.get("name","")) + "</td>"
+            "<td>" + (u.get("email","")) + "</td>"
+            "<td>" + (u.get("subscription","free")) + "</td>"
+            "<td>" + str(usage.get("quizzes",0)) + "</td>"
+            "<td>" + str(usage.get("questions",0)) + "</td>"
+            "<td>" + last_active + "</td>"
+            "<td>"
+              '<form method="post" action="/admin/users/subscription" class="d-flex gap-2">'
+              '<input type="hidden" name="id" value="' + str(u.get("id","")) + '"/>'
+              '<select class="form-select form-select-sm" name="subscription">'
+                '<option value="free">free</option>'
+                '<option value="trial">trial</option>'
+                '<option value="active">active</option>'
+                '<option value="past_due">past_due</option>'
+                '<option value="canceled">canceled</option>'
+              '</select>'
+              '<button class="btn btn-sm btn-outline-primary">Update</button>'
+              '</form>'
+            "</td>"
+            "</tr>"
+        )
+    u_table = "\n".join(u_rows) or '<tr><td colspan="7" class="text-center text-muted">No users yet.</td></tr>'
+
+    # Tabs
+    tab_q = "active" if tab == "questions" else ""
+    tab_f = "active" if tab == "flashcards" else ""
+    tab_u = "active" if tab == "users" else ""
+
+    if not is_admin():
+        guard = (
+            '<div class="alert alert-warning mb-3">'
+            'Admin mode is off. Append ?admin=1 to the URL to enable for this browser session '
+            '(dev-only guard; replace with real auth later).'
+            '</div>'
+        )
+    else:
+        guard = ""
+
+    body = """
+<div class="row"><div class="col-md-11 mx-auto">
+  <div class="d-flex align-items-center mb-3">
+    <h3 class="mb-0">Admin</h3>
+    <span class="ms-3 badge bg-secondary">dev mode</span>
+  </div>
+  %s
+  <ul class="nav nav-tabs mb-3">
+    <li class="nav-item"><a class="nav-link %s" href="/admin?tab=questions">Questions</a></li>
+    <li class="nav-item"><a class="nav-link %s" href="/admin?tab=flashcards">Flashcards</a></li>
+    <li class="nav-item"><a class="nav-link %s" href="/admin?tab=users">Users</a></li>
+  </ul>
+""" % (guard, tab_q, tab_f, tab_u)
+
+    # Section: Questions
+    q_section = """
+  <div %s>
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light"><strong>Add Question</strong></div>
+      <div class="card-body">
+        <form method="post" action="/admin/questions/add" class="row g-2">
+          <div class="col-md-2">
+            <label class="form-label">Domain</label>
+            <input class="form-control" name="domain" placeholder="e.g., 1 or random"/>
+          </div>
+          <div class="col-md-10">
+            <label class="form-label">Question</label>
+            <textarea class="form-control" name="question" rows="2" placeholder="Question text"></textarea>
+          </div>
+          <div class="col-md-3"><label class="form-label">Option 1</label><input class="form-control" name="opt1"/></div>
+          <div class="col-md-3"><label class="form-label">Option 2</label><input class="form-control" name="opt2"/></div>
+          <div class="col-md-3"><label class="form-label">Option 3</label><input class="form-control" name="opt3"/></div>
+          <div class="col-md-3"><label class="form-label">Option 4</label><input class="form-control" name="opt4"/></div>
+          <div class="col-md-2"><label class="form-label">Answer (1-4)</label><input class="form-control" name="answer" type="number" min="1" max="4"/></div>
+          <div class="col-md-10"><label class="form-label">Explanation</label><input class="form-control" name="explanation" placeholder="Optional"/></div>
+          <div class="col-12">
+            <button class="btn btn-primary">Add Question</button>
+            <a class="btn btn-outline-secondary ms-2" href="/admin/export/questions">Export JSON</a>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-light d-flex justify-content-between align-items-center">
+        <strong>Import Questions (CSV)</strong>
+        <a class="small" href="/admin/example/questions.csv">Download CSV template</a>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/admin/questions/import" enctype="multipart/form-data" class="row g-2">
+          <div class="col-md-6">
+            <input type="file" name="csv" accept=".csv" class="form-control"/>
+          </div>
+          <div class="col-md-6">
+            <button class="btn btn-outline-primary">Upload and Import</button>
+          </div>
+        </form>
+        <div class="text-muted mt-2 small">
+          Columns: domain, question, opt1, opt2, opt3, opt4, answer, explanation
+        </div>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead class="table-light">
+          <tr><th>Domain</th><th>Question</th><th>Options</th><th>Answer</th><th></th></tr>
+        </thead>
+        <tbody>""" + q_table + """</tbody>
+      </table>
+    </div>
+  </div>
+""" % ("" if tab=="questions" else 'style="display:none;"')
+
+    # Section: Flashcards
+    f_section = """
+  <div %s>
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light"><strong>Add Flashcard</strong></div>
+      <div class="card-body">
+        <form method="post" action="/admin/flashcards/add" class="row g-2">
+          <div class="col-md-2">
+            <label class="form-label">Domain</label>
+            <input class="form-control" name="domain" placeholder="e.g., 1 or random"/>
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Front</label>
+            <textarea class="form-control" name="front" rows="2" placeholder="Prompt"></textarea>
+          </div>
+          <div class="col-md-5">
+            <label class="form-label">Back</label>
+            <textarea class="form-control" name="back" rows="2" placeholder="Answer"></textarea>
+          </div>
+          <div class="col-12"><button class="btn btn-primary">Add Flashcard</button>
+            <a class="btn btn-outline-secondary ms-2" href="/admin/export/flashcards">Export JSON</a>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <div class="card border-0 shadow-sm mb-4">
+      <div class="card-header bg-light d-flex justify-content-between align-items-center">
+        <strong>Import Flashcards (CSV)</strong>
+        <a class="small" href="/admin/example/flashcards.csv">Download CSV template</a>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/admin/flashcards/import" enctype="multipart/form-data" class="row g-2">
+          <div class="col-md-6">
+            <input type="file" name="csv" accept=".csv" class="form-control"/>
+          </div>
+          <div class="col-md-6">
+            <button class="btn btn-outline-primary">Upload and Import</button>
+          </div>
+        </form>
+        <div class="text-muted mt-2 small">
+          Columns: domain, front, back
+        </div>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead class="table-light">
+          <tr><th>Domain</th><th>Front</th><th>Back</th><th></th></tr>
+        </thead>
+        <tbody>""" + f_table + """</tbody>
+      </table>
+    </div>
+  </div>
+""" % ("" if tab=="flashcards" else 'style="display:none;"')
+
+    # Section: Users
+    u_section = """
+  <div %s>
+    <div class="card border-0 shadow-sm mb-3">
+      <div class="card-header bg-light"><strong>Add User</strong></div>
+      <div class="card-body">
+        <form method="post" action="/admin/users/add" class="row g-2">
+          <div class="col-md-4"><label class="form-label">Name</label><input class="form-control" name="name"/></div>
+          <div class="col-md-4"><label class="form-label">Email</label><input class="form-control" name="email"/></div>
+          <div class="col-md-4">
+            <label class="form-label">Subscription</label>
+            <select class="form-select" name="subscription">
+              <option value="free">free</option>
+              <option value="trial">trial</option>
+              <option value="active">active</option>
+              <option value="past_due">past_due</option>
+              <option value="canceled">canceled</option>
+            </select>
+          </div>
+          <div class="col-12"><button class="btn btn-primary">Add User</button></div>
+        </form>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table class="table table-sm align-middle">
+        <thead class="table-light">
+          <tr><th>Name</th><th>Email</th><th>Plan</th><th>Quizzes</th><th>Questions</th><th>Last Active</th><th></th></tr>
+        </thead>
+        <tbody>""" + u_table + """</tbody>
+      </table>
+    </div>
+  </div>
+""" % ("" if tab=="users" else 'style="display:none;"')
+
+    body += q_section + f_section + u_section + "</div></div>"
+    return base_layout("Admin", body)
+
+# --- Questions CRUD ---
+@app.post("/admin/questions/add")
+def admin_questions_add():
+    if not is_admin():
+        return redirect("/admin")
+    form = request.form
+    q = {
+        "id": str(uuid.uuid4()),
+        "domain": (form.get("domain") or "random").strip(),
+        "question": (form.get("question") or "").strip(),
+        "options": [
+            (form.get("opt1") or "").strip(),
+            (form.get("opt2") or "").strip(),
+            (form.get("opt3") or "").strip(),
+            (form.get("opt4") or "").strip(),
+        ],
+        "answer": int(form.get("answer") or 1),
+        "explanation": (form.get("explanation") or "").strip(),
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    QUESTIONS.append(q)
+    _save_json("questions.json", QUESTIONS)
+    return redirect("/admin?tab=questions")
+
+@app.post("/admin/questions/delete")
+def admin_questions_delete():
+    if not is_admin():
+        return redirect("/admin")
+    qid = request.form.get("id")
+    if qid:
+        idx = next((i for i,x in enumerate(QUESTIONS) if x.get("id")==qid), -1)
+        if idx >= 0:
+            QUESTIONS.pop(idx)
+            _save_json("questions.json", QUESTIONS)
+    return redirect("/admin?tab=questions")
+
+@app.post("/admin/questions/import")
+def admin_questions_import():
+    if not is_admin():
+        return redirect("/admin")
+    f = request.files.get("csv")
+    if not f:
+        return redirect("/admin?tab=questions")
+    reader = csv.DictReader(f.stream.read().decode("utf-8").splitlines())
+    count = 0
+    for row in reader:
+        try:
+            q = {
+                "id": str(uuid.uuid4()),
+                "domain": (row.get("domain") or "random").strip(),
+                "question": (row.get("question") or "").strip(),
+                "options": [
+                    (row.get("opt1") or "").strip(),
+                    (row.get("opt2") or "").strip(),
+                    (row.get("opt3") or "").strip(),
+                    (row.get("opt4") or "").strip(),
+                ],
+                "answer": int(row.get("answer") or 1),
+                "explanation": (row.get("explanation") or "").strip(),
+                "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+            }
+            if q["question"]:
+                QUESTIONS.append(q)
+                count += 1
+        except Exception:
+            continue
+    if count:
+        _save_json("questions.json", QUESTIONS)
+    return redirect("/admin?tab=questions")
+
+# --- Users (simple list until real auth) ---
+@app.post("/admin/users/add")
+def admin_users_add():
+    if not is_admin():
+        return redirect("/admin")
+    form = request.form
+    u = {
+        "id": str(uuid.uuid4()),
+        "name": (form.get("name") or "").strip(),
+        "email": (form.get("email") or "").strip(),
+        "subscription": (form.get("subscription") or "free"),
+        "usage": {"quizzes": 0, "questions": 0, "last_active": ""},
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    USERS.append(u)
+    _save_json("users.json", USERS)
+    return redirect("/admin?tab=users")
+
+@app.post("/admin/users/subscription")
+def admin_users_subscription():
+    if not is_admin():
+        return redirect("/admin")
+    uid = request.form.get("id")
+    sub = request.form.get("subscription") or "free"
+    for u in USERS:
+        if u.get("id") == uid:
+            u["subscription"] = sub
+            break
+    _save_json("users.json", USERS)
+    return redirect("/admin?tab=users")
 
 
 
