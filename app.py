@@ -1224,7 +1224,7 @@ def settings_page():
     ]
     tz_options = "\n".join([f'<option value="{tz}">{tz}</option>' for tz in tz_list])
 
-    body = """
+    body = textwrap.dedent("""
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card border-0 shadow">
@@ -1239,7 +1239,7 @@ def settings_page():
             <div class="mb-3">
               <label for="prefTZ" class="form-label fw-semibold">Time zone</label>
               <select id="prefTZ" class="form-select">
-                """ + tz_options + """
+    """) + tz_options + textwrap.dedent("""
               </select>
               <div class="form-text">Used for showing dates/times in your Progress area.</div>
             </div>
@@ -1247,7 +1247,7 @@ def settings_page():
             <div class="mb-3">
               <label for="prefDomain" class="form-label fw-semibold">Default domain</label>
               <select id="prefDomain" class="form-select">
-                """ + domain_select + """
+    """) + domain_select + textwrap.dedent("""
               </select>
               <div class="form-text">Pre-selected domain for Tutor and Quizzes. “Random” includes all domains.</div>
             </div>
@@ -1323,7 +1323,7 @@ def settings_page():
         loadPrefs();
       })();
     </script>
-    """
+    """)
     return base_layout("Settings", body)
 
 # --- Error pages ---
@@ -1343,6 +1343,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
