@@ -948,7 +948,9 @@ def submit_quiz_api():
     questions = data.get("questions") or []
     answers = data.get("answers") or {}
     quiz_type = data.get("quiz_type") or "practice"
-    domain = data.get("domain") or "random"
+    # ✅ NEW: capture the domain coming from the quiz/mock page (defaults to 'random')
+    domain = (data.get("domain") or "random").strip() or "random"
+
     # score
     total = len(questions)
     correct = 0
@@ -970,19 +972,20 @@ def submit_quiz_api():
             "explanation": q.get("explanation", ""),
             "is_correct": bool(is_corr),
         })
+
     pct = (correct / total * 100) if total else 0.0
 
-    # record in session for Progress (include domain)
+    # ✅ NEW: store domain in history for per-domain progress
     hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
-        "domain": domain,
+        "domain": domain,              # <-- this is what Progress will read
         "date": datetime.utcnow().isoformat(),
         "score": pct,
         "total": total,
         "correct": correct,
     })
-    session["quiz_history"] = hist[-100:]  # keep last 100
+    session["quiz_history"] = hist[-50:]  # keep last 50
 
     insights = []
     if pct >= 90: insights.append("🎯 Excellent — mastery level performance.")
@@ -995,6 +998,8 @@ def submit_quiz_api():
         "score": round(pct, 1),
         "correct": correct,
         "total": total,
+        "domain": domain,              # helpful to echo back
+        "type": quiz_type,
         "performance_insights": insights,
         "detailed_results": detailed
     })
@@ -1089,6 +1094,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
