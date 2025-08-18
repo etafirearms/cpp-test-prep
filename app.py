@@ -164,8 +164,10 @@ def base_layout(title: str, body_html: str) -> str:
             +  '" stroke="#333" stroke-width="3"/>';
         // Text
         var color = (percent <= 40) ? "#dc3545" : (percent < 80 ? "#fd7e14" : "#198754");
-        svg += '<text x="' + cx + '" y="25" text-anchor="middle" font-size="16" fill="#444">Your Progress</text>';
-        svg += '<text x="' + cx + '" y="50" text-anchor="middle" font-size="22" font-weight="700" fill="' + color + '">' + percent.toFixed(1) + '%</text>';
+        var yLabel = h - 36; // label just above the bottom
+var yPct   = h - 14; // big number at the very bottom
+svg += '<text x="' + cx + '" y="' + yLabel + '" text-anchor="middle" font-size="14" fill="#666">Your Progress</text>';
+svg += '<text x="' + cx + '" y="' + yPct + '" text-anchor="middle" font-size="28" font-weight="800" fill="' + color + '">' + percent.toFixed(1) + '%</text>';
         svg += '</svg>';
         return svg;
       }
@@ -1040,3 +1042,4 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
