@@ -1228,7 +1228,7 @@ def settings_page():
     tz_options_html = "\n".join([f'<option value="{tz}">{tz}</option>' for tz in tz_list])
 
     # 3) HTML with placeholders we’ll replace (no f, no {variables} inside)
-    html = textwrap.dedent("""
+    html = textwrap.dedent
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card border-0 shadow">
@@ -1348,6 +1348,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
