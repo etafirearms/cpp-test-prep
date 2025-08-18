@@ -1394,8 +1394,10 @@ def admin_home():
 """ % (guard, tab_q, tab_f, tab_u)
 
     # Section: Questions
-    q_section = """
-  <div %s>
+    attr_q = '' if tab == 'questions' else 'style="display:none;"'
+q_section = (
+  '<div ' + attr_q + '>'
+  + """
     <div class="card border-0 shadow-sm mb-3">
       <div class="card-header bg-light"><strong>Add Question</strong></div>
       <div class="card-body">
@@ -1447,11 +1449,14 @@ def admin_home():
         <thead class="table-light">
           <tr><th>Domain</th><th>Question</th><th>Options</th><th>Answer</th><th></th></tr>
         </thead>
-        <tbody>""" + q_table + """</tbody>
+        <tbody>
+  """ + q_table + """
+        </tbody>
       </table>
     </div>
   </div>
-""" % ("" if tab=="questions" else 'style="display:none;"')
+  """
+)
 
     # Section: Flashcards
     f_section = """
@@ -1648,6 +1653,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
