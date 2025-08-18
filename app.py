@@ -1086,8 +1086,7 @@ def progress_page():
     # Build the page
     domains_json = json.dumps(DOMAINS)             # readable domain names for the table
 per_domain_json = json.dumps(domain_stats)     # numbers for each domain (built earlier in 4a)
-   body = f"""
-<div class="row"><div class="col-md-10 mx-auto">
+  <div class="row"><div class="col-md-10 mx-auto">
   <div class="card border-0 shadow">
     <div class="card-header bg-info text-white"><h4 class="mb-0">📊 Progress</h4></div>
     <div class="card-body">
@@ -1348,6 +1347,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
