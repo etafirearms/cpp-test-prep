@@ -4,6 +4,8 @@ from flask import Flask, request, jsonify, session, redirect, url_for
 from flask import Response
 from datetime import datetime
 import os, json, random, textwrap, requests
+import textwrap, html
+from flask import redirect, url_for
 
 app = Flask(__name__)
 
@@ -1182,135 +1184,58 @@ def reset_progress():
     session.pop("quiz_history", None)
     return redirect(url_for("progress_page"))
 
+# --- Settings ---
 @app.get("/settings")
 def settings_page():
-    # Build the option lists in Python and substitute them into the HTML safely.
-    # No f-strings here and no backticks in the HTML/JS, so Python won't try to format it.
+    name = session.get("name", "")
+    tz = session.get("timezone", "UTC")
 
-    # 1) Domain options (include Random first)
-    domain_opts = ['<option value="random">Random (all domains)</option>'] + [
-        f'<option value="{k}">{v}</option>' for k, v in DOMAINS.items()
-    ]
-    domain_options_html = "\n".join(domain_opts)
-
-    # 2) Timezone options (simple list for now)
-    tz_list = [
-        "UTC",
-        "America/New_York",
-        "America/Chicago",
-        "America/Denver",
-        "America/Los_Angeles",
-        "Europe/London",
-        "Europe/Paris",
-        "Asia/Dubai",
-        "Asia/Kolkata",
-        "Asia/Singapore",
-        "Australia/Sydney"
-    ]
-    tz_options_html = "\n".join([f'<option value="{tz}">{tz}</option>' for tz in tz_list])
-
-    # 3) HTML with placeholders we’ll replace (no f, no {variables} inside)
-    html = textwrap.dedent
+    body_tpl = textwrap.dedent("""
     <div class="row">
-      <div class="col-md-8 mx-auto">
+      <div class="col-md-10 mx-auto">
         <div class="card border-0 shadow">
-          <div class="card-header bg-dark text-white"><h4 class="mb-0">Settings</h4></div>
+          <div class="card-header bg-secondary text-white">
+            <h4 class="mb-0">Settings</h4>
+          </div>
           <div class="card-body">
-            <div class="mb-3">
-              <label for="prefName" class="form-label fw-semibold">Your name</label>
-              <input type="text" id="prefName" class="form-control" placeholder="e.g., Alex">
-              <div class="form-text">Shown on the Home page as “Welcome, [your name]”.</div>
-            
-            <div class="mb-3">
-              <label for="prefTZ" class="form-label fw-semibold">Time zone</label>
-              <select id="prefTZ" class="form-select">
-                [[TZ_OPTIONS]]
-              </select>
-              <div class="form-text">Used for showing dates/times in your Progress area.</div>
-            </div>
+            <form method="post" action="/settings">
+              <div class="mb-3">
+                <label class="form-label">Name</label>
+                <input class="form-control" type="text" name="name" value="[[NAME]]" placeholder="Your name">
+                <div class="form-text">Shown on the Home page as &ldquo;Welcome, [your name]&rdquo;.</div>
+              </div>
 
-            <div class="mb-3">
-              <label for="prefDomain" class="form-label fw-semibold">Default domain</label>
-              <select id="prefDomain" class="form-select">
-                [[DOMAIN_OPTIONS]]
-              </select>
-              <div class="form-text">Pre-selected domain for Tutor and Quizzes. “Random” includes all domains.</div>
-            </div>
+              <div class="mb-3">
+                <label class="form-label">Timezone</label>
+                <input class="form-control" type="text" name="timezone" value="[[TZ]]" placeholder="UTC, America/New_York, etc.">
+                <div class="form-text">Used for timestamps and study plans.</div>
+              </div>
 
-            <div class="form-check form-switch mb-4">
-              <input class="form-check-input" type="checkbox" id="prefTips">
-              <label class="form-check-label" for="prefTips">Show rotating study tips on Home</label>
-            </div>
-
-            <div class="d-flex gap-2">
-              <button id="saveBtn" class="btn btn-primary btn-enhanced">Save changes</button>
-              <button id="resetBtn" class="btn btn-outline-secondary btn-enhanced">Reset to defaults</button>
-            </div>
+              <div class="text-end">
+                <button class="btn btn-primary">Save</button>
+              </div>
+            </form>
           </div>
         </div>
       </div>
     </div>
-
-    <script>
-      (function() {
-        var nameEl = document.getElementById('prefName');
-        var tzEl = document.getElementById('prefTZ');
-        var domEl = document.getElementById('prefDomain');
-        var tipsEl = document.getElementById('prefTips');
-        var saveBtn = document.getElementById('saveBtn');
-        var resetBtn = document.getElementById('resetBtn');
-
-        function loadPrefs() {
-          try {
-            var name = localStorage.getItem('pref.name') || '';
-            var tz = localStorage.getItem('pref.tz') || 'UTC';
-            var dom = localStorage.getItem('pref.default_domain') || 'random';
-            var tips = localStorage.getItem('pref.tips_on');
-            if (tips === null || tips === undefined) { tips = '1'; } // default ON
-
-            nameEl.value = name;
-            tzEl.value = tz;
-            domEl.value = dom;
-            tipsEl.checked = (tips === '1');
-          } catch (e) {
-            console.warn('Could not load settings:', e);
-          }
-        }
-
-        function savePrefs() {
-          try {
-            localStorage.setItem('pref.name', (nameEl.value || '').trim());
-            localStorage.setItem('pref.tz', tzEl.value);
-            localStorage.setItem('pref.default_domain', domEl.value);
-            localStorage.setItem('pref.tips_on', tipsEl.checked ? '1' : '0');
-            alert('Saved! Your preferences will be used across pages on this browser.');
-          } catch (e) {
-            alert('Could not save settings in this browser.');
-          }
-        }
-
-        function resetPrefs() {
-          if (!confirm('Reset settings to defaults?')) return;
-          localStorage.removeItem('pref.name');
-          localStorage.setItem('pref.tz', 'UTC');
-          localStorage.setItem('pref.default_domain', 'random');
-          localStorage.setItem('pref.tips_on', '1');
-          loadPrefs();
-          alert('Reset to defaults.');
-        }
-
-        saveBtn.addEventListener('click', savePrefs);
-        resetBtn.addEventListener('click', resetPrefs);
-        loadPrefs();
-      })();
-    </script>
     """)
 
-    # 4) Substitute the placeholders with the generated HTML
-    body = html.replace('[[TZ_OPTIONS]]', tz_options_html)\
-               .replace('[[DOMAIN_OPTIONS]]', domain_options_html)
-
+    body = (
+        body_tpl
+        .replace("[[NAME]]", html.escape(name or ""))
+        .replace("[[TZ]]", html.escape(tz or ""))
+    )
     return base_layout("Settings", body)
+
+
+@app.post("/settings")
+def settings_save():
+    name = (request.form.get("name") or "").strip()
+    tz = (request.form.get("timezone") or "").strip() or "UTC"
+    session["name"] = name
+    session["timezone"] = tz
+    return redirect(url_for("home"))
 
 # --- Error pages ---
 @app.errorhandler(404)
@@ -1329,6 +1254,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
