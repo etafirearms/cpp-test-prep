@@ -6,6 +6,34 @@ from datetime import datetime
 import os, json, random, textwrap, requests
 import textwrap, html
 from flask import redirect, url_for
+import os, json, csv, uuid
+from datetime import datetime
+
+# --- Simple data storage (file-backed JSON) ---
+DATA_DIR = os.environ.get("DATA_DIR", "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+def _load_json(name, default):
+    path = os.path.join(DATA_DIR, name)
+    if not os.path.exists(path):
+        return default
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return default
+
+def _save_json(name, data):
+    path = os.path.join(DATA_DIR, name)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, path)
+
+# In-memory banks (loaded at boot). Replace later with DB.
+QUESTIONS = _load_json("questions.json", [])
+FLASHCARDS = _load_json("flashcards.json", [])
+USERS = _load_json("users.json", [])  # [{id, name, email, subscription, usage:{quizzes, questions, last_active}}]
 
 app = Flask(__name__)
 
@@ -88,6 +116,10 @@ DOMAINS = {
 DOMAIN_KEYS = list(DOMAINS.keys())
 
 # --- Helpers ---
+def is_admin():
+    # Dev-only toggle. Visit /admin?admin=1 to enable for your browser session.
+    return session.get("is_admin") is True
+
 def base_layout(title: str, body_html: str) -> str:
     nav = textwrap.dedent(f"""
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -1254,6 +1286,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
