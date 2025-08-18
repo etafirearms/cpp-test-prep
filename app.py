@@ -273,81 +273,110 @@ def diag_openai():
 # --- Home ---
 @app.get("/")
 def home():
-    profile = session.get("profile", {})
-welcome_name = profile.get("name")
-    # OPTIONAL: allow setting name via query once (demo until DB)
-    qname = request.args.get("name")
-    if qname:
-        session["user_name"] = qname
-    name = session.get("user_name")
+    # Optional: greet by name until real accounts are wired in
+    qname = (request.args.get("name") or "").strip()
+    student_name_html = f"<span class='text-primary fw-semibold'>{qname}</span>" if qname else "there"
 
-    # Compute simple average from session history for the gauge
+    # Overall average from session history
     hist = session.get("quiz_history", [])
-    avg = round(sum(h.get("score", 0.0) for h in hist)/len(hist), 1) if hist else 0.0
+    avg = round(sum(h.get("score", 0.0) for h in hist) / len(hist), 1) if hist else 0.0
 
-    # Header text (escape < > in the name)
-    display_name = (name or "")
-    display_name = display_name.replace("<", "&lt;").replace(">", "&gt;")
-    if display_name:
-        header_html = f'<h1 class="mb-1">Welcome, {display_name} 👋</h1><div class="text-muted">CPP Test Prep</div>'
-    else:
-        header_html = '<h1 class="mb-2">CPP Test Prep</h1>'
-
-    # Encouragement messages (HTML-safe, we control content)
-    messages = [
-        "<strong>Study tip:</strong> Use 15-minute bursts. Set a timer, focus, then take a short break.",
-        "<strong>Make mistakes matter:</strong> Review every wrong answer and jot the why in one sentence.",
-        "<strong>Mix it up:</strong> Rotate domains—small chunks improve recall and reduce burnout.",
-        "<strong>Mini-plan:</strong> Pick 1 domain, 2 flashcards, and 3 quiz questions. Done in ~15 minutes!",
-        "<strong>Positive cue:</strong> Tell yourself: “I improve a little every session.”",
-        "<strong>Teach it:</strong> Explain one concept out loud or to a friend—it locks in learning.",
+    # A rotating encouragement/tip (server-side pick so it changes on refresh)
+    tips = [
+        "Small wins add up — try a focused 15-minute session.",
+        "Active recall beats rereading — test yourself often.",
+        "Mix topics. Switching domains improves long-term memory.",
+        "Practice under time pressure to build exam stamina.",
+        "Teach a concept aloud — if you can explain it, you know it.",
+        "Schedule study like a meeting. Protect that time.",
+        "Review mistakes first — that’s where growth lives.",
     ]
-    messages_json = json.dumps(messages)
+    tip = random.choice(tips)
 
     body = """
     <div class="row justify-content-center">
-      <div class="col-md-10">
-        <div class="card border-0 shadow mb-4">
-          <div class="card-body d-flex flex-column flex-md-row align-items-center gap-3">
-            <div class="flex-grow-1">
-              """ + header_html + """
-              <div id="tip" class="mt-2 p-2 rounded" style="background:#f8f9fa; border:1px solid #eee;"></div>
-              <div class="d-flex gap-2 flex-wrap mt-3">
-              <div class="mb-2" style="font-weight:600;">
-  """ + (f"Welcome, {welcome_name}!" if welcome_name else "Welcome!") + """
-</div>
-                <a class="btn btn-primary btn-lg btn-enhanced" href="/study">Open Tutor</a>
-                <a class="btn btn-secondary btn-lg btn-enhanced" href="/flashcards">Flashcards</a>
-                <a class="btn btn-success btn-lg btn-enhanced" href="/quiz">Practice Quiz</a>
-                <a class="btn btn-warning btn-lg btn-enhanced" href="/mock-exam">Mock Exam</a>
-              </div>
-            </div>
+      <div class="col-lg-10">
+        <div class="text-center mb-3">
+          <h1 class="mb-1">CPP Test Prep</h1>
+          <div class="text-muted">Welcome, """ + student_name_html + """</div>
+        </div>
+
+        <!-- Encouraging message -->
+        <div class="alert alert-info border-0 shadow-sm text-center mb-4">
+          <div class="fw-semibold">Today’s tip</div>
+          <div>""" + tip.replace("<", "&lt;") + """</div>
+        </div>
+
+        <!-- Speedometer -->
+        <div class="card border-0 shadow-sm mb-4">
+          <div class="card-body">
             <div class="text-center">
-              <div id="homeGauge"></div>
-              <div class="small text-muted mt-2">Average of your recent quizzes</div>
+              <div id="gaugeWrap"></div>
+              <div class="mt-2">
+                <div id="gaugeLabel" class="fw-bold" style="font-size:1.6rem;"></div>
+                <div class="text-muted small">Average of your recent quizzes</div>
+              </div>
             </div>
           </div>
         </div>
+
+        <!-- Quick actions -->
+        <div class="d-flex flex-wrap gap-2 justify-content-center">
+          <a class="btn btn-primary btn-lg" href="/study">Open Tutor</a>
+          <a class="btn btn-secondary btn-lg" href="/flashcards">Flashcards</a>
+          <a class="btn btn-success btn-lg" href="/quiz">Practice Quiz</a>
+          <a class="btn btn-warning btn-lg" href="/mock-exam">Mock Exam</a>
+          <a class="btn btn-outline-info btn-lg" href="/progress">View Progress</a>
+        </div>
       </div>
     </div>
-    <script>
-      var HOME_AVG = """ + str(avg) + """;
-      var MSGS = """ + messages_json + """;
-      function showMsg() {
-        var el = document.getElementById('tip');
-        if (!el || !MSGS.length) return;
-        // rotate messages in order
-        var idx = parseInt(el.getAttribute('data-idx') || '0', 10);
-        el.innerHTML = MSGS[idx];
-        idx = (idx + 1) % MSGS.length;
-        el.setAttribute('data-idx', String(idx));
-      }
-      showMsg();
-      // change message every 8 seconds
-      setInterval(showMsg, 8000);
 
-      // draw gauge
-      mountGauge('homeGauge', HOME_AVG);
+    <script>
+      (function () {
+        const avg = """ + str(avg) + """;
+        const g = document.getElementById('gaugeWrap');
+        const w = 320, h = 190, cx = w/2, cy = h-10, r = 150;
+
+        function deg(a) { return a * Math.PI / 180; }
+        function polar(cx, cy, r, ang) { return {x: cx + r*Math.cos(ang), y: cy + r*Math.sin(ang)}; }
+        function arc(cx, cy, r, a0, a1) {
+          const p0 = polar(cx, cy, r, a0), p1 = polar(cx, cy, r, a1);
+          const large = (a1 - a0) > Math.PI ? 1 : 0, sweep = 1;
+          return "M " + p0.x.toFixed(1) + " " + p0.y.toFixed(1)
+               + " A " + r + " " + r + " 0 " + large + " " + sweep + " "
+               + p1.x.toFixed(1) + " " + p1.y.toFixed(1);
+        }
+
+        let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
+
+        // Gauge bands: 0-40 red, 41-79 orange, 80-100 green
+        const bands = [
+          {from:180, to:252, color:'#dc3545'},
+          {from:252, to:338.4, color:'#fd7e14'},
+          {from:338.4, to:360, color:'#198754'}
+        ];
+        bands.forEach(b => {
+          svg += '<path d="' + arc(cx,cy,r,deg(b.from),deg(b.to)) + '" fill="none" stroke="' + b.color + '" stroke-width="18" stroke-linecap="round"/>';
+        });
+
+        // tick marks + labels
+        [0,20,80,100].forEach(p => {
+          const a = deg(180 + p*1.8), p0 = polar(cx,cy,r-12,a), p1 = polar(cx,cy,r-2,a);
+          svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1) + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1) + '" stroke="#b0b0b0" stroke-width="3"/>';
+          const pt = polar(cx,cy,r-28,a);
+          svg += '<text x="' + pt.x.toFixed(1) + '" y="' + pt.y.toFixed(1) + '" font-size="10" text-anchor="middle" fill="#6c757d">' + p + '%</text>';
+        });
+
+        // needle
+        const ang = deg(180 + Math.max(0, Math.min(100, avg)) * 1.8);
+        const tip = polar(cx,cy,r-24, ang);
+        svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + tip.x.toFixed(1) + '" y2="' + tip.y.toFixed(1) + '" stroke="#333" stroke-width="3"/>';
+        svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
+        svg += '</svg>';
+
+        g.innerHTML = svg;
+        document.getElementById('gaugeLabel').textContent = avg.toFixed(1) + '%';
+      })();
     </script>
     """
     return base_layout("Home", body)
@@ -1188,6 +1217,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
