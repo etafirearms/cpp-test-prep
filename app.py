@@ -1202,13 +1202,16 @@ def reset_progress():
 
 @app.get("/settings")
 def settings_page():
-    # Build domain options including "random" first
+    # Build the option lists in Python and substitute them into the HTML safely.
+    # No f-strings here and no backticks in the HTML/JS, so Python won't try to format it.
+
+    # 1) Domain options (include Random first)
     domain_opts = ['<option value="random">Random (all domains)</option>'] + [
         f'<option value="{k}">{v}</option>' for k, v in DOMAINS.items()
     ]
-    domain_select = "\n".join(domain_opts)
+    domain_options_html = "\n".join(domain_opts)
 
-    # Simple timezone list
+    # 2) Timezone options (simple list for now)
     tz_list = [
         "UTC",
         "America/New_York",
@@ -1222,9 +1225,10 @@ def settings_page():
         "Asia/Singapore",
         "Australia/Sydney"
     ]
-    tz_options = "\n".join([f'<option value="{tz}">{tz}</option>' for tz in tz_list])
+    tz_options_html = "\n".join([f'<option value="{tz}">{tz}</option>' for tz in tz_list])
 
-    body = textwrap.dedent("""
+    # 3) HTML with placeholders we’ll replace (no f, no {variables} inside)
+    html = textwrap.dedent("""
     <div class="row">
       <div class="col-md-8 mx-auto">
         <div class="card border-0 shadow">
@@ -1233,13 +1237,13 @@ def settings_page():
             <div class="mb-3">
               <label for="prefName" class="form-label fw-semibold">Your name</label>
               <input type="text" id="prefName" class="form-control" placeholder="e.g., Alex">
-              <div class="form-text">Shown on the Home page as “Welcome, {name}”.</div>
+              <div class="form-text">Shown on the Home page as “Welcome, [your name]”.</div>
             </div>
 
             <div class="mb-3">
               <label for="prefTZ" class="form-label fw-semibold">Time zone</label>
               <select id="prefTZ" class="form-select">
-    """) + tz_options + textwrap.dedent("""
+                [[TZ_OPTIONS]]
               </select>
               <div class="form-text">Used for showing dates/times in your Progress area.</div>
             </div>
@@ -1247,7 +1251,7 @@ def settings_page():
             <div class="mb-3">
               <label for="prefDomain" class="form-label fw-semibold">Default domain</label>
               <select id="prefDomain" class="form-select">
-    """) + domain_select + textwrap.dedent("""
+                [[DOMAIN_OPTIONS]]
               </select>
               <div class="form-text">Pre-selected domain for Tutor and Quizzes. “Random” includes all domains.</div>
             </div>
@@ -1268,7 +1272,6 @@ def settings_page():
 
     <script>
       (function() {
-        // Elements
         var nameEl = document.getElementById('prefName');
         var tzEl = document.getElementById('prefTZ');
         var domEl = document.getElementById('prefDomain');
@@ -1276,7 +1279,6 @@ def settings_page():
         var saveBtn = document.getElementById('saveBtn');
         var resetBtn = document.getElementById('resetBtn');
 
-        // Load from localStorage with defaults
         function loadPrefs() {
           try {
             var name = localStorage.getItem('pref.name') || '';
@@ -1294,7 +1296,6 @@ def settings_page():
           }
         }
 
-        // Save to localStorage
         function savePrefs() {
           try {
             localStorage.setItem('pref.name', (nameEl.value || '').trim());
@@ -1307,7 +1308,6 @@ def settings_page():
           }
         }
 
-        // Reset
         function resetPrefs() {
           if (!confirm('Reset settings to defaults?')) return;
           localStorage.removeItem('pref.name');
@@ -1324,6 +1324,11 @@ def settings_page():
       })();
     </script>
     """)
+
+    # 4) Substitute the placeholders with the generated HTML
+    body = html.replace('[[TZ_OPTIONS]]', tz_options_html)\
+               .replace('[[DOMAIN_OPTIONS]]', domain_options_html)
+
     return base_layout("Settings", body)
 
 # --- Error pages ---
@@ -1343,6 +1348,7 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+
 
 
 
