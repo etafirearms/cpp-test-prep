@@ -1332,6 +1332,32 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
+from flask import render_template  # ensure this import exists at top
+
+@app.post("/admin/login")
+def admin_login():
+    if not ADMIN_PASSWORD:
+        return render_template("admin_login.html", error="nopass"), 200
+    pwd = (request.form.get("password") or "").strip()
+    nxt = request.form.get("next") or url_for("admin_home")
+    if pwd == ADMIN_PASSWORD:
+        session["admin_ok"] = True
+        return redirect(nxt)
+    return redirect(url_for("admin_login_page", error="badpass"))
+
+@app.get("/admin/login")
+def admin_login_page():
+    # Show form; if already admin, go to /admin
+    if is_admin():
+        return redirect(url_for("admin_home"))
+    error = request.args.get("error")
+    return render_template("admin_login.html", error=error)
+
+@app.post("/admin/logout")
+def admin_logout():
+    session.pop("admin_ok", None)
+    session.pop("is_admin", None)
+    return redirect(url_for("admin_login_page"))
 
 @app.get("/admin")
 def admin_home():
@@ -1761,6 +1787,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
