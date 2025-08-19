@@ -20,3 +20,9 @@ services:
         value: "1"
       - key: WEB_CONCURRENCY
         value: "3"
+  - type: web
+    buildCommand: |
+      pip install -r requirements.txt
+      sed -i 's/\t/    /g' app.py
+    startCommand: gunicorn app:app
+
