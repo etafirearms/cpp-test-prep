@@ -1269,11 +1269,13 @@ tz = session.get("timezone", "UTC")
 
 @app.post("/settings")
 def settings_save():
-    name = (request.form.get("name") or "").strip()
-    tz = (request.form.get("timezone") or "").strip() or "UTC"
-    session["name"] = name
-    session["timezone"] = tz
-    return redirect(url_for("home"))
+   name = (request.form.get("name") or "").strip()
+email = (request.form.get("email") or "").strip().lower()
+tz = (request.form.get("timezone") or "").strip() or "UTC"
+session["name"] = name
+session["email"] = email
+session["timezone"] = tz
+return redirect(url_for("home"))
 
 # --- Error pages ---
 @app.errorhandler(404)
@@ -1721,6 +1723,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
