@@ -244,9 +244,10 @@ def base_layout(title: str, body_html: str) -> str:
         var w = 260, h = 160, cx = w/2, cy = 130, r = 100;
         var minA = -100, maxA = 100; // sweep 200 deg
         var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-        // Bands: Red 0–40, Orange 41–79, Green 80–100
-        // map percent to angle
+        /* Bands: Red 0-40, Orange 41-79, Green 80-100 */
+        /* map percent to angle */
         function map(p) { return minA + (maxA - minA) * (p/100); }
+
         function band(p0, p1, color) {
           svg += '<path d="' + arcPath(cx,cy,r,map(p0),map(p1)) + '" fill="none" stroke="' + color + '" stroke-width="18" stroke-linecap="round"/>';
         }
@@ -1837,6 +1838,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
