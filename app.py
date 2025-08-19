@@ -319,6 +319,7 @@ svg += '<text x="' + cx + '" y="' + yPct + '" text-anchor="middle" font-size="28
       {shared_js}
     </head><body>
       {nav}
+      {stage_banner}
       <div class="container mt-4">
         {body_html}
       </div>
@@ -1843,6 +1844,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
