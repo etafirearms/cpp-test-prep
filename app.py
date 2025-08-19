@@ -641,11 +641,9 @@ def flashcards_mark():
         by_dom["dont"] += 1
     by_dom["viewed"] += 1
     stats[domain] = by_dom
-     session["flashcard_stats"] = stats
-
+    session["flashcard_stats"] = stats
     # NEW: count one flashcard interaction
     _bump_usage({"flashcards": 1})
-
     return jsonify({"ok": True, "stats": by_dom})
 
 # --- Flashcards --- (ONLY here we show clickable left/right arrows)
@@ -1750,6 +1748,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
