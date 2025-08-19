@@ -619,15 +619,13 @@ def api_chat():
     dom = data.get("domain")
     if not user_msg:
         return jsonify({"error": "Empty message"}), 400
+
     prefix = ""
     if dom and dom in DOMAINS:
         prefix = f"Focus on the domain: {DOMAINS[dom]}.\n"
+
     reply = chat_with_ai([prefix + user_msg])
-
-# NEW: count one tutor message for this user
-_bump_usage({"tutor_msgs": 1})
-
-return jsonify({"response": reply, "timestamp": datetime.utcnow().isoformat()})
+    return jsonify({"response": reply, "timestamp": datetime.utcnow().isoformat()})
 
 @app.post("/api/flashcards/mark")
 def flashcards_mark():
@@ -1747,6 +1745,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
