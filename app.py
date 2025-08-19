@@ -1218,7 +1218,8 @@ def reset_progress():
 @app.get("/settings")
 def settings_page():
     name = session.get("name", "")
-    tz = session.get("timezone", "UTC")
+email = session.get("email", "")
+tz = session.get("timezone", "UTC")
 
     body_tpl = textwrap.dedent("""
     <div class="row">
@@ -1229,6 +1230,11 @@ def settings_page():
           </div>
           <div class="card-body">
             <form method="post" action="/settings">
+                          <div class="mb-3">
+                <label class="form-label">Email</label>
+                <input class="form-control" type="email" name="email" value="[[EMAIL]]" placeholder="you@example.com">
+                <div class="form-text">Used to associate your usage with your account.</div>
+              </div>
               <div class="mb-3">
                 <label class="form-label">Name</label>
                 <input class="form-control" type="text" name="name" value="[[NAME]]" placeholder="Your name">
@@ -1252,9 +1258,11 @@ def settings_page():
     """)
 
     body = (
-        body_tpl
-        .replace("[[NAME]]", html.escape(name or ""))
-        .replace("[[TZ]]", html.escape(tz or ""))
+    body_tpl
+    .replace("[[NAME]]", html.escape(name or ""))
+    .replace("[[EMAIL]]", html.escape(email or ""))
+    .replace("[[TZ]]", html.escape(tz or ""))
+)
     )
     return base_layout("Settings", body)
 
@@ -1713,6 +1721,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
