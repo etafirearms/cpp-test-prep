@@ -1377,19 +1377,16 @@ def admin_home():
     else:
         guard = ""
 
-    body = """
+    body = f"""
 <div class="row"><div class="col-md-11 mx-auto">
-  <div class="d-flex align-items-center mb-3">
-    <h3 class="mb-0">Admin</h3>
-    <span class="ms-3 badge bg-secondary">dev mode</span>
-  </div>
-  %s
+  ...
+  {guard}
   <ul class="nav nav-tabs mb-3">
-    <li class="nav-item"><a class="nav-link %s" href="/admin?tab=questions">Questions</a></li>
-    <li class="nav-item"><a class="nav-link %s" href="/admin?tab=flashcards">Flashcards</a></li>
-    <li class="nav-item"><a class="nav-link %s" href="/admin?tab=users">Users</a></li>
+    <li class="nav-item"><a class="nav-link {tab_q}" href="/admin?tab=questions">Questions</a></li>
+    <li class="nav-item"><a class="nav-link {tab_f}" href="/admin?tab=flashcards">Flashcards</a></li>
+    <li class="nav-item"><a class="nav-link {tab_u}" href="/admin?tab=users">Users</a></li>
   </ul>
-""" % (guard, tab_q, tab_f, tab_u)
+"""
 
     # Section: Questions
     attr_q = '' if tab == 'questions' else 'style="display:none;"'
@@ -1716,6 +1713,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
