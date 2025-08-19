@@ -41,6 +41,15 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
+# Security & runtime toggles
+DEBUG = os.environ.get("FLASK_DEBUG", "0") == "1"
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=(os.environ.get("SESSION_COOKIE_SECURE", "1") == "1"),
+)
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "").strip()
+
 # --- Simple in-memory base questions (domain, difficulty tags kept lightweight) ---
 BASE_QUESTIONS = [
     {
@@ -1750,6 +1759,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
