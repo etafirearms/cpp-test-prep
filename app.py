@@ -1242,6 +1242,7 @@ def progress_page():
     </script>
     """)
     body = body_tpl.replace("[[ROWS]]", rows).replace("[[AVG]]", str(overall))
+    return base_layout("Progress", body)
 
 @app.get("/settings")
 def settings_page():
@@ -1749,6 +1750,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
