@@ -149,8 +149,10 @@ def _bump_usage(delta: dict):
 
 # --- Helpers ---
 def is_admin():
-    # Dev-only toggle. Visit /admin?admin=1 to enable for your browser session.
-    return session.get("is_admin") is True
+    # Dev toggle still works via ?admin=1, plus password login support
+    if session.get("is_admin") is True:
+        return True
+    return session.get("admin_ok") is True
 
 def base_layout(title: str, body_html: str) -> str:
     nav = textwrap.dedent(f"""
@@ -1759,6 +1761,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
