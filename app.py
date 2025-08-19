@@ -112,6 +112,31 @@ DOMAINS = {
     "crisis-management": "Crisis Management",
 }
 DOMAIN_KEYS = list(DOMAINS.keys())
+def _bump_usage(delta: dict):
+    """
+    Increment usage counters for the current session user (matched by email).
+    delta keys can include: quizzes, questions, tutor_msgs, flashcards.
+    """
+    email = (session.get("email") or "").strip().lower()
+    if not email:
+        return
+    changed = False
+    for u in USERS:
+        if (u.get("email","").strip().lower() == email):
+            usage = u.setdefault("usage", {
+                "quizzes": 0, "questions": 0, "tutor_msgs": 0, "flashcards": 0, "last_active": ""
+            })
+            for k in ("quizzes","questions","tutor_msgs","flashcards"):
+                if k in delta:
+                    try:
+                        usage[k] = int(usage.get(k,0)) + int(delta[k])
+                    except Exception:
+                        pass
+            usage["last_active"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            changed = True
+            break
+    if changed:
+        _save_json("users.json", USERS)
 
 # --- Helpers ---
 def is_admin():
@@ -1723,6 +1748,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
