@@ -1073,10 +1073,13 @@ def submit_quiz_api():
             "is_correct": bool(is_corr),
         })
 
-    pct = (correct / total * 100) if total else 0.0
+   pct = (correct / total * 100) if total else 0.0
 
-    # ✅ NEW: store domain in history for per-domain progress
-    hist = session.get("quiz_history", [])
+# NEW: usage — one quiz completed, and N questions answered
+_bump_usage({"quizzes": 1, "questions": total})
+
+# ✅ NEW: store domain in history for per-domain progress
+hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
         "domain": domain,              # <-- this is what Progress will read
@@ -1756,6 +1759,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
