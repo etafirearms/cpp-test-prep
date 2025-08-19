@@ -1459,6 +1459,11 @@ def admin_home():
 <div class="row"><div class="col-md-11 mx-auto">
   ...
   {guard}
+    <div class="d-flex justify-content-end mb-2">
+    <form method="post" action="/admin/logout" class="ms-auto">
+      <button class="btn btn-sm btn-outline-secondary">Log out</button>
+    </form>
+  </div>
   <ul class="nav nav-tabs mb-3">
     <li class="nav-item"><a class="nav-link {tab_q}" href="/admin?tab=questions">Questions</a></li>
     <li class="nav-item"><a class="nav-link {tab_f}" href="/admin?tab=flashcards">Flashcards</a></li>
@@ -1791,6 +1796,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
