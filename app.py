@@ -1587,39 +1587,104 @@ def admin_questions_delete():
             _save_json("questions.json", QUESTIONS)
     return redirect("/admin?tab=questions")
 
-@app.post("/admin/questions/import")
-def admin_questions_import():
+# --- Flashcards CRUD + exports ---
+
+@app.post("/admin/flashcards/add")
+def admin_flashcards_add():
+    if not is_admin():
+        return redirect("/admin")
+    form = request.form
+    fc = {
+        "id": str(uuid.uuid4()),
+        "domain": (form.get("domain") or "random").strip(),
+        "front": (form.get("front") or "").strip(),
+        "back": (form.get("back") or "").strip(),
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+    }
+    if fc["front"] and fc["back"]:
+        FLASHCARDS.append(fc)
+        _save_json("flashcards.json", FLASHCARDS)
+    return redirect("/admin?tab=flashcards")
+
+@app.post("/admin/flashcards/delete")
+def admin_flashcards_delete():
+    if not is_admin():
+        return redirect("/admin")
+    fid = request.form.get("id")
+    if fid:
+        idx = next((i for i, x in enumerate(FLASHCARDS) if x.get("id") == fid), -1)
+        if idx >= 0:
+            FLASHCARDS.pop(idx)
+            _save_json("flashcards.json", FLASHCARDS)
+    return redirect("/admin?tab=flashcards")
+
+@app.post("/admin/flashcards/import")
+def admin_flashcards_import():
     if not is_admin():
         return redirect("/admin")
     f = request.files.get("csv")
     if not f:
-        return redirect("/admin?tab=questions")
+        return redirect("/admin?tab=flashcards")
     reader = csv.DictReader(f.stream.read().decode("utf-8").splitlines())
     count = 0
     for row in reader:
-        try:
-            q = {
-                "id": str(uuid.uuid4()),
-                "domain": (row.get("domain") or "random").strip(),
-                "question": (row.get("question") or "").strip(),
-                "options": [
-                    (row.get("opt1") or "").strip(),
-                    (row.get("opt2") or "").strip(),
-                    (row.get("opt3") or "").strip(),
-                    (row.get("opt4") or "").strip(),
-                ],
-                "answer": int(row.get("answer") or 1),
-                "explanation": (row.get("explanation") or "").strip(),
-                "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-            }
-            if q["question"]:
-                QUESTIONS.append(q)
-                count += 1
-        except Exception:
-            continue
+        fc = {
+            "id": str(uuid.uuid4()),
+            "domain": (row.get("domain") or "random").strip(),
+            "front": (row.get("front") or "").strip(),
+            "back": (row.get("back") or "").strip(),
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        if fc["front"] and fc["back"]:
+            FLASHCARDS.append(fc)
+            count += 1
     if count:
-        _save_json("questions.json", QUESTIONS)
-    return redirect("/admin?tab=questions")
+        _save_json("flashcards.json", FLASHCARDS)
+    return redirect("/admin?tab=flashcards")
+
+# --- Exports + CSV templates ---
+
+@app.get("/admin/export/questions")
+def admin_export_questions():
+    if not is_admin():
+        return redirect("/admin")
+    return Response(
+        json.dumps(QUESTIONS, ensure_ascii=False, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=questions.json"}
+    )
+
+@app.get("/admin/export/flashcards")
+def admin_export_flashcards():
+    if not is_admin():
+        return redirect("/admin")
+    return Response(
+        json.dumps(FLASHCARDS, ensure_ascii=False, indent=2),
+        mimetype="application/json",
+        headers={"Content-Disposition": "attachment; filename=flashcards.json"}
+    )
+
+@app.get("/admin/example/questions.csv")
+def admin_example_questions_csv():
+    if not is_admin():
+        return redirect("/admin")
+    csv_text = "domain,question,opt1,opt2,opt3,opt4,answer,explanation\n" \
+               "security-principles,What is defense in depth?,Layered controls,Single control,No controls,Budget only,1,Multiple layers reduce single-point failures\n"
+    return Response(
+        csv_text, mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=questions_template.csv"}
+    )
+
+@app.get("/admin/example/flashcards.csv")
+def admin_example_flashcards_csv():
+    if not is_admin():
+        return redirect("/admin")
+    csv_text = "domain,front,back\n" \
+               "information-security,Define least privilege,Limit access to only what is required\n"
+    return Response(
+        csv_text, mimetype="text/csv",
+        headers={"Content-Disposition": "attachment; filename=flashcards_template.csv"}
+    )
 
 # --- Users (simple list until real auth) ---
 @app.post("/admin/users/add")
@@ -1651,6 +1716,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
