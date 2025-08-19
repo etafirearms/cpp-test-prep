@@ -208,6 +208,26 @@ def base_layout(title: str, body_html: str) -> str:
       </div>
     </div>
     """
+        disclaimer = """
+    <div class="bg-light border-top mt-4 py-3">
+      <div class="container small text-muted">
+        <strong>Notice:</strong> This platform is independent and not affiliated with ASIS International. CPP® is a mark of ASIS International, Inc.
+      </div>
+    </div>
+    """
+
+    # Optional staging banner
+    stage_banner = ("""
+    <div class="bg-warning border-bottom py-1">
+      <div class="container small text-dark fw-semibold">
+        STAGING — Not for production use.
+      </div>
+    </div>
+    """ if IS_STAGING else "")
+
+    # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
+    shared_js = """
+    
     # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
     shared_js = """
     <script>
@@ -1823,6 +1843,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
