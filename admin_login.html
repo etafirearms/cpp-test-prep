@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="card border-0 shadow-sm mb-3">
+  <div class="card-header bg-light"><strong>Admin Login</strong></div>
+  <div class="card-body">
+    {% if error == "badpass" %}
+      <div class="alert alert-danger mb-2">Incorrect password.</div>
+    {% elif error == "nopass" %}
+      <div class="alert alert-warning mb-2">ADMIN_PASSWORD is not set on the server; dev-only guard is available via <code>?admin=1</code>.</div>
+    {% endif %}
+    <form method="post" action="{{ url_for('admin_login') }}" class="row g-2">
+      <div class="col-md-6">
+        <input class="form-control" type="password" name="password" placeholder="Enter admin password" required/>
+      </div>
+      <div class="col-md-6">
+        <button class="btn btn-primary">Log in</button>
+      </div>
+      {% if request.args.get('next') %}
+        <input type="hidden" name="next" value="{{ request.args.get('next') }}">
+      {% endif %}
+    </form>
+    <div class="text-muted small mt-2">Set the ADMIN_PASSWORD env var in Render → Environment.</div>
+  </div>
+</div>
+{% endblock %}
