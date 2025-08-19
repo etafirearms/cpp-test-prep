@@ -1048,7 +1048,7 @@ def submit_quiz_api():
     questions = data.get("questions") or []
     answers = data.get("answers") or {}
     quiz_type = data.get("quiz_type") or "practice"
-    # ✅ NEW: capture the domain coming from the quiz/mock page (defaults to 'random')
+    # capture the domain coming from the quiz/mock page (defaults to 'random')
     domain = (data.get("domain") or "random").strip() or "random"
 
     # score
@@ -1073,16 +1073,16 @@ def submit_quiz_api():
             "is_correct": bool(is_corr),
         })
 
-   pct = (correct / total * 100) if total else 0.0
+    pct = (correct / total * 100.0) if total else 0.0
 
-# NEW: usage — one quiz completed, and N questions answered
-_bump_usage({"quizzes": 1, "questions": total})
+    # usage — one quiz completed, and N questions answered
+    _bump_usage({"quizzes": 1, "questions": total})
 
-# ✅ NEW: store domain in history for per-domain progress
-hist = session.get("quiz_history", [])
+    # store domain in history for per-domain progress
+    hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
-        "domain": domain,              # <-- this is what Progress will read
+        "domain": domain,
         "date": datetime.utcnow().isoformat(),
         "score": pct,
         "total": total,
@@ -1091,17 +1091,21 @@ hist = session.get("quiz_history", [])
     session["quiz_history"] = hist[-50:]  # keep last 50
 
     insights = []
-    if pct >= 90: insights.append("🎯 Excellent — mastery level performance.")
-    elif pct >= 80: insights.append("✅ Strong — a few areas to review.")
-    elif pct >= 70: insights.append("📚 Fair — focus on weak concepts.")
-    else: insights.append("⚠️ Needs improvement — study before a real exam.")
+    if pct >= 90:
+        insights.append("🎯 Excellent — mastery level performance.")
+    elif pct >= 80:
+        insights.append("✅ Strong — a few areas to review.")
+    elif pct >= 70:
+        insights.append("📚 Fair — focus on weak concepts.")
+    else:
+        insights.append("⚠️ Needs improvement — study before a real exam.")
 
     return jsonify({
         "success": True,
         "score": round(pct, 1),
         "correct": correct,
         "total": total,
-        "domain": domain,              # helpful to echo back
+        "domain": domain,
         "type": quiz_type,
         "performance_insights": insights,
         "detailed_results": detailed
@@ -1759,6 +1763,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
