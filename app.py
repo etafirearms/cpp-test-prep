@@ -1246,65 +1246,49 @@ def progress_page():
     </script>
     """)
 
-    body = body_tpl.replace("[[ROWS]]", rows).replace("[[AVG]]", str(overall))
-    return base_layout("Progress", body)
-
-@app.post("/progress/reset")
-def reset_progress():
-    session.pop("quiz_history", None)
-    return redirect(url_for("progress_page"))
-
-# --- Settings ---
-@app.get("/settings")
-def settings_page():
-    name = session.get("name", "")
-email = session.get("email", "")
-tz = session.get("timezone", "UTC")
-
-    body_tpl = textwrap.dedent("""
-    <div class="row">
-      <div class="col-md-10 mx-auto">
-        <div class="card border-0 shadow">
-          <div class="card-header bg-secondary text-white">
-            <h4 class="mb-0">Settings</h4>
+body_tpl = textwrap.dedent("""
+<div class="row">
+  <div class="col-md-10 mx-auto">
+    <div class="card border-0 shadow">
+      <div class="card-header bg-secondary text-white">
+        <h4 class="mb-0">Settings</h4>
+      </div>
+      <div class="card-body">
+        <form method="post" action="/settings">
+          <div class="mb-3">
+            <label class="form-label">Email</label>
+            <input class="form-control" type="email" name="email" value="[[EMAIL]]" placeholder="you@example.com">
+            <div class="form-text">Used to associate your usage with your account.</div>
           </div>
-          <div class="card-body">
-            <form method="post" action="/settings">
-                          <div class="mb-3">
-                <label class="form-label">Email</label>
-                <input class="form-control" type="email" name="email" value="[[EMAIL]]" placeholder="you@example.com">
-                <div class="form-text">Used to associate your usage with your account.</div>
-              </div>
-              <div class="mb-3">
-                <label class="form-label">Name</label>
-                <input class="form-control" type="text" name="name" value="[[NAME]]" placeholder="Your name">
-                <div class="form-text">Shown on the Home page as &ldquo;Welcome, [your name]&rdquo;.</div>
-              </div>
-
-              <div class="mb-3">
-                <label class="form-label">Timezone</label>
-                <input class="form-control" type="text" name="timezone" value="[[TZ]]" placeholder="UTC, America/New_York, etc.">
-                <div class="form-text">Used for timestamps and study plans.</div>
-              </div>
-
-              <div class="text-end">
-                <button class="btn btn-primary">Save</button>
-              </div>
-            </form>
+          <div class="mb-3">
+            <label class="form-label">Name</label>
+            <input class="form-control" type="text" name="name" value="[[NAME]]" placeholder="Your name">
+            <div class="form-text">Shown on the Home page as &ldquo;Welcome, [your name]&rdquo;.</div>
           </div>
-        </div>
+
+          <div class="mb-3">
+            <label class="form-label">Timezone</label>
+            <input class="form-control" type="text" name="timezone" value="[[TZ]]" placeholder="UTC, America/New_York, etc.">
+            <div class="form-text">Used for timestamps and study plans.</div>
+          </div>
+
+          <div class="text-end">
+            <button class="btn btn-primary">Save</button>
+          </div>
+        </form>
       </div>
     </div>
-    """)
+  </div>
+</div>
+""")
 
-    body = (
+body = (
     body_tpl
     .replace("[[NAME]]", html.escape(name or ""))
     .replace("[[EMAIL]]", html.escape(email or ""))
     .replace("[[TZ]]", html.escape(tz or ""))
 )
-    )
-    return base_layout("Settings", body)
+return base_layout("Settings", body)
 
 
 @app.post("/settings")
@@ -1763,6 +1747,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
