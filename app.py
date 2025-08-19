@@ -1366,6 +1366,10 @@ def admin_home():
         session["is_admin"] = True
     tab = request.args.get("tab", "questions")
 
+    # If still not admin, redirect to admin login
+    if not is_admin():
+        return redirect(url_for("admin_login_page", next=request.path))
+
     # Build rows for Questions table
     q_rows = []
     for q in QUESTIONS:
@@ -1787,6 +1791,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
