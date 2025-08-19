@@ -36,6 +36,28 @@ USERS = _load_json("users.json", [])  # [{id, name, email, subscription, usage:{
 
 app = Flask(__name__)
 
+# --- Security headers ---
+@app.after_request
+def add_security_headers(resp):
+    # Safe, permissive defaults that won’t break your inline/Bootstrap/JS CDN use
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+
+    # CSP is relaxed to accommodate inline scripts and jsdelivr — tighten later if desired
+    csp = (
+        "default-src 'self' https: data: blob:; "
+        "img-src 'self' https: data:; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+        "font-src 'self' https: data:; "
+        "connect-src 'self' https:; "
+        "frame-ancestors 'none'"
+    )
+    resp.headers["Content-Security-Policy"] = csp
+    return resp
+
 # --- Basic config ---
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -1801,6 +1823,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
