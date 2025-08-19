@@ -1243,7 +1243,8 @@ def progress_page():
       })();
     </script>
     """)
-
+    body = body_tpl.replace("[[ROWS]]", rows).replace("[[AVG]]", str(overall))
+    return base_layout("Progress", body)
 body_tpl = textwrap.dedent("""
 <div class="row">
   <div class="col-md-10 mx-auto">
@@ -1745,6 +1746,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
