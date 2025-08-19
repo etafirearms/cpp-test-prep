@@ -1395,7 +1395,7 @@ def admin_home():
 
     # Section: Questions
     attr_q = '' if tab == 'questions' else 'style="display:none;"'
-q_section = (
+    q_section = (
   '<div ' + attr_q + '>'
   + """
     <div class="card border-0 shadow-sm mb-3">
@@ -1653,6 +1653,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
