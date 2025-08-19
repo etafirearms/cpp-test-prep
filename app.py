@@ -42,6 +42,10 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
+# App metadata + staging banner toggle
+APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
+IS_STAGING = os.environ.get("RENDER_SERVICE_NAME", "").endswith("-staging")
+
 # Security & runtime toggles
 DEBUG = os.environ.get("FLASK_DEBUG", "0") == "1"
 app.config.update(
@@ -1797,6 +1801,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
