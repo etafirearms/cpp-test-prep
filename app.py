@@ -175,10 +175,9 @@ def _bump_usage(delta: dict):
         _save_json("users.json", USERS)
 
 # --- Helpers ---
+# --- Helpers ---
 def is_admin():
-    # Dev toggle still works via ?admin=1, plus password login support
-    if session.get("is_admin") is True:
-        return True
+    """Only allow admin after successful password login."""
     return session.get("admin_ok") is True
 
 def base_layout(title: str, body_html: str) -> str:
@@ -1860,3 +1859,4 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
