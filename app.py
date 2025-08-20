@@ -220,7 +220,6 @@ def base_layout(title: str, body_html: str) -> str:
 
     # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
     shared_js = """
-        shared_js = """
     <script>
       function polar(cx, cy, r, aDeg) {
         var a = (aDeg - 90) * Math.PI/180;
@@ -280,6 +279,22 @@ def base_layout(title: str, body_html: str) -> str:
     </script>
     """
 
+    # Extract CSS to keep braces out of f-strings
+    style_css = """
+      <style>
+        .domain-chip {
+          display:inline-block; margin:4px 6px 4px 0; padding:8px 12px; border-radius:20px;
+          background:#e3f2fd; color:#1976d2; border:1px solid #bbdefb; cursor:pointer; user-select:none;
+        }
+        .domain-chip.active { background:#1976d2; color:#fff; border-color:#1976d2; }
+        .btn-enhanced { border-radius:8px; font-weight:600; }
+        .chat-bubble { max-width: 85%; }
+        .chat-bubble p { margin-bottom: .5rem; }
+        .chat-bubble ul { margin: .5rem 0 .5rem 1.25rem; }
+        .chat-bubble h1,.chat-bubble h2,.chat-bubble h3 { margin-top: .5rem; font-size:1.05rem; }
+      </style>
+    """
+
     return textwrap.dedent(f"""\
     <!DOCTYPE html>
     <html lang="en"><head>
@@ -288,18 +303,7 @@ def base_layout(title: str, body_html: str) -> str:
       <title>{title} - CPP Test Prep</title>
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
       <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-      <style>
-        .domain-chip {{
-          display:inline-block; margin:4px 6px 4px 0; padding:8px 12px; border-radius:20px;
-          background:#e3f2fd; color:#1976d2; border:1px solid #bbdefb; cursor:pointer; user-select:none;
-        }}
-        .domain-chip.active {{ background:#1976d2; color:#fff; border-color:#1976d2; }}
-        .btn-enhanced {{ border-radius:8px; font-weight:600; }}
-        .chat-bubble {{ max-width: 85%; }}
-        .chat-bubble p {{ margin-bottom: .5rem; }}
-        .chat-bubble ul {{ margin: .5rem 0 .5rem 1.25rem; }}
-        .chat-bubble h1,.chat-bubble h2,.chat-bubble h3 {{ margin-top: .5rem; font-size:1.05rem; }}
-      </style>
+      {style_css}
       {shared_js}
     </head><body>
       {nav}
@@ -1287,6 +1291,12 @@ def progress_page():
     body = body_tpl.replace("[[ROWS]]", rows).replace("[[AVG]]", str(overall))
     return base_layout("Progress", body)
 
+# NEW: reset route used by the form on Progress page
+@app.post("/progress/reset")
+def progress_reset():
+    session.pop("quiz_history", None)
+    return redirect(url_for("progress_page"))
+
 @app.get("/settings")
 def settings_page():
     name = session.get("name", "")
@@ -1364,15 +1374,14 @@ def se(e):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=True)
-from flask import render_template  # ensure this import exists at top
 
+# --- Admin (inline pages to avoid missing templates) ---
 @app.post("/admin/login")
 def admin_login():
-    if not ADMIN_PASSWORD:
-        return render_template("admin_login.html", error="nopass"), 200
     pwd = (request.form.get("password") or "").strip()
     nxt = request.form.get("next") or url_for("admin_home")
-    if pwd == ADMIN_PASSWORD:
+    # If no ADMIN_PASSWORD is configured, allow login (dev-only behavior)
+    if not ADMIN_PASSWORD or pwd == ADMIN_PASSWORD:
         session["admin_ok"] = True
         return redirect(nxt)
     return redirect(url_for("admin_login_page", error="badpass"))
@@ -1383,7 +1392,30 @@ def admin_login_page():
     if is_admin():
         return redirect(url_for("admin_home"))
     error = request.args.get("error")
-    return render_template("admin_login.html", error=error)
+    body = f"""
+    <div class="row">
+      <div class="col-md-6 mx-auto">
+        <div class="card border-0 shadow">
+          <div class="card-header bg-light"><strong>Admin Login</strong></div>
+          <div class="card-body">
+            {"<div class='alert alert-danger small mb-3'>Incorrect password</div>" if error=="badpass" else ""}
+            {"<div class='alert alert-warning small mb-3'>ADMIN_PASSWORD is not set; login will accept any password.</div>" if not ADMIN_PASSWORD else ""}
+            <form method="post" action="/admin/login">
+              <div class="mb-3">
+                <label class="form-label">Password</label>
+                <input class="form-control" type="password" name="password" autofocus>
+              </div>
+              <input type="hidden" name="next" value="{html.escape(request.args.get('next') or url_for('admin_home'))}">
+              <div class="text-end">
+                <button class="btn btn-primary btn-sm">Sign in</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Admin Login", body)
 
 @app.post("/admin/logout")
 def admin_logout():
@@ -1828,59 +1860,3 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
