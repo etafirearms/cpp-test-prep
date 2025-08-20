@@ -1698,7 +1698,7 @@ def admin_questions_add():
     if not is_admin():
         return redirect("/admin")
     form = request.form
-        dom = (form.get("domain") or "random").strip()
+    dom = (form.get("domain") or "random").strip()
     if dom not in DOMAINS and dom != "random":
         dom = "random"
     q = {
@@ -1863,6 +1863,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
