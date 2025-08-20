@@ -1395,9 +1395,9 @@ def admin_login_page():
       <div class="col-md-6 mx-auto">
         <div class="card border-0 shadow">
           <div class="card-header bg-light"><strong>Admin Login</strong></div>
-          <div class="card-body">
+                    <div class="card-body">
             {"<div class='alert alert-danger small mb-3'>Incorrect password</div>" if error=="badpass" else ""}
-            {"<div class='alert alert-warning small mb-3'>ADMIN_PASSWORD is not set; login will accept any password.</div>" if not ADMIN_PASSWORD else ""}
+            {"<div class='alert alert-warning small mb-3'>ADMIN_PASSWORD is not set; admin login is disabled.</div>" if (not ADMIN_PASSWORD or error=="nopass") else ""}
             <form method="post" action="/admin/login">
               <div class="mb-3">
                 <label class="form-label">Password</label>
@@ -1855,6 +1855,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
