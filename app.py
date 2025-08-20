@@ -1379,12 +1379,11 @@ if __name__ == "__main__":
 def admin_login():
     pwd = (request.form.get("password") or "").strip()
     nxt = request.form.get("next") or url_for("admin_home")
-    # If no ADMIN_PASSWORD is configured, allow login (dev-only behavior)
-    if not ADMIN_PASSWORD or pwd == ADMIN_PASSWORD:
+    if ADMIN_PASSWORD and pwd == ADMIN_PASSWORD:
         session["admin_ok"] = True
         return redirect(nxt)
-    return redirect(url_for("admin_login_page", error="badpass"))
-
+    return redirect(url_for("admin_login_page", error=("nopass" if not ADMIN_PASSWORD else "badpass")))
+    
 @app.get("/admin/login")
 def admin_login_page():
     # Show form; if already admin, go to /admin
@@ -1856,5 +1855,6 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
