@@ -1536,14 +1536,14 @@ def admin_home():
     attr_q = '' if tab == 'questions' else 'style="display:none;"'
     q_section = (
   '<div ' + attr_q + '>'
-  + """
+  + f"""
     <div class="card border-0 shadow-sm mb-3">
       <div class="card-header bg-light"><strong>Add Question</strong></div>
       <div class="card-body">
         <form method="post" action="/admin/questions/add" class="row g-2">
-          <div class="col-md-2">
+                   <div class="col-md-2">
             <label class="form-label">Domain</label>
-            <input class="form-control" name="domain" placeholder="e.g., 1 or random"/>
+            {domain_select}
           </div>
           <div class="col-md-10">
             <label class="form-label">Question</label>
@@ -1857,6 +1857,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
