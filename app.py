@@ -1779,8 +1779,8 @@ def admin_flashcards_import():
         "id": str(uuid.uuid4()),
         "domain": dom,
         "front": (form.get("front") or "").strip(),
-            "back": (row.get("back") or "").strip(),
-            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        "back": (row.get("back") or "").strip(),
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
         if fc["front"] and fc["back"]:
             FLASHCARDS.append(fc)
@@ -1863,6 +1863,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
