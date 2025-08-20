@@ -1503,6 +1503,8 @@ def admin_home():
     tab_q = "active" if tab == "questions" else ""
     tab_f = "active" if tab == "flashcards" else ""
     tab_u = "active" if tab == "users" else ""
+    # Reusable domain <select> HTML
+    domain_select = '<select class="form-select" name="domain">' + ''.join([f'<option value="{k}">{v}</option>' for k, v in DOMAINS.items()]) + '</select>'
 
     if not is_admin():
         guard = (
@@ -1855,6 +1857,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
