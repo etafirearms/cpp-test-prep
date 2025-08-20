@@ -1424,9 +1424,6 @@ def admin_logout():
 
 @app.get("/admin")
 def admin_home():
-    # Enable dev admin quickly: /admin?admin=1
-    if request.args.get("admin") == "1":
-        session["is_admin"] = True
     tab = request.args.get("tab", "questions")
 
     # If still not admin, redirect to admin login
@@ -1859,4 +1856,5 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
