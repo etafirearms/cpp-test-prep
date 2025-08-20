@@ -1772,10 +1772,13 @@ def admin_flashcards_import():
     reader = csv.DictReader(f.stream.read().decode("utf-8").splitlines())
     count = 0
     for row in reader:
-        fc = {
-            "id": str(uuid.uuid4()),
-            "domain": (row.get("domain") or "random").strip(),
-            "front": (row.get("front") or "").strip(),
+           dom = (form.get("domain") or "random").strip()
+    if dom not in DOMAINS and dom != "random":
+        dom = "random"
+    fc = {
+        "id": str(uuid.uuid4()),
+        "domain": dom,
+        "front": (form.get("front") or "").strip(),
             "back": (row.get("back") or "").strip(),
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         }
@@ -1860,6 +1863,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
