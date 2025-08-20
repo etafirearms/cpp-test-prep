@@ -220,11 +220,8 @@ def base_layout(title: str, body_html: str) -> str:
 
     # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
     shared_js = """
-    
-    # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
-    shared_js = """
+        shared_js = """
     <script>
-      // ---- SVG Gauge Drawer (no backticks) ----
       function polar(cx, cy, r, aDeg) {
         var a = (aDeg - 90) * Math.PI/180;
         return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
@@ -240,22 +237,17 @@ def base_layout(title: str, body_html: str) -> str:
              + " " + p1.x.toFixed(1) + " " + p1.y.toFixed(1);
       }
       function gaugeSVG(percent) {
-        // percent: 0..100
         var w = 260, h = 160, cx = w/2, cy = 130, r = 100;
-        var minA = -100, maxA = 100; // sweep 200 deg
+        var minA = -100, maxA = 100;
         var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-        /* Bands: Red 0-40, Orange 41-79, Green 80-100 */
-        /* map percent to angle */
         function map(p) { return minA + (maxA - minA) * (p/100); }
-
         function band(p0, p1, color) {
           svg += '<path d="' + arcPath(cx,cy,r,map(p0),map(p1)) + '" fill="none" stroke="' + color + '" stroke-width="18" stroke-linecap="round"/>';
         }
-        band(0,40,"#dc3545");   // red
-        band(40.1,79,"#fd7e14"); // orange (start slightly after 40 to avoid join artifact)
-        band(79,100,"#198754");  // green
+        band(0,40,"#dc3545");
+        band(40.1,79,"#fd7e14");
+        band(79,100,"#198754");
 
-        // Ticks every 20%
         for (var t=0;t<=100;t+=20) {
           var a = map(t), p0 = polar(cx,cy,r-6,a), p1 = polar(cx,cy,r+6,a);
           svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
@@ -266,23 +258,20 @@ def base_layout(title: str, body_html: str) -> str:
           svg += '<text x="' + lp.x.toFixed(1) + '" y="' + lp.y.toFixed(1)
               +  '" text-anchor="middle" dominant-baseline="middle" font-size="10" fill="#666">' + label + '</text>';
         }
-        // Needle
+
         var pa = map(Math.max(0, Math.min(100, percent)));
         var pN = polar(cx, cy, r, pa);
         svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
         svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + pN.x.toFixed(1) + '" y2="' + pN.y.toFixed(1)
             +  '" stroke="#333" stroke-width="3"/>';
-        // Text
         var color = (percent <= 40) ? "#dc3545" : (percent < 80 ? "#fd7e14" : "#198754");
-        var yLabel = h - 36; // label just above the bottom
-var yPct   = h - 14; // big number at the very bottom
-svg += '<text x="' + cx + '" y="' + yLabel + '" text-anchor="middle" font-size="14" fill="#666">Your Progress</text>';
-svg += '<text x="' + cx + '" y="' + yPct + '" text-anchor="middle" font-size="28" font-weight="800" fill="' + color + '">' + percent.toFixed(1) + '%</text>';
+        var yLabel = h - 36;
+        var yPct   = h - 14;
+        svg += '<text x="' + cx + '" y="' + yLabel + '" text-anchor="middle" font-size="14" fill="#666">Your Progress</text>';
+        svg += '<text x="' + cx + '" y="' + yPct + '" text-anchor="middle" font-size="28" font-weight="800" fill="' + color + '">' + percent.toFixed(1) + '%</text>';
         svg += '</svg>';
         return svg;
       }
-
-      // Insert a gauge into a container by id
       function mountGauge(divId, pct) {
         var el = document.getElementById(divId);
         if (!el) return;
@@ -290,6 +279,7 @@ svg += '<text x="' + cx + '" y="' + yPct + '" text-anchor="middle" font-size="28
       }
     </script>
     """
+
     return textwrap.dedent(f"""\
     <!DOCTYPE html>
     <html lang="en"><head>
@@ -1838,6 +1828,7 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
 
 
 
