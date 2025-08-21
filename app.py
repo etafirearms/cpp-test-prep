@@ -7,6 +7,7 @@ import os, json, random, textwrap, requests
 import html
 import csv, uuid
 import logging
+import time  # <-- ADDED
 
 # --- Simple data storage (file-backed JSON) ---
 DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -174,6 +175,42 @@ def _bump_usage(delta: dict):
     if changed:
         _save_json("users.json", USERS)
 
+# --- Server-side quiz store + rate limit state ---  # <-- ADDED
+ACTIVE_QUIZZES = {}  # {quiz_id: {"created": epoch_seconds, "domain": str, "questions": [ {qid, question, options, correct_letter, explanation} ]}}
+
+def _prune_active_quizzes(max_items: int = 200, ttl_seconds: int = 2*60*60):
+    """Keep memory small and discard stale quizzes (approx)."""
+    now = time.time()
+    # drop stale
+    stale = [qid for qid, meta in ACTIVE_QUIZZES.items() if (now - float(meta.get("created", now))) > ttl_seconds]
+    for qid in stale:
+        ACTIVE_QUIZZES.pop(qid, None)
+    # cap size
+    if len(ACTIVE_QUIZZES) > max_items:
+        for qid, _ in sorted(ACTIVE_QUIZZES.items(), key=lambda kv: kv[1].get("created", now))[:len(ACTIVE_QUIZZES)-max_items]:
+            ACTIVE_QUIZZES.pop(qid, None)
+
+# --- Simple per-IP rate limiter (best-effort, in-memory) ---  # <-- ADDED
+_RATE_BUCKETS = {}  # key -> [timestamps]
+
+def _rate_allow(bucket: str, limit: int, window_sec: int) -> bool:
+    """
+    Return True if request is allowed. Keyed by remote IP and bucket.
+    NOTE: best-effort only (per-process memory). Use a shared store in prod.
+    """
+    ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or "unknown"
+    key = f"{bucket}:{ip}"
+    now = time.time()
+    arr = _RATE_BUCKETS.get(key, [])
+    cutoff = now - float(window_sec)
+    arr = [t for t in arr if t >= cutoff]
+    if len(arr) >= int(limit):
+        _RATE_BUCKETS[key] = arr
+        return False
+    arr.append(now)
+    _RATE_BUCKETS[key] = arr
+    return True
+
 # --- Helpers ---
 # --- Helpers ---
 def is_admin():
@@ -333,6 +370,50 @@ def build_quiz(num: int, domain_key: str | None) -> dict:
             out.append(q.copy())
     title = f"Practice ({num} questions)"
     return {"title": title, "domain": domain_key or "random", "questions": out[:num]}
+
+# --- ADDED: Server-side public quiz payload + secret cache ---
+def start_quiz_payload(count: int, domain_key: str | None) -> dict:
+    """
+    Build a quiz where the client gets NO correct answers/explanations.
+    The authoritative items live in ACTIVE_QUIZZES on the server.
+    """
+    pool = filter_questions(domain_key)
+    if not pool:
+        pool = BASE_QUESTIONS[:]
+    out = []
+    while len(out) < count:
+        random.shuffle(pool)
+        for q in pool:
+            if len(out) >= count:
+                break
+            out.append(q.copy())
+    selected = out[:count]
+
+    quiz_id = str(uuid.uuid4())
+    secret_items = []
+    public_items = []
+    for q in selected:
+        qid = str(uuid.uuid4())
+        secret_items.append({
+            "qid": qid,
+            "question": q.get("question", ""),
+            "options": q.get("options", {}) or {},
+            "correct_letter": q.get("correct", None),
+            "explanation": q.get("explanation", ""),
+        })
+        public_items.append({
+            "qid": qid,
+            "question": q.get("question", ""),
+            "options": q.get("options", {}) or {},
+        })
+    ACTIVE_QUIZZES[quiz_id] = {
+        "created": time.time(),
+        "domain": domain_key or "random",
+        "questions": secret_items
+    }
+    _prune_active_quizzes()
+    title = f"Practice ({count} questions)"
+    return {"quiz_id": quiz_id, "title": title, "domain": domain_key or "random", "questions": public_items}
 
 def chat_with_ai(msgs: list[str]) -> str:
     """Simple, robust wrapper. Returns a string answer or a friendly error."""
@@ -660,6 +741,8 @@ def study_page():
 
 @app.post("/api/chat")
 def api_chat():
+    if not _rate_allow("chat", limit=30, window_sec=60):  # <-- ADDED
+        return jsonify({"error": "Too many requests. Please slow down and try again."}), 429
     data = request.get_json() or {}
     user_msg = (data.get("message") or "").strip()
     dom = data.get("domain")
@@ -756,7 +839,7 @@ def flashcards_page():
       function render() {
         var c = CARDS[i] || {front:'No cards', back:''};
         var txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
-        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
+        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6%;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
       }
       function prev(){ back=false; i = (i - 1 + CARDS.length) % CARDS.length; render(); }
       function next(){ back=false; i = (i + 1) % CARDS.length; render(); }
@@ -796,9 +879,9 @@ def quiz_page():
     # Domain chips
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    # default quiz
-    q = build_quiz(10, "random")
-    q_json = json.dumps(q)
+    # default quiz (server-side quiz id; no answers sent to client)  # <-- CHANGED
+    q_public = start_quiz_payload(10, "random")  # <-- CHANGED
+    q_json = json.dumps(q_public)                # <-- CHANGED
     body = """
     <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
@@ -886,7 +969,7 @@ def quiz_page():
         }
         var res = await fetch('/api/submit-quiz', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ quiz_type:'practice', domain: DOMAIN, questions: QUIZ.questions, answers })
+          body: JSON.stringify({ quiz_type:'practice', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })  // <-- CHANGED
         });
         var data = await res.json();
         var out = document.getElementById('results');
@@ -943,15 +1026,15 @@ def api_build_quiz():
     data = request.get_json() or {}
     domain = data.get("domain") or "random"
     count = int(data.get("count") or 10)
-    return jsonify(build_quiz(count, domain))
+    return jsonify(start_quiz_payload(count, domain))  # <-- CHANGED
 
 # --- Mock Exam --- (no on-screen arrows)
 @app.get("/mock-exam")
 def mock_exam_page():
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    q = build_quiz(25, "random")
-    q_json = json.dumps(q)
+    q_public = start_quiz_payload(25, "random")  # <-- CHANGED
+    q_json = json.dumps(q_public)                # <-- CHANGED
     body = """
     <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
@@ -974,7 +1057,7 @@ def mock_exam_page():
         </div>
         <div class="card-body" id="quiz"></div>
         <div class="card-footer text-end">
-          <button id="submit" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
+          <button id="submit" class="btn btn成功 btn-lg btn-enhanced">Submit Exam</button>
         </div>
       </div>
       <div id="results" class="mt-4"></div>
@@ -1037,7 +1120,7 @@ def mock_exam_page():
         }
         var res = await fetch('/api/submit-quiz', {
           method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, questions: QUIZ.questions, answers })
+          body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })  # <-- CHANGED
         });
         var data = await res.json();
         var out = document.getElementById('results');
@@ -1086,34 +1169,68 @@ def mock_exam_page():
 
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
+    if not _rate_allow("submit_quiz", limit=20, window_sec=60):  # <-- ADDED
+        return jsonify({"error": "Too many submissions. Please wait a moment and try again."}), 429
+
     data = request.get_json() or {}
-    questions = data.get("questions") or []
     answers = data.get("answers") or {}
-    quiz_type = data.get("quiz_type") or "practice"
+    quiz_type = (data.get("quiz_type") or "practice").strip()
     # capture the domain coming from the quiz/mock page (defaults to 'random')
     domain = (data.get("domain") or "random").strip() or "random"
 
-    # score
-    total = len(questions)
-    correct = 0
+    # Preferred path: authoritative grading via quiz_id
+    quiz_id = data.get("quiz_id")
+    secret = None
+    if quiz_id and isinstance(quiz_id, str):
+        secret = ACTIVE_QUIZZES.get(quiz_id)
+
     detailed = []
-    for i, q in enumerate(questions):
-        user_letter = answers.get(str(i))
-        correct_letter = q.get("correct")
-        opts = q.get("options", {}) or {}
-        is_corr = (user_letter == correct_letter)
-        if is_corr:
-            correct += 1
-        detailed.append({
-            "index": i + 1,
-            "question": q.get("question", ""),
-            "correct_letter": correct_letter,
-            "correct_text": opts.get(correct_letter, ""),
-            "user_letter": user_letter,
-            "user_text": opts.get(user_letter, "") if user_letter else None,
-            "explanation": q.get("explanation", ""),
-            "is_correct": bool(is_corr),
-        })
+    correct = 0
+    total = 0
+
+    if secret and isinstance(secret.get("questions"), list):
+        items = secret["questions"]
+        total = len(items)
+        for idx, q in enumerate(items):
+            user_letter = answers.get(str(idx))
+            correct_letter = q.get("correct_letter")
+            opts = q.get("options", {}) or {}
+            is_corr = (user_letter == correct_letter)
+            if is_corr:
+                correct += 1
+            detailed.append({
+                "index": idx + 1,
+                "question": q.get("question", ""),
+                "correct_letter": correct_letter,
+                "correct_text": opts.get(correct_letter, ""),
+                "user_letter": user_letter,
+                "user_text": opts.get(user_letter, "") if user_letter else None,
+                "explanation": q.get("explanation", ""),
+                "is_correct": bool(is_corr),
+            })
+        # prevent simple replay
+        ACTIVE_QUIZZES.pop(quiz_id, None)
+    else:
+        # Fallback: legacy client payload (still supported but not preferred)
+        questions = data.get("questions") or []
+        total = len(questions)
+        for i, q in enumerate(questions):
+            user_letter = answers.get(str(i))
+            correct_letter = (q.get("correct") if isinstance(q.get("correct"), str) else None)
+            opts = q.get("options", {}) or {}
+            is_corr = (user_letter == correct_letter)
+            if is_corr:
+                correct += 1
+            detailed.append({
+                "index": i + 1,
+                "question": q.get("question", ""),
+                "correct_letter": correct_letter,
+                "correct_text": opts.get(correct_letter, ""),
+                "user_letter": user_letter,
+                "user_text": opts.get(user_letter, "") if user_letter else None,
+                "explanation": q.get("explanation", ""),
+                "is_correct": bool(is_corr),
+            })
 
     pct = (correct / total * 100.0) if total else 0.0
 
@@ -1377,6 +1494,8 @@ if __name__ == "__main__":
 # --- Admin (inline pages to avoid missing templates) ---
 @app.post("/admin/login")
 def admin_login():
+    if not _rate_allow("admin_login", limit=10, window_sec=60):  # <-- ADDED
+        return redirect(url_for("admin_login_page", error="rate"))
     pwd = (request.form.get("password") or "").strip()
     nxt = request.form.get("next") or url_for("admin_home")
     if ADMIN_PASSWORD and pwd == ADMIN_PASSWORD:
@@ -1860,14 +1979,3 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
-
-
-
-
-
-
-
-
-
-
-
