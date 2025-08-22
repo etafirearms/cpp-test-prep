@@ -7,6 +7,8 @@ import os, json, random, textwrap, requests
 import html
 import csv, uuid
 import logging
+# [UPGRADE 2] small helpers for idempotency/rate-limit
+import time, hashlib
 
 # --- Simple data storage (file-backed JSON) ---
 DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -174,6 +176,80 @@ def _bump_usage(delta: dict):
     if changed:
         _save_json("users.json", USERS)
 
+# [UPGRADE 1] --- Minimal helpers for per-user history persistence ---
+def _find_user(email: str):
+    if not email:
+        return None
+    el = email.strip().lower()
+    for u in USERS:
+        if (u.get("email","").strip().lower() == el):
+            return u
+    return None
+
+def _get_or_create_user(email: str):
+    """Create a simple record if missing (so progress can persist once email is set)."""
+    if not email:
+        return None
+    u = _find_user(email)
+    if u:
+        return u
+    # create a minimal user
+    u = {
+        "id": str(uuid.uuid4()),
+        "name": session.get("name",""),
+        "email": email.strip().lower(),
+        "subscription": "free",
+        "usage": {"quizzes": 0, "questions": 0, "last_active": ""},
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        # history lives here
+        "history": []
+    }
+    USERS.append(u)
+    _save_json("users.json", USERS)
+    return u
+
+def _append_user_history(email: str, entry: dict, cap: int = 200):
+    """Append quiz result to user's persistent history (kept to last 'cap')."""
+    if not email:
+        return
+    u = _get_or_create_user(email)
+    if not u:
+        return
+    hist = u.setdefault("history", [])
+    hist.append(entry)
+    if len(hist) > cap:
+        del hist[:-cap]
+    _save_json("users.json", USERS)
+
+# [UPGRADE 2] --- Tiny rate limiter & idempotency per email/IP
+_RATE_BUCKETS = {}  # key: (route, token) -> [timestamps]
+def _client_token():
+    el = (session.get("email") or "").strip().lower()
+    # prefer proxy header if present (Render sets X-Forwarded-For)
+    xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    ip = xff or (request.remote_addr or "")
+    return f"{el}|{ip}"
+
+def _rate_limited(route: str, limit: int = 10, per_seconds: int = 60) -> bool:
+    now = time.time()
+    key = (route, _client_token())
+    window = _RATE_BUCKETS.get(key, [])
+    # prune
+    window = [t for t in window if now - t < per_seconds]
+    if len(window) >= limit:
+        _RATE_BUCKETS[key] = window
+        return True
+    window.append(now)
+    _RATE_BUCKETS[key] = window
+    return False
+
+def _submission_sig(payload: dict) -> str:
+    try:
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        blob = str(payload)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
 # --- Helpers ---
 # --- Helpers ---
 def is_admin():
@@ -247,7 +323,7 @@ def base_layout(title: str, body_html: str) -> str:
         band(79,100,"#198754");
 
         for (var t=0;t<=100;t+=20) {
-          var a = map(t), p0 = polar(cx, cy, r-6, a), p1 = polar(cx, cy, r+6, a);
+          var a = map(t), p0 = polar(cx,cy,r-6,a), p1 = polar(cx,cy,r+6,a);
           svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
               +  '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
               +  '" stroke="#999" stroke-width="2"/>';
@@ -488,10 +564,8 @@ def home():
 @app.get("/study")
 def study_page():
     # Build chips: Random + each domain
-    chips = (
-        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
-        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    )
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
 
     # Simple suggestions per domain
     SUGGESTIONS = {
@@ -662,6 +736,10 @@ def study_page():
 
 @app.post("/api/chat")
 def api_chat():
+    # [UPGRADE 2] rate limit chat
+    if _rate_limited("chat", limit=10, per_seconds=60):
+        return jsonify({"error": "Too many requests. Please wait a moment."}), 429
+
     data = request.get_json() or {}
     user_msg = (data.get("message") or "").strip()
     dom = data.get("domain")
@@ -698,10 +776,9 @@ def flashcards_mark():
 @app.get("/flashcards")
 def flashcards_page():
     # Build cards from filtered questions by domain, default random
-    chips = (
-        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
-        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    )
+    # We render domain chips and let the client rebuild the stack when the domain changes.
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
     all_cards = []
     for q in BASE_QUESTIONS:
         ans = q["options"].get(q["correct"], "")
@@ -759,7 +836,7 @@ def flashcards_page():
       function render() {
         var c = CARDS[i] || {front:'No cards', back:''};
         var txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
-        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
+        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6%;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
       }
       function prev(){ back=false; i = (i - 1 + CARDS.length) % CARDS.length; render(); }
       function next(){ back=false; i = (i + 1) % CARDS.length; render(); }
@@ -797,10 +874,8 @@ def flashcards_page():
 @app.get("/quiz")
 def quiz_page():
     # Domain chips
-    chips = (
-        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
-        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    )
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
     # default quiz
     q = build_quiz(10, "random")
     q_json = json.dumps(q)
@@ -953,10 +1028,8 @@ def api_build_quiz():
 # --- Mock Exam --- (no on-screen arrows)
 @app.get("/mock-exam")
 def mock_exam_page():
-    chips = (
-        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
-        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    )
+    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
+            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
     q = build_quiz(25, "random")
     q_json = json.dumps(q)
     body = """
@@ -991,8 +1064,6 @@ def mock_exam_page():
       var DOMAIN = 'random';
       var DOMAIN_NAMES = """ + json.dumps({"random":"Random", **DOMAINS}) + """;
       var cont = document.getElementById('quiz');
-      var submitBtn = document.getElementById('submit');
-
       function render() {
         cont.innerHTML = '';
         (QUIZ.questions||[]).forEach(function(qq, idx){
@@ -1044,41 +1115,36 @@ def mock_exam_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Grading...'; }
-        try {
-          var res = await fetch('/api/submit-quiz', {
-            method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, questions: QUIZ.questions, answers })
-          });
-          var data = await res.json();
-          var out = document.getElementById('results');
-          if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
-          var html = '<div class="card border-0 shadow"><div class="card-body">'
-                   + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                   + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
-          (data.detailed_results||[]).forEach(function(row, idx){
-            var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
-            var icon = row.is_correct ? '✅' : '❌';
-            html += '<div class="p-3 border rounded mb-2 '+cls+'">'
-                 +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
-            var options = (QUIZ.questions[idx]||{}).options || {};
-            for (var key in options) {
-              var val = options[key];
-              var lineClass = '';
-              if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
-              if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
-              html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
-            }
-            html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
-                 +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
-                 + '</div>';
-          });
-          html += '</div></div>';
-          out.innerHTML = html;
-          out.scrollIntoView({behavior:'smooth'});
-        } finally {
-          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit Exam'; }
-        }
+        var res = await fetch('/api/submit-quiz', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, questions: QUIZ.questions, answers })
+        });
+        var data = await res.json();
+        var out = document.getElementById('results');
+        if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+        var html = '<div class="card border-0 shadow"><div class="card-body">'
+                 + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
+        (data.detailed_results||[]).forEach(function(row, idx){
+          var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
+          var icon = row.is_correct ? '✅' : '❌';
+          html += '<div class="p-3 border rounded mb-2 '+cls+'">'
+               +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
+          var options = QUIZ.questions[idx].options || {};
+          for (var key in options) {
+            var val = options[key];
+            var lineClass = '';
+            if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
+            if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
+            html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
+          }
+          html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
+               +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
+               + '</div>';
+        });
+        html += '</div></div>';
+        out.innerHTML = html;
+        out.scrollIntoView({behavior:'smooth'});
       }
       document.getElementById('reload').addEventListener('click', reloadQuiz);
       document.getElementById('submit').addEventListener('click', submitQuiz);
@@ -1100,7 +1166,26 @@ def mock_exam_page():
 
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
+    # [UPGRADE 2] simple rate limit
+    if _rate_limited("submit-quiz", limit=10, per_seconds=60):
+        return jsonify({"error": "Too many submissions. Please wait a moment."}), 429
+
     data = request.get_json() or {}
+    # [UPGRADE 2] idempotency: drop rapid duplicate submissions with same payload within 10s
+    sig = _submission_sig({
+        "quiz_type": data.get("quiz_type"),
+        "domain": data.get("domain"),
+        "questions": data.get("questions"),
+        "answers": data.get("answers"),
+    })
+    last_sig = session.get("last_submit_sig")
+    last_ts = session.get("last_submit_ts", 0.0)
+    last_result = session.get("last_submit_result")
+    now_ts = time.time()
+    if last_sig == sig and (now_ts - float(last_ts)) < 10 and last_result:
+        # return the previous successful result
+        return jsonify(last_result)
+
     questions = data.get("questions") or []
     answers = data.get("answers") or {}
     quiz_type = data.get("quiz_type") or "practice"
@@ -1134,9 +1219,13 @@ def submit_quiz_api():
     # usage — one quiz completed, and N questions answered
     _bump_usage({"quizzes": 1, "questions": total})
 
-    # store domain in history for per-domain progress
+    # [UPGRADE 1] generate a stable result id for merging/dedupe across session & persisted storage
+    result_id = str(uuid.uuid4())
+
+    # store domain in history for per-domain progress (session)
     hist = session.get("quiz_history", [])
     hist.append({
+        "id": result_id,  # <— new field
         "type": quiz_type,
         "domain": domain,
         "date": datetime.utcnow().isoformat(),
@@ -1144,7 +1233,20 @@ def submit_quiz_api():
         "total": total,
         "correct": correct,
     })
-    session["quiz_history"] = hist[-50:]  # keep last 50
+    session["quiz_history"] = hist[-50:]  # keep last 50 in session
+
+    # [UPGRADE 1] persist history per user (if email present)
+    email = (session.get("email") or "").strip().lower()
+    if email:
+        _append_user_history(email, {
+            "id": result_id,
+            "type": quiz_type,
+            "domain": domain,
+            "date": datetime.utcnow().isoformat(),
+            "score": pct,
+            "total": total,
+            "correct": correct,
+        })
 
     insights = []
     if pct >= 90:
@@ -1156,7 +1258,7 @@ def submit_quiz_api():
     else:
         insights.append("⚠️ Needs improvement — study before a real exam.")
 
-    return jsonify({
+    result_payload = {
         "success": True,
         "score": round(pct, 1),
         "correct": correct,
@@ -1165,21 +1267,45 @@ def submit_quiz_api():
         "type": quiz_type,
         "performance_insights": insights,
         "detailed_results": detailed
-    })
+    }
+
+    # [UPGRADE 2] remember last successful result for idempotency window
+    session["last_submit_sig"] = sig
+    session["last_submit_ts"] = now_ts
+    session["last_submit_result"] = result_payload
+
+    return jsonify(result_payload)
 
 # --- Progress (session-based for now) ---
 @app.get("/progress")
 def progress_page():
-    hist = session.get("quiz_history", [])
+    # [UPGRADE 1] merge persisted history (by email) + session history; dedupe by id
+    sess_hist = session.get("quiz_history", [])
+    email = (session.get("email") or "").strip().lower()
+    user_hist = []
+    if email:
+        u = _find_user(email)
+        if u:
+            user_hist = u.get("history", [])
+    # merge and dedupe
+    seen = set()
+    merged = []
+    for row in (user_hist + sess_hist):
+        rid = row.get("id") or f"{row.get('type')}|{row.get('domain')}|{row.get('date')}|{row.get('score')}"
+        if rid in seen:
+            continue
+        seen.add(rid)
+        merged.append(row)
+
     overall = round(
-        sum(float(h.get("score", 0.0)) for h in hist) / len(hist), 1
-    ) if hist else 0.0
+        sum(float(h.get("score", 0.0)) for h in merged) / len(merged), 1
+    ) if merged else 0.0
 
     # Aggregate by domain
     domain_totals = {}
     for d_key in list(DOMAINS.keys()) + ["random"]:
         domain_totals[d_key] = {"sum": 0.0, "n": 0}
-    for h in hist:
+    for h in merged:
         d = (h.get("domain") or "random")
         if d not in domain_totals:
             domain_totals[d] = {"sum": 0.0, "n": 0}
@@ -1874,4 +2000,3 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
-
