@@ -8,6 +8,7 @@ import html
 import csv, uuid
 import logging
 import time  # ADDED earlier; needed for TTL/pruning
+import io    # NEW: for CSV export
 
 # --- Simple data storage (file-backed JSON) ---
 DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -225,6 +226,30 @@ def is_admin():
     """Only allow admin after successful password login."""
     return session.get("admin_ok") is True
 
+# NEW (#3): normalize admin-stored question -> runtime schema like BASE_QUESTIONS
+_LETTERS = ["A", "B", "C", "D"]
+def _normalize_admin_question(aq: dict) -> dict:
+    opts_list = aq.get("options") or []
+    options = {}
+    for idx, letter in enumerate(_LETTERS):
+        try:
+            val = (opts_list[idx] or "").strip()
+        except Exception:
+            val = ""
+        options[letter] = val
+    try:
+        ans_idx = int(aq.get("answer") or 1) - 1
+    except Exception:
+        ans_idx = 0
+    correct = _LETTERS[ans_idx] if 0 <= ans_idx < 4 else "A"
+    return {
+        "question": aq.get("question", ""),
+        "options": options,
+        "correct": correct,
+        "explanation": aq.get("explanation", ""),
+        "domain": (aq.get("domain") or "random").strip() or "random",
+    }
+
 def base_layout(title: str, body_html: str) -> str:
     nav = textwrap.dedent(f"""
     <nav class="navbar navbar-expand-lg navbar-dark bg-primary">
@@ -359,11 +384,26 @@ def base_layout(title: str, body_html: str) -> str:
     </body></html>
     """)
 
+# --- UPDATED (#3): Combine BASE_QUESTIONS with admin-managed QUESTIONS -------------
 def filter_questions(domain_key: str | None) -> list[dict]:
-    """Return all questions if domain_key is None/'random'; otherwise only that domain."""
+    """
+    Return combined questions (code-defined + admin-managed).
+    Admin questions are normalized to the same schema.
+    """
+    pool = []
+    # include code-defined
+    pool.extend(BASE_QUESTIONS[:])
+    # append normalized admin-managed questions
+    for aq in QUESTIONS:
+        try:
+            pool.append(_normalize_admin_question(aq))
+        except Exception:
+            # ignore malformed rows
+            continue
+
     if not domain_key or domain_key == "random":
-        return BASE_QUESTIONS[:]
-    return [q for q in BASE_QUESTIONS if q.get("domain") == domain_key]
+        return pool[:]
+    return [q for q in pool if q.get("domain") == domain_key]
 
 def build_quiz(num: int, domain_key: str | None) -> dict:
     pool = filter_questions(domain_key)
@@ -787,14 +827,23 @@ def flashcards_mark():
 # --- Flashcards --- (ONLY here we show clickable left/right arrows)
 @app.get("/flashcards")
 def flashcards_page():
-    # Build cards from filtered questions by domain, default random
+    # Build cards from combined question pool + admin flashcards
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+
     all_cards = []
-    for q in BASE_QUESTIONS:
+    # From questions (code + admin)
+    for q in filter_questions("random"):
         ans = q["options"].get(q["correct"], "")
-        back = "✅ Correct: " + ans + "\n\n💡 " + q["explanation"]
-        all_cards.append({"front": q["question"], "back": back, "domain": q["domain"]})
+        back = "✅ Correct: " + ans + "\n\n💡 " + q.get("explanation", "")
+        all_cards.append({"front": q["question"], "back": back, "domain": q.get("domain", "random")})
+    # From admin-managed flashcards
+    for fc in FLASHCARDS:
+        f_front = (fc.get("front") or "").strip()
+        f_back = (fc.get("back") or "").strip()
+        if f_front and f_back:
+            all_cards.append({"front": f_front, "back": f_back, "domain": (fc.get("domain") or "random").strip() or "random"})
+
     cards_json = json.dumps(all_cards)
 
     body = """
@@ -1368,7 +1417,8 @@ def progress_page():
             </div>
 
             <div class="text-end mt-3">
-              <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');">
+              <a class="btn btn-outline-secondary btn-sm me-2" href="/progress/export">Export CSV</a>
+              <form method="post" action="/progress/reset" onsubmit="return confirm('Clear session progress?');" style="display:inline;">
                 <button class="btn btn-outline-danger btn-sm">Reset Session Progress</button>
               </form>
             </div>
@@ -1427,6 +1477,27 @@ def progress_page():
     """)
     body = body_tpl.replace("[[ROWS]]", rows).replace("[[AVG]]", str(overall))
     return base_layout("Progress", body)
+
+# NEW (#4): Export the current session's quiz history as CSV
+@app.get("/progress/export")
+def progress_export():
+    hist = session.get("quiz_history", [])
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["date_iso", "type", "domain", "total", "correct", "score_percent"])
+    for h in hist:
+        w.writerow([
+            h.get("date", ""),
+            h.get("type", ""),
+            h.get("domain", ""),
+            h.get("total", 0),
+            h.get("correct", 0),
+            round(float(h.get("score", 0.0)), 1)
+        ])
+    csv_bytes = out.getvalue()
+    filename = f"progress_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}.csv"
+    return Response(csv_bytes, mimetype="text/csv",
+                    headers={"Content-Disposition": f"attachment; filename={filename}"})
 
 # NEW: reset route used by the form on Progress page
 @app.post("/progress/reset")
