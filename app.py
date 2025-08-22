@@ -247,7 +247,7 @@ def base_layout(title: str, body_html: str) -> str:
         band(79,100,"#198754");
 
         for (var t=0;t<=100;t+=20) {
-          var a = map(t), p0 = polar(cx,cy,r-6,a), p1 = polar(cx,cy,r+6,a);
+          var a = map(t), p0 = polar(cx, cy, r-6, a), p1 = polar(cx, cy, r+6, a);
           svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1)
               +  '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1)
               +  '" stroke="#999" stroke-width="2"/>';
@@ -488,8 +488,10 @@ def home():
 @app.get("/study")
 def study_page():
     # Build chips: Random + each domain
-    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
-            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    chips = (
+        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
+        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    )
 
     # Simple suggestions per domain
     SUGGESTIONS = {
@@ -696,9 +698,10 @@ def flashcards_mark():
 @app.get("/flashcards")
 def flashcards_page():
     # Build cards from filtered questions by domain, default random
-    # We render domain chips and let the client rebuild the stack when the domain changes.
-    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
-            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    chips = (
+        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
+        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    )
     all_cards = []
     for q in BASE_QUESTIONS:
         ans = q["options"].get(q["correct"], "")
@@ -794,8 +797,10 @@ def flashcards_page():
 @app.get("/quiz")
 def quiz_page():
     # Domain chips
-    chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
-            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    chips = (
+        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
+        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    )
     # default quiz
     q = build_quiz(10, "random")
     q_json = json.dumps(q)
@@ -948,8 +953,10 @@ def api_build_quiz():
 # --- Mock Exam --- (no on-screen arrows)
 @app.get("/mock-exam")
 def mock_exam_page():
-    chips = ['<span class="domain-chip active" data-domain="random">Random</span>"] + \
-            [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    chips = (
+        ['<span class="domain-chip active" data-domain="random">Random</span>'] +
+        [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
+    )
     q = build_quiz(25, "random")
     q_json = json.dumps(q)
     body = """
@@ -984,7 +991,7 @@ def mock_exam_page():
       var DOMAIN = 'random';
       var DOMAIN_NAMES = """ + json.dumps({"random":"Random", **DOMAINS}) + """;
       var cont = document.getElementById('quiz');
-      var submitBtn = document.getElementById('submit');  // ADDED: cache the submit button
+      var submitBtn = document.getElementById('submit');
 
       function render() {
         cont.innerHTML = '';
@@ -1037,7 +1044,7 @@ def mock_exam_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Grading...'; }  // FIX: correct boolean + disable
+        if (submitBtn) { submitBtn.disabled = True; submitBtn.textContent = 'Grading...'; }
         try {
           var res = await fetch('/api/submit-quiz', {
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -1070,7 +1077,7 @@ def mock_exam_page():
           out.innerHTML = html;
           out.scrollIntoView({behavior:'smooth'});
         } finally {
-          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit Exam'; }  # re-enable
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit Exam'; }
         }
       }
       document.getElementById('reload').addEventListener('click', reloadQuiz);
