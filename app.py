@@ -8,7 +8,7 @@ import html
 import csv, uuid
 import logging
 import time  # ADDED earlier; needed for TTL/pruning
-import io    # NEW: for CSV export
+import io    # for CSV export
 
 # --- Simple data storage (file-backed JSON) ---
 DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -177,8 +177,7 @@ def _bump_usage(delta: dict):
         _save_json("users.json", USERS)
 
 # --- Server-side quiz store + rate limit state ---
-# PERSIST cache so restarts don't drop active quizzes mid-attempt
-ACTIVE_QUIZZES = _load_json("active_quizzes.json", {})  # CHANGED: was {} in-memory only
+ACTIVE_QUIZZES = _load_json("active_quizzes.json", {})  # persisted to survive restarts
 
 def _persist_active_quizzes():
     _save_json("active_quizzes.json", ACTIVE_QUIZZES)
@@ -192,7 +191,6 @@ def _prune_active_quizzes(max_items: int = 200, ttl_seconds: int = 2*60*60):
         ACTIVE_QUIZZES.pop(qid, None)
         changed = True
     if len(ACTIVE_QUIZZES) > max_items:
-        # remove oldest
         to_remove = sorted(ACTIVE_QUIZZES.items(), key=lambda kv: kv[1].get("created", now))[:len(ACTIVE_QUIZZES)-max_items]
         for qid, _ in to_remove:
             ACTIVE_QUIZZES.pop(qid, None)
@@ -200,14 +198,32 @@ def _prune_active_quizzes(max_items: int = 200, ttl_seconds: int = 2*60*60):
     if changed:
         _persist_active_quizzes()
 
+# NEW (Fix 1): atomically take a quiz from memory-or-disk for cross-worker grading
+def _active_quiz_take(quiz_id: str):
+    """
+    Return the quiz payload and remove it from the store (best-effort).
+    Checks in-memory first, then falls back to the persisted JSON so
+    workers can grade quizzes created by other workers.
+    """
+    # try in-memory
+    secret = ACTIVE_QUIZZES.pop(quiz_id, None)
+    if secret is not None:
+        _persist_active_quizzes()
+        return secret
+    # fall back to disk
+    disk = _load_json("active_quizzes.json", {})
+    secret = disk.pop(quiz_id, None)
+    if secret is not None:
+        # sync in-memory with disk (best-effort)
+        ACTIVE_QUIZZES.clear()
+        ACTIVE_QUIZZES.update(disk)
+        _persist_active_quizzes()
+    return secret
+
 # --- Simple per-IP rate limiter (best-effort, in-memory) ---
 _RATE_BUCKETS = {}  # key -> [timestamps]
 
 def _rate_allow(bucket: str, limit: int, window_sec: int) -> bool:
-    """
-    Return True if request is allowed. Keyed by remote IP and bucket.
-    NOTE: best-effort only (per-process memory). Use a shared store in prod.
-    """
     ip = request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or request.remote_addr or "unknown"
     key = f"{bucket}:{ip}"
     now = time.time()
@@ -226,7 +242,7 @@ def is_admin():
     """Only allow admin after successful password login."""
     return session.get("admin_ok") is True
 
-# NEW (#3): normalize admin-stored question -> runtime schema like BASE_QUESTIONS
+# normalize admin-stored question -> runtime schema like BASE_QUESTIONS
 _LETTERS = ["A", "B", "C", "D"]
 def _normalize_admin_question(aq: dict) -> dict:
     opts_list = aq.get("options") or []
@@ -277,8 +293,6 @@ def base_layout(title: str, body_html: str) -> str:
       </div>
     </div>
     """
-    
-    # Optional staging banner
     stage_banner = ("""
     <div class="bg-warning border-bottom py-1">
       <div class="container small text-dark fw-semibold">
@@ -286,8 +300,6 @@ def base_layout(title: str, body_html: str) -> str:
       </div>
     </div>
     """ if IS_STAGING else "")
-
-    # Shared script: safe gauge drawer + sanitize helper (DOMPurify + Marked pulled on pages that need it)
     shared_js = """
     <script>
       function polar(cx, cy, r, aDeg) {
@@ -347,8 +359,6 @@ def base_layout(title: str, body_html: str) -> str:
       }
     </script>
     """
-
-    # Extract CSS to keep braces out of f-strings
     style_css = """
       <style>
         .domain-chip {
@@ -363,7 +373,6 @@ def base_layout(title: str, body_html: str) -> str:
         .chat-bubble h1,.chat-bubble h2,.chat-bubble h3 { margin-top: .5rem; font-size:1.05rem; }
       </style>
     """
-
     return textwrap.dedent(f"""\
     <!DOCTYPE html>
     <html lang="en"><head>
@@ -384,23 +393,15 @@ def base_layout(title: str, body_html: str) -> str:
     </body></html>
     """)
 
-# --- UPDATED (#3): Combine BASE_QUESTIONS with admin-managed QUESTIONS -------------
+# Combine BASE_QUESTIONS with admin-managed QUESTIONS
 def filter_questions(domain_key: str | None) -> list[dict]:
-    """
-    Return combined questions (code-defined + admin-managed).
-    Admin questions are normalized to the same schema.
-    """
     pool = []
-    # include code-defined
     pool.extend(BASE_QUESTIONS[:])
-    # append normalized admin-managed questions
     for aq in QUESTIONS:
         try:
             pool.append(_normalize_admin_question(aq))
         except Exception:
-            # ignore malformed rows
             continue
-
     if not domain_key or domain_key == "random":
         return pool[:]
     return [q for q in pool if q.get("domain") == domain_key]
@@ -419,12 +420,7 @@ def build_quiz(num: int, domain_key: str | None) -> dict:
     title = f"Practice ({num} questions)"
     return {"title": title, "domain": domain_key or "random", "questions": out[:num]}
 
-# Server-side public quiz payload + secret cache (persisted)
 def start_quiz_payload(count: int, domain_key: str | None) -> dict:
-    """
-    Build a quiz where the client gets NO correct answers/explanations.
-    The authoritative items live in ACTIVE_QUIZZES on the server.
-    """
     pool = filter_questions(domain_key)
     if not pool:
         pool = BASE_QUESTIONS[:]
@@ -459,13 +455,12 @@ def start_quiz_payload(count: int, domain_key: str | None) -> dict:
         "domain": domain_key or "random",
         "questions": secret_items
     }
-    _persist_active_quizzes()  # NEW: persist to disk
+    _persist_active_quizzes()
     _prune_active_quizzes()
     title = f"Practice ({count} questions)"
     return {"quiz_id": quiz_id, "title": title, "domain": domain_key or "random", "questions": public_items}
 
 def chat_with_ai(msgs: list[str]) -> str:
-    """Simple, robust wrapper. Returns a string answer or a friendly error."""
     try:
         if not OPENAI_API_KEY:
             return "OpenAI key is not configured. Please set OPENAI_API_KEY."
@@ -506,15 +501,10 @@ def diag_openai():
 # --- Home ---
 @app.get("/")
 def home():
-    # Optional: greet by name until real accounts are wired in
     qname = (request.args.get("name") or "").strip()
     student_name_html = f"<span class='text-primary fw-semibold'>{qname}</span>" if qname else "there"
-
-    # Overall average from session history
     hist = session.get("quiz_history", [])
     avg = round(sum(h.get("score", 0.0) for h in hist) / len(hist), 1) if hist else 0.0
-
-    # A rotating encouragement/tip (server-side pick so it changes on refresh)
     tips = [
         "Small wins add up — try a focused 15-minute session.",
         "Active recall beats rereading — test yourself often.",
@@ -525,7 +515,6 @@ def home():
         "Review mistakes first — that’s where growth lives.",
     ]
     tip = random.choice(tips)
-
     body = """
     <div class="row justify-content-center">
       <div class="col-lg-10">
@@ -533,14 +522,10 @@ def home():
           <h1 class="mb-1">CPP Test Prep</h1>
           <div class="text-muted">Welcome, """ + student_name_html + """</div>
         </div>
-
-        <!-- Encouraging message -->
         <div class="alert alert-info border-0 shadow-sm text-center mb-4">
           <div class="fw-semibold">Today’s tip</div>
           <div>""" + tip.replace("<", "&lt;") + """</div>
         </div>
-
-        <!-- Speedometer -->
         <div class="card border-0 shadow-sm mb-4">
           <div class="card-body">
             <div class="text-center">
@@ -552,8 +537,6 @@ def home():
             </div>
           </div>
         </div>
-
-        <!-- Quick actions -->
         <div class="d-flex flex-wrap gap-2 justify-content-center">
           <a class="btn btn-primary btn-lg" href="/study">Open Tutor</a>
           <a class="btn btn-secondary btn-lg" href="/flashcards">Flashcards</a>
@@ -563,13 +546,11 @@ def home():
         </div>
       </div>
     </div>
-
     <script>
       (function () {
         const avg = """ + str(avg) + """;
         const g = document.getElementById('gaugeWrap');
         const w = 320, h = 190, cx = w/2, cy = h-10, r = 150;
-
         function deg(a) { return a * Math.PI / 180; }
         function polar(cx, cy, r, ang) { return {x: cx + r*Math.cos(ang), y: cy + r*Math.sin(ang)}; }
         function arc(cx, cy, r, a0, a1) {
@@ -579,10 +560,7 @@ def home():
                + " A " + r + " " + r + " 0 " + large + " " + sweep + " "
                + p1.x.toFixed(1) + " " + p1.y.toFixed(1);
         }
-
         let svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
-
-        // Gauge bands: 0-40 red, 41-79 orange, 80-100 green
         const bands = [
           {from:180, to:252, color:'#dc3545'},
           {from:252, to:338.4, color:'#fd7e14'},
@@ -591,22 +569,17 @@ def home():
         bands.forEach(b => {
           svg += '<path d="' + arc(cx,cy,r,deg(b.from),deg(b.to)) + '" fill="none" stroke="' + b.color + '" stroke-width="18" stroke-linecap="round"/>';
         });
-
-        // tick marks + labels
         [0,20,80,100].forEach(p => {
           const a = deg(180 + p*1.8), p0 = polar(cx,cy,r-12,a), p1 = polar(cx,cy,r-2,a);
           svg += '<line x1="' + p0.x.toFixed(1) + '" y1="' + p0.y.toFixed(1) + '" x2="' + p1.x.toFixed(1) + '" y2="' + p1.y.toFixed(1) + '" stroke="#b0b0b0" stroke-width="3"/>';
           const pt = polar(cx,cy,r-28,a);
           svg += '<text x="' + pt.x.toFixed(1) + '" y="' + pt.y.toFixed(1) + '" font-size="10" text-anchor="middle" fill="#6c757d">' + p + '%</text>';
         });
-
-        // needle
         const ang = deg(180 + Math.max(0, Math.min(100, avg)) * 1.8);
         const tip = polar(cx,cy,r-24, ang);
         svg += '<line x1="' + cx + '" y1="' + cy + '" x2="' + tip.x.toFixed(1) + '" y2="' + tip.y.toFixed(1) + '" stroke="#333" stroke-width="3"/>';
         svg += '<circle cx="' + cx + '" cy="' + cy + '" r="6" fill="#333"/>';
         svg += '</svg>';
-
         g.innerHTML = svg;
         document.getElementById('gaugeLabel').textContent = avg.toFixed(1) + '%';
       })();
@@ -617,11 +590,8 @@ def home():
 # --- Tutor ---
 @app.get("/study")
 def study_page():
-    # Build chips: Random + each domain
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-
-    # Simple suggestions per domain
     SUGGESTIONS = {
         "security-principles": [
             "Explain defense in depth with an example",
@@ -724,7 +694,6 @@ def study_page():
         if (!box) return;
         var items = (SUGG[d] || []);
         if (d === 'random') {
-          // show one suggestion from a few domains
           items = [];
           var keys = Object.keys(SUGG);
           for (var i=0; i<keys.length && items.length<4; i++) {
@@ -766,13 +735,12 @@ def study_page():
       async function send() {
         var q = (input.value || '').trim();
         if (!q) return;
-        append('user', q.replace(/</g,'&lt;')); // simple escape
+        append('user', q.replace(/</g,'&lt;'));
         input.value = ''; sendBtn.disabled = true; sendBtn.textContent = 'Thinking...';
         try {
           var res = await fetch('/api/chat', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({message: q, domain: domain})});
           var data = await res.json();
           var raw = data.response || data.error || 'Sorry, something went wrong.';
-          // Convert markdown -> HTML, then sanitize
           var parsed = (window.marked && typeof marked.parse === 'function') ? marked.parse(raw) : raw.replace(/\\n/g,'<br>');
           var clean = (window.DOMPurify && DOMPurify.sanitize) ? DOMPurify.sanitize(parsed) : parsed;
           append('assistant', clean, true);
@@ -797,11 +765,9 @@ def api_chat():
     dom = data.get("domain")
     if not user_msg:
         return jsonify({"error": "Empty message"}), 400
-
     prefix = ""
     if dom and dom in DOMAINS:
         prefix = f"Focus on the domain: {DOMAINS[dom]}.\n"
-
     reply = chat_with_ai([prefix + user_msg])
     return jsonify({"response": reply, "timestamp": datetime.utcnow().isoformat()})
 
@@ -810,7 +776,6 @@ def flashcards_mark():
     data = request.get_json() or {}
     know = bool(data.get("know"))
     domain = (data.get("domain") or "random").strip() or "random"
-
     stats = session.get("flashcard_stats", {})
     by_dom = stats.get(domain, {"know": 0, "dont": 0, "viewed": 0})
     if know:
@@ -820,30 +785,24 @@ def flashcards_mark():
     by_dom["viewed"] += 1
     stats[domain] = by_dom
     session["flashcard_stats"] = stats
-    # NEW: count one flashcard interaction
     _bump_usage({"flashcards": 1})
     return jsonify({"ok": True, "stats": by_dom})
 
-# --- Flashcards --- (ONLY here we show clickable left/right arrows)
+# --- Flashcards ---
 @app.get("/flashcards")
 def flashcards_page():
-    # Build cards from combined question pool + admin flashcards
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-
     all_cards = []
-    # From questions (code + admin)
     for q in filter_questions("random"):
         ans = q["options"].get(q["correct"], "")
         back = "✅ Correct: " + ans + "\n\n💡 " + q.get("explanation", "")
         all_cards.append({"front": q["question"], "back": back, "domain": q.get("domain", "random")})
-    # From admin-managed flashcards
     for fc in FLASHCARDS:
         f_front = (fc.get("front") or "").strip()
         f_back = (fc.get("back") or "").strip()
         if f_front and f_back:
             all_cards.append({"front": f_front, "back": f_back, "domain": (fc.get("domain") or "random").strip() or "random"})
-
     cards_json = json.dumps(all_cards)
 
     body = """
@@ -884,7 +843,6 @@ def flashcards_page():
       function rebuildCards() {
         var pool = ALL.filter(function(c){ return domain==='random' ? true : c.domain===domain; });
         if (pool.length===0) pool = ALL.slice(0);
-        // duplicate/shuffle to feel fuller
         var stack = pool.slice(0);
         while (stack.length < 20) { stack = stack.concat(pool); }
         stack = stack.slice(0, 20);
@@ -930,13 +888,11 @@ def flashcards_page():
     """
     return base_layout("Flashcards", body)
 
-# --- Quiz --- (no on-screen arrows)
+# --- Quiz ---
 @app.get("/quiz")
 def quiz_page():
-    # Domain chips
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    # default quiz (server-side quiz id; no answers sent to client)
     q_public = start_quiz_payload(10, "random")
     q_json = json.dumps(q_public)
     body = """
@@ -1027,9 +983,8 @@ def quiz_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        // Disable both submit buttons to prevent double posts
         if (submitTopBtn) { submitTopBtn.disabled = true; submitTopBtn.textContent = 'Grading...'; }
-        if (submitBottomBtn) { submitBottomBtn.disabled = true; submitBottomBtn.textContent = 'Grading...'; }
+        if (submitBottomBtn) { submitBottomBtn.disabled = false; submitBottomBtn.textContent = 'Grading...'; }
         try {
           var res = await fetch('/api/submit-quiz', {
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -1085,7 +1040,7 @@ def quiz_page():
     """
     return base_layout("Quiz", body)
 
-# Build-quiz endpoint (used by quiz + mock to rebuild with chosen domain/count)
+# Build-quiz endpoint
 @app.post("/api/build-quiz")
 def api_build_quiz():
     data = request.get_json() or {}
@@ -1093,7 +1048,7 @@ def api_build_quiz():
     count = int(data.get("count") or 10)
     return jsonify(start_quiz_payload(count, domain))
 
-# --- Mock Exam --- (no on-screen arrows)
+# --- Mock Exam ---
 @app.get("/mock-exam")
 def mock_exam_page():
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
@@ -1185,7 +1140,7 @@ def mock_exam_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Grading...'; }
+        if (submitBtn) { submitBtn.disabled = True; submitBtn.textContent = 'Grading...'; }
         try {
           var res = await fetch('/api/submit-quiz', {
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -1249,11 +1204,14 @@ def submit_quiz_api():
     quiz_type = (data.get("quiz_type") or "practice").strip()
     domain = (data.get("domain") or "random").strip() or "random"
 
-    # Authoritative grading via quiz_id
+    # Authoritative grading via quiz_id (Fix 1 & 2)
     quiz_id = data.get("quiz_id")
     secret = None
     if quiz_id and isinstance(quiz_id, str):
-        secret = ACTIVE_QUIZZES.get(quiz_id)
+        secret = _active_quiz_take(quiz_id)
+        if secret is None:
+            # Do NOT silently fall back — this caused empty feedback on mock exam
+            return jsonify({"error": "This quiz/exam session has expired or was already submitted. Please rebuild and try again."}), 400
 
     detailed = []
     correct = 0
@@ -1279,11 +1237,8 @@ def submit_quiz_api():
                 "explanation": q.get("explanation", ""),
                 "is_correct": bool(is_corr),
             })
-        # prevent replay and persist removal
-        ACTIVE_QUIZZES.pop(quiz_id, None)
-        _persist_active_quizzes()
     else:
-        # Fallback (legacy): requires client to send questions (not used in current flow)
+        # Legacy fallback only when NO quiz_id path is used by the client
         questions = data.get("questions") or []
         total = len(questions)
         for i, q in enumerate(questions):
@@ -1340,7 +1295,7 @@ def submit_quiz_api():
         "detailed_results": detailed
     })
 
-# --- Progress (session-based for now) ---
+# --- Progress (session-based) ---
 @app.get("/progress")
 def progress_page():
     hist = session.get("quiz_history", [])
@@ -1348,7 +1303,6 @@ def progress_page():
         sum(float(h.get("score", 0.0)) for h in hist) / len(hist), 1
     ) if hist else 0.0
 
-    # Aggregate by domain
     domain_totals = {}
     for d_key in list(DOMAINS.keys()) + ["random"]:
         domain_totals[d_key] = {"sum": 0.0, "n": 0}
@@ -1359,13 +1313,12 @@ def progress_page():
         domain_totals[d]["sum"] += float(h.get("score", 0.0))
         domain_totals[d]["n"] += 1
 
-    # Build per-domain rows with Bootstrap progress bars
     def bar_class(pct):
         if pct >= 80:
-            return "bg-success"  # green
+            return "bg-success"
         if pct >= 41:
-            return "bg-warning"  # orange
-        return "bg-danger"       # red
+            return "bg-warning"
+        return "bg-danger"
 
     rows_html = []
     for d_key, agg in domain_totals.items():
@@ -1446,9 +1399,9 @@ def progress_page():
 
         var svg = '<svg width="' + w + '" height="' + h + '" viewBox="0 0 ' + w + ' ' + h + '">';
         var bands = [
-          {from:180, to:252, color:'#dc3545'},   // 0-40 red
-          {from:252, to:338.4, color:'#fd7e14'}, // 41-79 orange
-          {from:338.4, to:360, color:'#198754'}  // 80-100 green
+          {from:180, to:252, color:'#dc3545'},
+          {from:252, to:338.4, color:'#fd7e14'},
+          {from:338.4, to:360, color:'#198754'}
         ];
         bands.forEach(function(b) {
           svg += '<path d="' + arc(cx,cy,r,deg(b.from),deg(b.to)) + '" fill="none" stroke="' + b.color + '" stroke-width="18" stroke-linecap="round"/>';
@@ -1469,7 +1422,6 @@ def progress_page():
         svg += '</svg>';
         g.innerHTML = svg;
 
-        // Label below the dial (larger & bold)
         var lbl = document.getElementById('gaugeLabel');
         lbl.innerHTML = '<span style="font-size:1.7rem; font-weight:700;">' + safe.toFixed(1) + '%</span>';
       })();
@@ -1478,7 +1430,6 @@ def progress_page():
     body = body_tpl.replace("[[ROWS]]", rows).replace("[[AVG]]", str(overall))
     return base_layout("Progress", body)
 
-# NEW (#4): Export the current session's quiz history as CSV
 @app.get("/progress/export")
 def progress_export():
     hist = session.get("quiz_history", [])
@@ -1499,7 +1450,6 @@ def progress_export():
     return Response(csv_bytes, mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename={filename}"})
 
-# NEW: reset route used by the form on Progress page
 @app.post("/progress/reset")
 def progress_reset():
     session.pop("quiz_history", None)
@@ -1510,7 +1460,6 @@ def settings_page():
     name = session.get("name", "")
     email = session.get("email", "")
     tz = session.get("timezone", "UTC")
-
     body_tpl = textwrap.dedent("""
     <div class="row">
       <div class="col-md-10 mx-auto">
@@ -1530,13 +1479,11 @@ def settings_page():
                 <input class="form-control" type="text" name="name" value="[[NAME]]" placeholder="Your name">
                 <div class="form-text">Shown on the Home page as &ldquo;Welcome, [your name]&rdquo;.</div>
               </div>
-
               <div class="mb-3">
                 <label class="form-label">Timezone</label>
                 <input class="form-control" type="text" name="timezone" value="[[TZ]]" placeholder="UTC, America/New_York, etc.">
                 <div class="form-text">Used for timestamps and study plans.</div>
               </div>
-
               <div class="text-end">
                 <button class="btn btn-primary">Save</button>
               </div>
@@ -1546,7 +1493,6 @@ def settings_page():
       </div>
     </div>
     """)
-
     body = (
         body_tpl
         .replace("[[NAME]]", html.escape(name or ""))
@@ -1597,7 +1543,6 @@ def admin_login():
     
 @app.get("/admin/login")
 def admin_login_page():
-    # Show form; if already admin, go to /admin
     if is_admin():
         return redirect(url_for("admin_home"))
     error = request.args.get("error")
@@ -1609,7 +1554,7 @@ def admin_login_page():
                     <div class="card-body">
             {"<div class='alert alert-danger small mb-3'>Incorrect password</div>" if error=="badpass" else ""}
             {"<div class='alert alert-warning small mb-3'>ADMIN_PASSWORD is not set; admin login is disabled.</div>" if (not ADMIN_PASSWORD or error=="nopass") else ""}
-            {"<div class='alert alert-warning small mb-3'>Too many attempts — please try again shortly.</div>" if error=="rate" else ""}
+            {"<div class='alert alert_WARNING small mb-3'>Too many attempts — please try again shortly.</div>" if error=="rate" else ""}
             <form method="post" action="/admin/login">
               <div class="mb-3">
                 <label class="form-label">Password</label>
@@ -1636,12 +1581,9 @@ def admin_logout():
 @app.get("/admin")
 def admin_home():
     tab = request.args.get("tab", "questions")
-
-    # If still not admin, redirect to admin login
     if not is_admin():
         return redirect(url_for("admin_login_page", next=request.path))
 
-    # Build rows for Questions table
     q_rows = []
     for q in QUESTIONS:
         opts = q.get("options", [])
@@ -1662,7 +1604,6 @@ def admin_home():
         )
     q_table = "\n".join(q_rows) or '<tr><td colspan="5" class="text-center text-muted">No questions yet.</td></tr>'
 
-    # Build rows for Flashcards table
     f_rows = []
     for fc in FLASHCARDS:
         domain = fc.get("domain", "random")
@@ -1681,7 +1622,6 @@ def admin_home():
         )
     f_table = "\n".join(f_rows) or '<tr><td colspan="4" class="text-center text-muted">No flashcards yet.</td></tr>'
 
-    # Build rows for Users table (simple list until real auth is wired)
     u_rows = []
     for u in USERS:
         usage = u.get("usage", {})
@@ -1711,25 +1651,15 @@ def admin_home():
         )
     u_table = "\n".join(u_rows) or '<tr><td colspan="7" class="text-center text-muted">No users yet.</td></tr>'
 
-    # Tabs
     tab_q = "active" if tab == "questions" else ""
     tab_f = "active" if tab == "flashcards" else ""
     tab_u = "active" if tab == "users" else ""
-    # Reusable domain <select> HTML
     domain_select = '<select class="form-select" name="domain">' + ''.join([f'<option value="{k}">{v}</option>' for k, v in DOMAINS.items()]) + '</select>'
 
-    if not is_admin():
-        guard = (
-            '<div class="alert alert-warning mb-3">'
-            'Admin mode is off. Append ?admin=1 to the URL to enable for this browser session '
-            '(dev-only guard; replace with real auth later).'
-            '</div>'
-        )
-    else:
-        guard = ""
+    guard = ""  # real auth above
 
     body = f"""
-<div class="row"><div class="col-md-11 mx-auto">
+<div class="row"><div class="col-md-11 mx_auto">
   ...
   {guard}
     <div class="d-flex justify-content-end mb-2">
@@ -1744,7 +1674,6 @@ def admin_home():
   </ul>
 """
 
-    # Section: Questions
     attr_q = '' if tab == 'questions' else 'style="display:none;"'
     q_section = (
   '<div ' + attr_q + '>'
@@ -1809,7 +1738,6 @@ def admin_home():
   """
 )
 
-    # Section: Flashcards
     f_section = """
   <div %s>
     <div class="card border-0 shadow-sm mb-3">
@@ -1836,7 +1764,7 @@ def admin_home():
     </div>
 
     <div class="card border-0 shadow-sm mb-4">
-      <div class="card-header bg-light d-flex justify-content-between align-items-center">
+      <div class="card-header bg-light d-flex justify-content_between align-items-center">
         <strong>Import Flashcards (CSV)</strong>
         <a class="small" href="/admin/example/flashcards.csv">Download CSV template</a>
       </div>
@@ -1866,7 +1794,6 @@ def admin_home():
   </div>
 """ % ("" if tab=="flashcards" else 'style="display:none;"')
 
-    # Section: Users
     u_section = """
   <div %s>
     <div class="card border-0 shadow-sm mb-3">
@@ -1944,7 +1871,6 @@ def admin_questions_delete():
     return redirect("/admin?tab=questions")
 
 # --- Flashcards CRUD + exports ---
-
 @app.post("/admin/flashcards/add")
 def admin_flashcards_add():
     if not is_admin():
@@ -1999,7 +1925,6 @@ def admin_flashcards_import():
     return redirect("/admin?tab=flashcards")
 
 # --- Exports + CSV templates ---
-
 @app.get("/admin/export/questions")
 def admin_export_questions():
     if not is_admin():
