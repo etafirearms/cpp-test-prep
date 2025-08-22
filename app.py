@@ -968,7 +968,7 @@ def quiz_page():
         render();
         window.scrollTo({top:0, behavior:'smooth'});
       }
-      async function submitQuiz() {
+            async function submitQuiz() {
         var answers = {};
         var unanswered = [];
         (QUIZ.questions||[]).forEach(function(qq, idx){
@@ -983,12 +983,11 @@ def quiz_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        if (submitTopBtn) { submitTopBtn.disabled = true; submitTopBtn.textContent = 'Grading...'; }
-        if (submitBottomBtn) { submitBottomBtn.disabled = false; submitBottomBtn.textContent = 'Grading...'; }
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Grading...'; }
         try {
           var res = await fetch('/api/submit-quiz', {
             method:'POST', headers:{'Content-Type':'application/json'},
-            body: JSON.stringify({ quiz_type:'practice', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })
+            body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })
           });
           var data = await res.json();
           var out = document.getElementById('results');
@@ -1017,8 +1016,7 @@ def quiz_page():
           out.innerHTML = html;
           out.scrollIntoView({behavior:'smooth'});
         } finally {
-          if (submitTopBtn) { submitTopBtn.disabled = false; submitTopBtn.textContent = 'Submit'; }
-          if (submitBottomBtn) { submitBottomBtn.disabled = false; submitBottomBtn.textContent = 'Submit Quiz'; }
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit Exam'; }
         }
       }
       document.getElementById('reload').addEventListener('click', reloadQuiz);
@@ -1997,3 +1995,4 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
