@@ -1044,7 +1044,7 @@ def mock_exam_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        if (submitBtn) { submitBtn.disabled = True; submitBtn.textContent = 'Grading...'; }
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Grading...'; }
         try {
           var res = await fetch('/api/submit-quiz', {
             method:'POST', headers:{'Content-Type':'application/json'},
@@ -1874,3 +1874,4 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
