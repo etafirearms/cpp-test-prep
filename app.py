@@ -7,7 +7,7 @@ import os, json, random, textwrap, requests
 import html
 import csv, uuid
 import logging
-import time  # <-- ADDED
+import time  # ADDED earlier; needed for TTL/pruning
 
 # --- Simple data storage (file-backed JSON) ---
 DATA_DIR = os.environ.get("DATA_DIR", "data")
@@ -175,22 +175,31 @@ def _bump_usage(delta: dict):
     if changed:
         _save_json("users.json", USERS)
 
-# --- Server-side quiz store + rate limit state ---  # <-- ADDED
-ACTIVE_QUIZZES = {}  # {quiz_id: {"created": epoch_seconds, "domain": str, "questions": [ {qid, question, options, correct_letter, explanation} ]}}
+# --- Server-side quiz store + rate limit state ---
+# PERSIST cache so restarts don't drop active quizzes mid-attempt
+ACTIVE_QUIZZES = _load_json("active_quizzes.json", {})  # CHANGED: was {} in-memory only
+
+def _persist_active_quizzes():
+    _save_json("active_quizzes.json", ACTIVE_QUIZZES)
 
 def _prune_active_quizzes(max_items: int = 200, ttl_seconds: int = 2*60*60):
     """Keep memory small and discard stale quizzes (approx)."""
     now = time.time()
-    # drop stale
     stale = [qid for qid, meta in ACTIVE_QUIZZES.items() if (now - float(meta.get("created", now))) > ttl_seconds]
+    changed = False
     for qid in stale:
         ACTIVE_QUIZZES.pop(qid, None)
-    # cap size
+        changed = True
     if len(ACTIVE_QUIZZES) > max_items:
-        for qid, _ in sorted(ACTIVE_QUIZZES.items(), key=lambda kv: kv[1].get("created", now))[:len(ACTIVE_QUIZZES)-max_items]:
+        # remove oldest
+        to_remove = sorted(ACTIVE_QUIZZES.items(), key=lambda kv: kv[1].get("created", now))[:len(ACTIVE_QUIZZES)-max_items]
+        for qid, _ in to_remove:
             ACTIVE_QUIZZES.pop(qid, None)
+            changed = True
+    if changed:
+        _persist_active_quizzes()
 
-# --- Simple per-IP rate limiter (best-effort, in-memory) ---  # <-- ADDED
+# --- Simple per-IP rate limiter (best-effort, in-memory) ---
 _RATE_BUCKETS = {}  # key -> [timestamps]
 
 def _rate_allow(bucket: str, limit: int, window_sec: int) -> bool:
@@ -211,7 +220,6 @@ def _rate_allow(bucket: str, limit: int, window_sec: int) -> bool:
     _RATE_BUCKETS[key] = arr
     return True
 
-# --- Helpers ---
 # --- Helpers ---
 def is_admin():
     """Only allow admin after successful password login."""
@@ -371,7 +379,7 @@ def build_quiz(num: int, domain_key: str | None) -> dict:
     title = f"Practice ({num} questions)"
     return {"title": title, "domain": domain_key or "random", "questions": out[:num]}
 
-# --- ADDED: Server-side public quiz payload + secret cache ---
+# Server-side public quiz payload + secret cache (persisted)
 def start_quiz_payload(count: int, domain_key: str | None) -> dict:
     """
     Build a quiz where the client gets NO correct answers/explanations.
@@ -411,6 +419,7 @@ def start_quiz_payload(count: int, domain_key: str | None) -> dict:
         "domain": domain_key or "random",
         "questions": secret_items
     }
+    _persist_active_quizzes()  # NEW: persist to disk
     _prune_active_quizzes()
     title = f"Practice ({count} questions)"
     return {"quiz_id": quiz_id, "title": title, "domain": domain_key or "random", "questions": public_items}
@@ -741,7 +750,7 @@ def study_page():
 
 @app.post("/api/chat")
 def api_chat():
-    if not _rate_allow("chat", limit=30, window_sec=60):  # <-- ADDED
+    if not _rate_allow("chat", limit=30, window_sec=60):
         return jsonify({"error": "Too many requests. Please slow down and try again."}), 429
     data = request.get_json() or {}
     user_msg = (data.get("message") or "").strip()
@@ -779,7 +788,6 @@ def flashcards_mark():
 @app.get("/flashcards")
 def flashcards_page():
     # Build cards from filtered questions by domain, default random
-    # We render domain chips and let the client rebuild the stack when the domain changes.
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
     all_cards = []
@@ -804,15 +812,15 @@ def flashcards_page():
               <button id="nextBtn" class="btn btn-outline-secondary btn-sm" title="Next (or L)">Next ▶</button>
             </div>
             <div class="d-flex gap-2 justify-content-center mt-3">
-  <button id="btnDK" class="btn btn-outline-danger btn-enhanced">❌ Don't Know</button>
-  <button id="btnK" class="btn btn-outline-success btn-enhanced">✅ Know</button>
-</div>
-<div id="fcStats" class="text-center mt-2 small">
-  <span class="badge bg-light text-dark me-2">Viewed: <span id="vCount">0</span></span>
-  <span class="badge bg-success me-2">Know: <span id="kCount">0</span></span>
-  <span class="badge bg-danger">Don't Know: <span id="dCount">0</span></span>
-</div>
-<div class="text-center mt-2 small text-muted">Press J to flip, K for next.</div>
+              <button id="btnDK" class="btn btn-outline-danger btn-enhanced">❌ Don't Know</button>
+              <button id="btnK" class="btn btn-outline-success btn-enhanced">✅ Know</button>
+            </div>
+            <div id="fcStats" class="text-center mt-2 small">
+              <span class="badge bg-light text-dark me-2">Viewed: <span id="vCount">0</span></span>
+              <span class="badge bg-success me-2">Know: <span id="kCount">0</span></span>
+              <span class="badge bg-danger">Don't Know: <span id="dCount">0</span></span>
+            </div>
+            <div class="text-center mt-2 small text-muted">Press J to flip, K for next.</div>
           </div>
         </div>
       </div>
@@ -839,7 +847,7 @@ def flashcards_page():
       function render() {
         var c = CARDS[i] || {front:'No cards', back:''};
         var txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
-        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6%;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
+        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
       }
       function prev(){ back=false; i = (i - 1 + CARDS.length) % CARDS.length; render(); }
       function next(){ back=false; i = (i + 1) % CARDS.length; render(); }
@@ -879,9 +887,9 @@ def quiz_page():
     # Domain chips
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    # default quiz (server-side quiz id; no answers sent to client)  # <-- CHANGED
-    q_public = start_quiz_payload(10, "random")  # <-- CHANGED
-    q_json = json.dumps(q_public)                # <-- CHANGED
+    # default quiz (server-side quiz id; no answers sent to client)
+    q_public = start_quiz_payload(10, "random")
+    q_json = json.dumps(q_public)
     body = """
     <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
@@ -915,6 +923,8 @@ def quiz_page():
       var DOMAIN = 'random';
       var DOMAIN_NAMES = """ + json.dumps({"random":"Random", **DOMAINS}) + """;
       var cont = document.getElementById('quiz');
+      var submitTopBtn, submitBottomBtn;
+
       function render() {
         cont.innerHTML = '';
         (QUIZ.questions||[]).forEach(function(qq, idx){
@@ -934,6 +944,8 @@ def quiz_page():
           }
           cont.appendChild(card);
         });
+        submitTopBtn = document.getElementById('submitTop');
+        submitBottomBtn = document.getElementById('submitBottom');
       }
       function build(domain, count) {
         return fetch('/api/build-quiz', {
@@ -960,46 +972,50 @@ def quiz_page():
           answers[String(idx)] = sel ? sel.value : null;
         });
         if(unanswered.length){
-          // Jump to the first unanswered question
           var first = unanswered[0] - 1;
           var target = document.getElementById('q'+first);
           if (target) { target.scrollIntoView({behavior:'smooth'}); }
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        var res = await fetch('/api/submit-quiz', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ quiz_type:'practice', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })  // <-- CHANGED
-        });
-        var data = await res.json();
-        var out = document.getElementById('results');
-        if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
-        // Build detailed review
-        var html = '<div class="card border-0 shadow"><div class="card-body">'
-                 + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
-        (data.detailed_results||[]).forEach(function(row, idx){
-          var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
-          var icon = row.is_correct ? '✅' : '❌';
-          html += '<div class="p-3 border rounded mb-2 '+cls+'">'
-               +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
-          var options = QUIZ.questions[idx].options || {};
-          // Show options with color on user choice vs correct
-          for (var key in options) {
-            var val = options[key];
-            var lineClass = '';
-            if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
-            if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
-            html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
-          }
-          html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
-               +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
-               + '</div>';
-        });
-        html += '</div></div>';
-        out.innerHTML = html;
-        // Jump to results
-        out.scrollIntoView({behavior:'smooth'});
+        // Disable both submit buttons to prevent double posts
+        if (submitTopBtn) { submitTopBtn.disabled = true; submitTopBtn.textContent = 'Grading...'; }
+        if (submitBottomBtn) { submitBottomBtn.disabled = true; submitBottomBtn.textContent = 'Grading...'; }
+        try {
+          var res = await fetch('/api/submit-quiz', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ quiz_type:'practice', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })
+          });
+          var data = await res.json();
+          var out = document.getElementById('results');
+          if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+          var html = '<div class="card border-0 shadow"><div class="card-body">'
+                   + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                   + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
+          (data.detailed_results||[]).forEach(function(row, idx){
+            var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
+            var icon = row.is_correct ? '✅' : '❌';
+            html += '<div class="p-3 border rounded mb-2 '+cls+'">'
+                 +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
+            var options = (QUIZ.questions[idx]||{}).options || {};
+            for (var key in options) {
+              var val = options[key];
+              var lineClass = '';
+              if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
+              if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
+              html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
+            }
+            html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
+                 +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
+                 + '</div>';
+          });
+          html += '</div></div>';
+          out.innerHTML = html;
+          out.scrollIntoView({behavior:'smooth'});
+        } finally {
+          if (submitTopBtn) { submitTopBtn.disabled = false; submitTopBtn.textContent = 'Submit'; }
+          if (submitBottomBtn) { submitBottomBtn.disabled = false; submitBottomBtn.textContent = 'Submit Quiz'; }
+        }
       }
       document.getElementById('reload').addEventListener('click', reloadQuiz);
       document.getElementById('submitTop').addEventListener('click', submitQuiz);
@@ -1026,15 +1042,15 @@ def api_build_quiz():
     data = request.get_json() or {}
     domain = data.get("domain") or "random"
     count = int(data.get("count") or 10)
-    return jsonify(start_quiz_payload(count, domain))  # <-- CHANGED
+    return jsonify(start_quiz_payload(count, domain))
 
 # --- Mock Exam --- (no on-screen arrows)
 @app.get("/mock-exam")
 def mock_exam_page():
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
-    q_public = start_quiz_payload(25, "random")  # <-- CHANGED
-    q_json = json.dumps(q_public)                # <-- CHANGED
+    q_public = start_quiz_payload(25, "random")
+    q_json = json.dumps(q_public)
     body = """
     <div class="row"><div class="col-md-11 mx-auto">
       <div class="card border-0 shadow">
@@ -1057,7 +1073,7 @@ def mock_exam_page():
         </div>
         <div class="card-body" id="quiz"></div>
         <div class="card-footer text-end">
-          <button id="submit" class="btn btn成功 btn-lg btn-enhanced">Submit Exam</button>
+          <button id="submit" class="btn btn-success btn-lg btn-enhanced">Submit Exam</button>
         </div>
       </div>
       <div id="results" class="mt-4"></div>
@@ -1067,6 +1083,7 @@ def mock_exam_page():
       var DOMAIN = 'random';
       var DOMAIN_NAMES = """ + json.dumps({"random":"Random", **DOMAINS}) + """;
       var cont = document.getElementById('quiz');
+      var submitBtn = null;
       function render() {
         cont.innerHTML = '';
         (QUIZ.questions||[]).forEach(function(qq, idx){
@@ -1086,6 +1103,7 @@ def mock_exam_page():
           }
           cont.appendChild(card);
         });
+        submitBtn = document.getElementById('submit');
       }
       function build(domain, count) {
         return fetch('/api/build-quiz', {
@@ -1118,36 +1136,41 @@ def mock_exam_page():
           alert('Please answer all questions. Missing: Q' + unanswered.join(', Q'));
           return;
         }
-        var res = await fetch('/api/submit-quiz', {
-          method:'POST', headers:{'Content-Type':'application/json'},
-          body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })  # <-- CHANGED
-        });
-        var data = await res.json();
-        var out = document.getElementById('results');
-        if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
-        var html = '<div class="card border-0 shadow"><div class="card-body">'
-                 + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
-                 + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
-        (data.detailed_results||[]).forEach(function(row, idx){
-          var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
-          var icon = row.is_correct ? '✅' : '❌';
-          html += '<div class="p-3 border rounded mb-2 '+cls+'">'
-               +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
-          var options = QUIZ.questions[idx].options || {};
-          for (var key in options) {
-            var val = options[key];
-            var lineClass = '';
-            if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
-            if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
-            html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
-          }
-          html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
-               +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
-               + '</div>';
-        });
-        html += '</div></div>';
-        out.innerHTML = html;
-        out.scrollIntoView({behavior:'smooth'});
+        if (submitBtn) { submitBtn.disabled = true; submitBtn.textContent = 'Grading...'; }
+        try {
+          var res = await fetch('/api/submit-quiz', {
+            method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ quiz_type:'mock-exam', domain: DOMAIN, quiz_id: QUIZ.quiz_id, answers })
+          });
+          var data = await res.json();
+          var out = document.getElementById('results');
+          if (data.error) { out.innerHTML = '<div class="alert alert-danger">'+data.error+'</div>'; return; }
+          var html = '<div class="card border-0 shadow"><div class="card-body">'
+                   + '<div class="text-center mb-3"><h3 class="'+(data.score>=80?'text-success':(data.score>=70?'text-warning':'text-danger'))+'">Score: '+data.score.toFixed(1)+'%</h3>'
+                   + '<div class="text-muted">Correct: '+data.correct+' / '+data.total+'</div></div>';
+          (data.detailed_results||[]).forEach(function(row, idx){
+            var cls = row.is_correct ? 'border-success bg-success-subtle' : 'border-danger bg-danger-subtle';
+            var icon = row.is_correct ? '✅' : '❌';
+            html += '<div class="p-3 border rounded mb-2 '+cls+'">'
+                 +   '<div class="fw-bold">'+icon+' Q'+row.index+': '+row.question+'</div>';
+            var options = (QUIZ.questions[idx]||{}).options || {};
+            for (var key in options) {
+              var val = options[key];
+              var lineClass = '';
+              if (key === row.correct_letter) lineClass = 'text-success fw-semibold';
+              if (row.user_letter && key === row.user_letter && !row.is_correct) lineClass = 'text-danger fw-semibold';
+              html += '<div class="'+lineClass+'">'+key+') '+val+'</div>';
+            }
+            html +=   '<div class="mt-2 small"><strong>Correct:</strong> ' + row.correct_letter + ') ' + row.correct_text + '</div>'
+                 +   '<div class="small text-muted">💡 ' + row.explanation + '</div>'
+                 + '</div>';
+          });
+          html += '</div></div>';
+          out.innerHTML = html;
+          out.scrollIntoView({behavior:'smooth'});
+        } finally {
+          if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = 'Submit Exam'; }
+        }
       }
       document.getElementById('reload').addEventListener('click', reloadQuiz);
       document.getElementById('submit').addEventListener('click', submitQuiz);
@@ -1169,16 +1192,15 @@ def mock_exam_page():
 
 @app.post("/api/submit-quiz")
 def submit_quiz_api():
-    if not _rate_allow("submit_quiz", limit=20, window_sec=60):  # <-- ADDED
+    if not _rate_allow("submit_quiz", limit=20, window_sec=60):
         return jsonify({"error": "Too many submissions. Please wait a moment and try again."}), 429
 
     data = request.get_json() or {}
     answers = data.get("answers") or {}
     quiz_type = (data.get("quiz_type") or "practice").strip()
-    # capture the domain coming from the quiz/mock page (defaults to 'random')
     domain = (data.get("domain") or "random").strip() or "random"
 
-    # Preferred path: authoritative grading via quiz_id
+    # Authoritative grading via quiz_id
     quiz_id = data.get("quiz_id")
     secret = None
     if quiz_id and isinstance(quiz_id, str):
@@ -1208,10 +1230,11 @@ def submit_quiz_api():
                 "explanation": q.get("explanation", ""),
                 "is_correct": bool(is_corr),
             })
-        # prevent simple replay
+        # prevent replay and persist removal
         ACTIVE_QUIZZES.pop(quiz_id, None)
+        _persist_active_quizzes()
     else:
-        # Fallback: legacy client payload (still supported but not preferred)
+        # Fallback (legacy): requires client to send questions (not used in current flow)
         questions = data.get("questions") or []
         total = len(questions)
         for i, q in enumerate(questions):
@@ -1234,10 +1257,8 @@ def submit_quiz_api():
 
     pct = (correct / total * 100.0) if total else 0.0
 
-    # usage — one quiz completed, and N questions answered
     _bump_usage({"quizzes": 1, "questions": total})
 
-    # store domain in history for per-domain progress
     hist = session.get("quiz_history", [])
     hist.append({
         "type": quiz_type,
@@ -1247,7 +1268,7 @@ def submit_quiz_api():
         "total": total,
         "correct": correct,
     })
-    session["quiz_history"] = hist[-50:]  # keep last 50
+    session["quiz_history"] = hist[-50:]
 
     insights = []
     if pct >= 90:
@@ -1494,7 +1515,7 @@ if __name__ == "__main__":
 # --- Admin (inline pages to avoid missing templates) ---
 @app.post("/admin/login")
 def admin_login():
-    if not _rate_allow("admin_login", limit=10, window_sec=60):  # <-- ADDED
+    if not _rate_allow("admin_login", limit=10, window_sec=60):
         return redirect(url_for("admin_login_page", error="rate"))
     pwd = (request.form.get("password") or "").strip()
     nxt = request.form.get("next") or url_for("admin_home")
@@ -1517,6 +1538,7 @@ def admin_login_page():
                     <div class="card-body">
             {"<div class='alert alert-danger small mb-3'>Incorrect password</div>" if error=="badpass" else ""}
             {"<div class='alert alert-warning small mb-3'>ADMIN_PASSWORD is not set; admin login is disabled.</div>" if (not ADMIN_PASSWORD or error=="nopass") else ""}
+            {"<div class='alert alert-warning small mb-3'>Too many attempts — please try again shortly.</div>" if error=="rate" else ""}
             <form method="post" action="/admin/login">
               <div class="mb-3">
                 <label class="form-label">Password</label>
@@ -1588,7 +1610,7 @@ def admin_home():
         )
     f_table = "\n".join(f_rows) or '<tr><td colspan="4" class="text-center text-muted">No flashcards yet.</td></tr>'
 
-    # Build rows for Users table (simple list until auth is wired)
+    # Build rows for Users table (simple list until real auth is wired)
     u_rows = []
     for u in USERS:
         usage = u.get("usage", {})
