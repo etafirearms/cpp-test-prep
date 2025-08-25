@@ -866,7 +866,7 @@ def signup_post():
         "name": name,
         "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": final_plan,
+        "subscription": "inactive",
         "discount_code": discount_code,
         "usage": {"quizzes": 0, "questions": 0, "tutor_msgs": 0, "flashcards": 0, "last_active": ""},
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -2880,6 +2880,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
