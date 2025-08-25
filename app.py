@@ -140,6 +140,13 @@ def _rate_limited(route: str, limit: int = 10, per_seconds: int = 60) -> bool:
         return True
     window.append(now)
     _RATE_BUCKETS[key] = window
+    # Cleanup old entries periodically to prevent memory leak
+    if len(_RATE_BUCKETS) > 1000:
+        cutoff = now - (per_seconds * 2)
+        _RATE_BUCKETS = {k: [t for t in v if t > cutoff] 
+                        for k, v in _RATE_BUCKETS.items() 
+                        if any(t > cutoff for t in v)}
+    
     return False
 
 def _submission_sig(payload: dict) -> str:
@@ -2375,6 +2382,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
