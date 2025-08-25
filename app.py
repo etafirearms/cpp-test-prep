@@ -225,12 +225,11 @@ def check_usage_limit(user, action_type):
     month_key = today.strftime('%Y-%m')
     monthly_usage = usage.get('monthly', {}).get(month_key, {})
     
-    limits = {
-        'free': {'quizzes': 5, 'questions': 50, 'tutor_msgs': 10, 'flashcards': 25},
-        'premium': {'quizzes': -1, 'questions': -1, 'tutor_msgs': -1, 'flashcards': -1},
-        'trial': {'quizzes': 20, 'questions': 200, 'tutor_msgs': 50, 'flashcards': 100}
-    }
-    
+   limits = {
+    'free': {'quizzes': 0, 'questions': 0, 'tutor_msgs': 0, 'flashcards': 0},
+    'premium': {'quizzes': -1, 'questions': -1, 'tutor_msgs': -1, 'flashcards': -1},
+}
+   
     user_limits = limits.get(subscription, limits['free'])
     current_usage = monthly_usage.get(action_type, 0)
     limit = user_limits.get(action_type, 0)
@@ -2854,6 +2853,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
