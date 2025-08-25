@@ -885,6 +885,8 @@ def logout():
     return redirect(url_for('login_page'))
 
 # ------------------------ Home ------------------------
+# Replace the dashboard section in the home() function with this updated version:
+
 @app.get("/")
 def home():
     if 'user_id' not in session:
@@ -909,10 +911,22 @@ def home():
         """
         return base_layout("CPP Test Prep", body)
 
-    # Dashboard
+    # Dashboard with progress dial
     user_name = session.get('name', '').split(' ')[0] or 'there'
     hist = session.get("quiz_history", [])
     avg = round(sum(h.get("score", 0.0) for h in hist) / len(hist), 1) if hist else 0.0
+    
+    # Determine progress dial color
+    if avg >= 80:
+        dial_color = "success"
+        dial_bg = "#28a745"
+    elif avg >= 60:
+        dial_color = "warning" 
+        dial_bg = "#ffc107"
+    else:
+        dial_color = "danger"
+        dial_bg = "#dc3545"
+    
     tips = [
         "Small wins add up — try a focused 15-minute session.",
         "Active recall beats rereading — test yourself often.",
@@ -921,6 +935,7 @@ def home():
         "Teach a concept aloud — if you can explain it, you know it.",
     ]
     tip = random.choice(tips)
+    
     body = f"""
     <div class="container mt-4">
       <div class="row">
@@ -948,16 +963,255 @@ def home():
           <div class="card">
             <div class="card-body text-center">
               <h5>Your Progress</h5>
-              <div class="display-4 text-primary">{avg}%</div>
-              <p class="text-muted">Average quiz score</p>
+              <div class="progress-dial-container mb-3">
+                <svg width="180" height="180" viewBox="0 0 180 180" class="progress-dial">
+                  <defs>
+                    <linearGradient id="dialGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" style="stop-color:{dial_bg};stop-opacity:0.3" />
+                      <stop offset="100%" style="stop-color:{dial_bg};stop-opacity:1" />
+                    </linearGradient>
+                  </defs>
+                  <!-- Background arc -->
+                  <path d="M 30 90 A 60 60 0 1 1 150 90" fill="none" stroke="#e9ecef" stroke-width="8" stroke-linecap="round"/>
+                  <!-- Progress arc -->
+                  <path d="M 30 90 A 60 60 0 {1 if avg > 50 else 0} 1 {30 + (120 * avg / 100)} {90 - (60 * (1 - abs(((avg / 100) * 2) - 1)))}" 
+                        fill="none" stroke="url(#dialGrad)" stroke-width="8" stroke-linecap="round"
+                        class="progress-arc" data-score="{avg}"/>
+                  <!-- Center text -->
+                  <text x="90" y="85" text-anchor="middle" class="dial-score text-{dial_color}" font-size="28" font-weight="bold">{avg}%</text>
+                  <text x="90" y="105" text-anchor="middle" class="dial-label" font-size="14" fill="#6c757d">Average Score</text>
+                </svg>
+              </div>
               <a href="/progress" class="btn btn-sm btn-outline-primary">View Details</a>
             </div>
           </div>
         </div>
       </div>
     </div>
+    <style>
+      .progress-dial-container {{
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }}
+      .progress-dial {{
+        transform: rotate(-90deg);
+      }}
+      .dial-score {{
+        transform: rotate(90deg);
+      }}
+      .dial-label {{
+        transform: rotate(90deg);
+      }}
+      .text-success {{ fill: #28a745; }}
+      .text-warning {{ fill: #ffc107; }}
+      .text-danger {{ fill: #dc3545; }}
+    </style>
     """
     return base_layout("Dashboard", body)
+
+# Replace the progress_page() function with this updated version:
+
+@app.get("/progress")
+@login_required
+def progress_page():
+    sess_hist = session.get("quiz_history", [])
+    email = session.get('email', '')
+    user_hist = []
+    if email:
+        u = _find_user(email)
+        if u:
+            user_hist = u.get("history", [])
+
+    seen, merged = set(), []
+    for row in (user_hist + sess_hist):
+        rid = row.get("id") or f"{row.get('type')}|{row.get('domain')}|{row.get('date')}|{row.get('score')}"
+        if rid in seen:
+            continue
+        seen.add(rid); merged.append(row)
+
+    overall = round(sum(float(h.get("score", 0.0)) for h in merged) / len(merged), 1) if merged else 0.0
+    
+    # Determine overall progress dial color
+    if overall >= 80:
+        overall_color = "success"
+        overall_bg = "#28a745"
+    elif overall >= 60:
+        overall_color = "warning" 
+        overall_bg = "#ffc107"
+    else:
+        overall_color = "danger"
+        overall_bg = "#dc3545"
+    
+    domain_totals = {k: {"sum": 0.0, "n": 0} for k in list(DOMAINS.keys()) + ["random"]}
+    for h in merged:
+        d = (h.get("domain") or "random")
+        domain_totals.setdefault(d, {"sum": 0.0, "n": 0})
+        domain_totals[d]["sum"] += float(h.get("score", 0.0))
+        domain_totals[d]["n"] += 1
+
+    def bar_class(pct):
+        if pct >= 80: return "bg-success"
+        if pct >= 60: return "bg-warning"
+        return "bg-danger"
+
+    def dial_color(pct):
+        if pct >= 80: return "success", "#28a745"
+        elif pct >= 60: return "warning", "#ffc107"
+        else: return "danger", "#dc3545"
+
+    rows_html = []
+    domain_dials = []
+    
+    for d_key, agg in domain_totals.items():
+        n = agg["n"]; avg = round(agg["sum"] / n, 1) if n else 0.0
+        name = DOMAINS.get(d_key, "All Domains (Random)") if d_key != "random" else "All Domains (Random)"
+        if n > 0:
+            rows_html.append(f'''
+            <tr>
+              <td>{name}</td>
+              <td>{n}</td>
+              <td>
+                <div class="progress">
+                  <div class="progress-bar {bar_class(avg)}" style="width: {min(100, avg)}%">
+                    <span class="text-dark fw-bold">{avg}%</span>
+                  </div>
+                </div>
+              </td>
+            </tr>''')
+            
+            # Create mini dial for each domain
+            color_class, color_bg = dial_color(avg)
+            domain_dials.append(f'''
+            <div class="col-md-4 mb-3">
+              <div class="card h-100">
+                <div class="card-body text-center">
+                  <h6 class="card-title">{name}</h6>
+                  <div class="mini-dial-container mb-2">
+                    <svg width="80" height="80" viewBox="0 0 80 80" class="mini-dial">
+                      <defs>
+                        <linearGradient id="dial{d_key.replace('-', '')}" x1="0%" y1="0%" x2="100%" y2="0%">
+                          <stop offset="0%" style="stop-color:{color_bg};stop-opacity:0.3" />
+                          <stop offset="100%" style="stop-color:{color_bg};stop-opacity:1" />
+                        </linearGradient>
+                      </defs>
+                      <path d="M 15 40 A 25 25 0 1 1 65 40" fill="none" stroke="#e9ecef" stroke-width="4" stroke-linecap="round"/>
+                      <path d="M 15 40 A 25 25 0 {1 if avg > 50 else 0} 1 {15 + (50 * avg / 100)} {40 - (25 * (1 - abs(((avg / 100) * 2) - 1)))}" 
+                            fill="none" stroke="url(#dial{d_key.replace('-', '')})" stroke-width="4" stroke-linecap="round"/>
+                      <text x="40" y="35" text-anchor="middle" class="mini-score text-{color_class}" font-size="14" font-weight="bold">{avg}%</text>
+                      <text x="40" y="48" text-anchor="middle" font-size="8" fill="#6c757d">{n} attempts</text>
+                    </svg>
+                  </div>
+                </div>
+              </div>
+            </div>''')
+    
+    rows = "\n".join(rows_html) or '<tr><td colspan="3" class="text-center text-muted">No data yet — take a quiz!</td></tr>'
+    domain_dials_html = "\n".join(domain_dials)
+
+    recent_activity = sorted(merged, key=lambda x: x.get('date', ''), reverse=True)[:10]
+    activity_html = []
+    for activity in recent_activity:
+        date_str = activity.get('date', '')
+        try:
+            date_obj = datetime.fromisoformat(date_str.replace('Z', '+00:00'))
+            formatted_date = date_obj.strftime('%m/%d %H:%M')
+        except:
+            formatted_date = date_str[:16] if date_str else 'Unknown'
+        domain_name = DOMAINS.get(activity.get('domain', 'random'), activity.get('domain', 'Random'))
+        score = activity.get('score', 0)
+        quiz_type = activity.get('type', 'practice').replace('_', ' ').title()
+        score_class = 'success' if score >= 80 else 'warning' if score >= 60 else 'danger'
+        activity_html.append(f'''
+        <div class="d-flex justify-content-between align-items-center border-bottom py-2">
+          <div>
+            <strong>{quiz_type}</strong> - {domain_name}<br>
+            <small class="text-muted">{formatted_date}</small>
+          </div>
+          <span class="badge bg-{score_class}">{score}%</span>
+        </div>''')
+    activity_section = '\n'.join(activity_html) if activity_html else '<p class="text-muted text-center">No recent activity</p>'
+
+    body = f"""
+    <div class="container mt-4">
+      <div class="row">
+        <div class="col-lg-8">
+          <div class="card mb-4">
+            <div class="card-body">
+              <h2><i class="bi bi-graph-up"></i> Progress Overview</h2>
+              <div class="row text-center mb-4">
+                <div class="col-md-4">
+                  <div class="card bg-light">
+                    <div class="card-body">
+                      <div class="main-dial-container mb-2">
+                        <svg width="120" height="120" viewBox="0 0 120 120" class="main-dial">
+                          <defs>
+                            <linearGradient id="mainDial" x1="0%" y1="0%" x2="100%" y2="0%">
+                              <stop offset="0%" style="stop-color:{overall_bg};stop-opacity:0.3" />
+                              <stop offset="100%" style="stop-color:{overall_bg};stop-opacity:1" />
+                            </linearGradient>
+                          </defs>
+                          <path d="M 20 60 A 40 40 0 1 1 100 60" fill="none" stroke="#e9ecef" stroke-width="6" stroke-linecap="round"/>
+                          <path d="M 20 60 A 40 40 0 {1 if overall > 50 else 0} 1 {20 + (80 * overall / 100)} {60 - (40 * (1 - abs(((overall / 100) * 2) - 1)))}" 
+                                fill="none" stroke="url(#mainDial)" stroke-width="6" stroke-linecap="round"/>
+                          <text x="60" y="55" text-anchor="middle" class="main-score text-{overall_color}" font-size="20" font-weight="bold">{overall}%</text>
+                          <text x="60" y="72" text-anchor="middle" font-size="10" fill="#6c757d">Overall Average</text>
+                        </svg>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                <div class="col-md-4"><div class="card bg-light"><div class="card-body"><h3 class="display-6 text-info">{len(merged)}</h3><p class="card-text">Total Attempts</p></div></div></div>
+                <div class="col-md-4"><div class="card bg-light"><div class="card-body"><h3 class="display-6 text-success">{len([h for h in merged if h.get('score', 0) >= 70])}</h3><p class="card-text">Passing Scores</p></div></div></div>
+              </div>
+              
+              <h4>Domain Performance</h4>
+              <div class="row mb-4">
+                {domain_dials_html}
+              </div>
+              
+              <h4>Detailed Performance by Domain</h4>
+              <div class="table-responsive">
+                <table class="table">
+                  <thead><tr><th>Domain</th><th>Attempts</th><th>Average</th></tr></thead>
+                  <tbody>{rows}</tbody>
+                </table>
+              </div>
+              <form method="POST" action="/progress/reset" class="mt-4">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <button type="submit" class="btn btn-outline-danger btn-sm" onclick="return confirm('Reset all session progress data?')">Reset Session Progress</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        <div class="col-lg-4">
+          <div class="card"><div class="card-body">
+            <h5>Recent Activity</h5>
+            <div class="recent-activity">{activity_section}</div>
+            <div class="mt-3"><a href="/quiz" class="btn btn-primary btn-sm">Take Another Quiz</a></div>
+          </div></div>
+        </div>
+      </div>
+    </div>
+    
+    <style>
+      .main-dial-container, .mini-dial-container {{
+        display: flex;
+        justify-content: center;
+        align-items: center;
+      }}
+      .main-dial, .mini-dial {{
+        transform: rotate(-90deg);
+      }}
+      .main-score, .mini-score {{
+        transform: rotate(90deg);
+      }}
+      .text-success {{ fill: #28a745; }}
+      .text-warning {{ fill: #ffc107; }}
+      .text-danger {{ fill: #dc3545; }}
+    </style>
+    """
+    return base_layout("Progress", body)
 
 # ------------------------ Study / Chat ------------------------
 @app.get("/study")
@@ -2601,3 +2855,4 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
