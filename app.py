@@ -1267,7 +1267,7 @@ def base_layout(title: str, body_html: str) -> str:
           <div class="col-md-8">
             <small class="text-muted">
               <strong>Notice:</strong> This platform is independent and not affiliated with ASIS International.
-              CPP® is a mark of ASIS International, Inc.
+              CPP&reg; is a mark of ASIS International, Inc.
             </small>
           </div>
           <div class="col-md-4 text-end">
@@ -2798,3 +2798,4 @@ def quiz_page():
     </script>
     """
     return base_layout("Practice Quiz", body)
+
