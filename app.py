@@ -1359,9 +1359,9 @@ def quiz_page():
 @login_required
 def api_build_quiz():
     data = request.get_json() or {}
-       domain = data.get("domain") or "random"
+    domain = data.get("domain") or "random"
     if domain not in DOMAINS and domain != "random":
-        domain = "random"
+    domain = "random"
     count = int(data.get("count") or 10)
     count = max(1, min(count, 100))
     return safe_json_response(build_quiz(count, domain))
@@ -2853,6 +2853,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
