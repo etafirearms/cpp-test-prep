@@ -635,19 +635,16 @@ def create_stripe_checkout_session(user_email, plan='premium'):
             logger.error("Stripe price ID not configured")
             return None
             
-        session = stripe.checkout.Session.create(
+                checkout_session = stripe.checkout.Session.create(
             payment_method_types=['card'],
-            line_items=[{
-                'price': STRIPE_PREMIUM_PRICE_ID,
-                'quantity': 1,
-            }],
+            line_items=[{'price': STRIPE_PREMIUM_PRICE_ID, 'quantity': 1}],
             mode='subscription',
             customer_email=user_email,
             success_url=request.url_root + 'billing/success',
             cancel_url=request.url_root + 'billing',
             metadata={'user_email': user_email, 'plan': plan}
         )
-        return session.url
+        return checkout_session.url
     except Exception as e:
         logger.error(f"Stripe session creation failed: {e}")
         return None
@@ -2853,6 +2850,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
