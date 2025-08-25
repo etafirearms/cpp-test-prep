@@ -1,6 +1,3 @@
-# Complete Enhanced app.py for CPP Exam Prep
-# Production-ready with authentication, subscriptions, and Stripe integration
-
 from flask import Flask, request, jsonify, session, redirect, url_for, Response, flash
 from werkzeug.security import generate_password_hash, check_password_hash
 from functools import wraps
@@ -2853,3 +2850,4 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
