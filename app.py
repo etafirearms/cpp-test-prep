@@ -10,6 +10,7 @@ import stripe
 import sqlite3
 from contextlib import contextmanager
 from werkzeug.middleware.proxy_fix import ProxyFix
+from flask_wtf.csrf import CSRFProtect
 
 # Add fcntl import for file locking (with fallback for Windows)
 try:
@@ -29,6 +30,9 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
+
+# CSRF Protection
+csrf = CSRFProtect(app)
 
 OPENAI_API_KEY       = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL    = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
@@ -139,11 +143,12 @@ def add_security_headers(resp):
 
 def _client_token():
     el = (session.get("email") or "").strip().lower()
-    xff = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    ip = xff or (request.remote_addr or "")
+    # Use request.remote_addr which is processed by ProxyFix
+    ip = request.remote_addr or "unknown"
     return f"{el}|{ip}"
 
 def _rate_limited(route: str, limit: int = 10, per_seconds: int = 60) -> bool:
+    global _RATE_BUCKETS  # Fix UnboundLocalError bug
     now = time.time()
     key = (route, _client_token())
     window = [t for t in _RATE_BUCKETS.get(key, []) if now - t < per_seconds]
@@ -200,19 +205,10 @@ def _get_or_create_user(email: str):
     u = _find_user(email)
     if u:
         return u
-    u = {
-        "id": str(uuid.uuid4()),
-        "name": session.get("name",""),
-        "email": email.strip().lower(),
-        "subscription": "inactive",
-        "password_hash": generate_password_hash("changeme123"),
-        "usage": {"monthly": {}, "last_active": ""},
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "history": []
-    }
-    USERS.append(u)
-    _save_json("users.json", USERS)
-    return u
+    # Don't create users automatically - this should only be called for existing users
+    # If you need auto-creation, require proper password setup
+    logger.warning(f"Attempted to auto-create user for {email} - this should not happen")
+    return None
 
 # ------------------------ Usage Management ------------------------
 # Plans: 'monthly' (auto-renew), 'sixmonth' (non-renewing), 'inactive' (no access)
@@ -275,8 +271,9 @@ def increment_usage(user_email, action_type, count=1):
 def _append_user_history(email: str, entry: dict, cap: int = 200):
     if not email:
         return
-    u = _get_or_create_user(email)
+    u = _find_user(email)  # Changed from _get_or_create_user
     if not u:
+        logger.warning(f"Cannot append history for non-existent user: {email}")
         return
     hist = u.setdefault("history", [])
     hist.append(entry)
@@ -485,6 +482,7 @@ def chat_with_ai(msgs: list[str]) -> str:
             timeout=30,
         )
         if r.status_code != 200:
+            logger.error(f"OpenAI API error {r.status_code}: {r.text[:200]}")
             return f"AI error ({r.status_code}). Please try again."
         data = r.json()
         return data["choices"][0]["message"]["content"]
@@ -629,6 +627,12 @@ def base_layout(title: str, body_html: str) -> str:
     </body>
     </html>"""
 
+# CSRF Token Helper
+@app.template_global()
+def csrf_token():
+    from flask_wtf.csrf import generate_csrf
+    return generate_csrf()
+
 # ------------------------ Stripe ------------------------
 def create_stripe_checkout_session(user_email, plan='monthly'):
     try:
@@ -712,6 +716,7 @@ def login_post():
         return redirect(url_for('login_page'))
     user = _find_user(email)
     if user and check_password_hash(user.get('password_hash', ''), password):
+        session.regenerate()  # Regenerate session ID to prevent fixation
         session['user_id'] = user['id']
         session['email'] = user['email']
         session['name'] = user.get('name', '')
@@ -823,6 +828,7 @@ def signup_post():
     USERS.append(user)
     _save_json("users.json", USERS)
 
+    session.regenerate()  # Regenerate session ID to prevent fixation
     session['user_id'] = user['id']
     session['email'] = user['email']
     session['name']  = user['name']
@@ -967,6 +973,13 @@ def study_page():
     <script>
       const suggestions = """ + sugg_json + """;
       let currentDomain = 'random';
+      
+      function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }
+      
       function updateSuggestions(domain) {
         const list = document.getElementById('suggestionList');
         const domainSuggestions = suggestions[domain] || suggestions['security-principles'];
@@ -997,7 +1010,7 @@ def study_page():
             chatHistory.lastElementChild.outerHTML = `<div class="mb-3 text-danger">${data.error}</div>`;
             return;
           }
-          chatHistory.lastElementChild.outerHTML = `<div class="mb-3"><strong>AI Tutor:</strong><br>${(data.response || '').replace(/\\n/g, '<br>')}</div>`;
+          chatHistory.lastElementChild.outerHTML = `<div class="mb-3"><strong>AI Tutor:</strong><br>${escapeHtml(data.response || '').replace(/\\n/g, '<br>')}</div>`;
           chatHistory.scrollTop = chatHistory.scrollHeight;
         })
         .catch(() => {
@@ -1296,7 +1309,7 @@ def submit_quiz_api():
         last_ts = float(session.get("last_submit_ts", 0.0))
         last_result = session.get("last_submit_result")
         now_ts = time.time()
-        if last_sig == sig and (now_ts - last_ts) < 10 and last_result:
+        if last_sig == sig and (now_ts - last_ts) < 30 and last_result:  # Increased to 30 seconds
             return safe_json_response(last_result)
 
         questions = data.get("questions", [])
@@ -1365,7 +1378,7 @@ def submit_quiz_api():
         session["quiz_history"] = hist[-50:]
         _append_user_history(user['email'], hist_entry)
 
-        logger.info(f"Quiz completed - User: {user['email']}, Score: {percentage}%, Domain: {domain}")
+        logger.info(f"Quiz completed - User ID: {user['id'][:8]}..., Score: {percentage}%, Domain: {domain}")
         return safe_json_response(result_payload)
     except Exception as e:
         logger.error(f"Quiz submission error: {str(e)}", exc_info=True)
@@ -2469,12 +2482,17 @@ def server_error(e):
 # Health check
 @app.get("/diag/openai")
 def diag_openai():
+    # Require admin authentication for diagnostics
+    if not is_admin():
+        return jsonify({"error": "Unauthorized"}), 401
     try:
         msg = chat_with_ai(["Say 'pong' if you can hear me."])
         ok = "pong" in msg.lower()
-        return jsonify({"success": ok, "preview": msg[:200]}), (200 if ok else 500)
+        # Don't return the actual response content to prevent info leakage
+        return jsonify({"success": ok, "timestamp": datetime.utcnow().isoformat()}), (200 if ok else 500)
     except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"OpenAI diagnostic error: {str(e)}")
+        return jsonify({"success": False, "error": "Service check failed"}), 500
 
 # Main entry point
 if __name__ == "__main__":
