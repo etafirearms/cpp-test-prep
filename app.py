@@ -508,6 +508,16 @@ def base_layout(title: str, body_html: str) -> str:
     user_email = session.get('email', '')
     is_logged_in = 'user_id' in session
 
+    # ADD THIS BLOCK HERE - Generate CSRF token
+    if HAS_CSRF:
+        try:
+            from flask_wtf.csrf import generate_csrf
+            csrf_token_value = generate_csrf()
+        except:
+            csrf_token_value = ""
+    else:
+        csrf_token_value = ""
+
     if is_logged_in:
         user = _find_user(user_email)
         subscription = user.get('subscription', 'inactive') if user else 'inactive'
@@ -525,7 +535,7 @@ def base_layout(title: str, body_html: str) -> str:
             <li><hr class="dropdown-divider"></li>
             <li>
               <form method="POST" action="/logout" class="d-inline">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="csrf_token" value="{csrf_token_value}"/>
                 <button type="submit" class="dropdown-item">Logout</button>
               </form>
             </li>
@@ -2540,3 +2550,4 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
