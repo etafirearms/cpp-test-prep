@@ -1135,27 +1135,36 @@ def quiz_page():
             <p>You got ${{data.correct}} out of ${{data.total}} correct</p>
             <div class="alert alert-info">${{insights}}</div>
           </div>
-          <h5>Detailed Results</h5>
-          ${{detailedResults.map((result) => `
-            <div class="card mb-2 ${{result.is_correct ? 'border-success' : 'border-danger'}}">
-              <div class="card-body">
-                <div class="d-flex justify-content-between">
-                  <strong>Question ${{result.index}}</strong>
-                  <span class="badge bg-${{result.is_correct ? 'success' : 'danger'}}">${{result.is_correct ? 'Correct' : 'Incorrect'}}</span>
-                </div>
-                <p class="mt-2">${{result.question}}</p>
-                <div class="row">
-                  <div class="col-md-6"><small><strong>Your answer:</strong> ${{result.user_letter || 'None'}} ${{result.user_text || ''}}</small></div>
-                  <div class="col-md-6"><small><strong>Correct answer:</strong> ${{result.correct_letter}} ${{result.correct_text}}</small></div>
-                </div>
-                ${{result.explanation ? `<div class="alert alert-light mt-2"><small>${{result.explanation}}</small></div>` : ''}}
-              </div>
-            </div>
-          `).join('')}}
-        `;
-        new bootstrap.Modal(document.getElementById('resultsModal')).show();
-      }}
-      
+          function showResults(data) {
+  const content = document.getElementById('resultsContent');
+  const insights = (data.performance_insights || []).join('<br>');
+  const detailedResults = data.detailed_results || [];
+  content.innerHTML = `
+    <div class="text-center mb-4">
+      <h3 class="display-4 text-${data.score >= 70 ? 'success' : 'warning'}">${data.score}%</h3>
+      <p>You got ${data.correct} out of ${data.total} correct</p>
+      <div class="alert alert-info">${insights}</div>
+    </div>
+    <h5>Detailed Results</h5>
+    ${detailedResults.map((result) => `
+      <div class="card mb-2 ${result.is_correct ? 'border-success' : 'border-danger'}">
+        <div class="card-body">
+          <div class="d-flex justify-content-between">
+            <strong>Question ${result.index}</strong>
+            <span class="badge bg-${result.is_correct ? 'success' : 'danger'}">${result.is_correct ? 'Correct' : 'Incorrect'}</span>
+          </div>
+          <p class="mt-2">${result.question}</p>
+          <div class="row">
+            <div class="col-md-6"><small><strong>Your answer:</strong> ${result.user_letter || 'None'} ${result.user_text || ''}</small></div>
+            <div class="col-md-6"><small><strong>Correct answer:</strong> ${result.correct_letter} ${result.correct_text}</small></div>
+          </div>
+          ${result.explanation ? `<div class="alert alert-light mt-2"><small>${result.explanation}</small></div>` : ''}
+        </div>
+      </div>
+    `).join('')}
+  `;
+  new bootstrap.Modal(document.getElementById('resultsModal')).show();
+}      
       // Rest of your JavaScript...
     </script>
       document.querySelectorAll('.domain-chip').forEach(chip => {{
@@ -2329,5 +2338,6 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
