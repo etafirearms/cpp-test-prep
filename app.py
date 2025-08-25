@@ -92,8 +92,8 @@ def init_database():
             subscription_expires_at TEXT,
             discount_code TEXT,
             stripe_customer_id TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            created_at TEXT DEFAULT (datetime('now', 'utc')),
+            updated_at TEXT DEFAULT (datetime('now', 'utc'))
         );
         """)
         conn.commit()
@@ -2387,6 +2387,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
