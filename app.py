@@ -2282,9 +2282,9 @@ def billing_page():
                 <div class="col-md-6">
                   <div class="card border-primary">
                     <div class="card-body text-center">
-                      <h4>Premium Plan</h4>
-                      <h2 class="text-primary">$29<small>/month</small></h2>
-                      <ul class="list-unstyled">
+                    <h4>Monthly Plan</h4>
+                    <h2 class="text-primary">$39.99<small>/month</small></h2>
+                    <ul class="list-unstyled">
                         <li>✓ Unlimited quizzes</li>
                         <li>✓ Full AI tutor access</li>
                         <li>✓ Advanced analytics</li>
@@ -2877,6 +2877,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
