@@ -213,7 +213,8 @@ def check_usage_limit(user, action_type):
     # Auto-expire sixmonth plan
     if subscription == 'sixmonth' and expires_at:
         try:
-            if datetime.fromisoformat(expires_at.replace('Z', '+00:00')) < datetime.utcnow():
+            expires_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
+            if expires_dt.replace(tzinfo=None) < datetime.utcnow():
                 user['subscription'] = 'inactive'
                 user.pop('subscription_expires_at', None)
                 _save_json("users.json", USERS)
@@ -2382,6 +2383,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
