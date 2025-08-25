@@ -10,7 +10,13 @@ import stripe
 import sqlite3
 from contextlib import contextmanager
 from werkzeug.middleware.proxy_fix import ProxyFix
-from flask_wtf.csrf import CSRFProtect
+
+# Optional CSRF import - only if available
+try:
+    from flask_wtf.csrf import CSRFProtect
+    HAS_CSRF = True
+except ImportError:
+    HAS_CSRF = False
 
 # Add fcntl import for file locking (with fallback for Windows)
 try:
@@ -31,8 +37,9 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
 
-# CSRF Protection
-csrf = CSRFProtect(app)
+# CSRF Protection - only if flask-wtf is available
+if HAS_CSRF:
+    csrf = CSRFProtect(app)
 
 OPENAI_API_KEY       = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL    = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
@@ -518,6 +525,7 @@ def base_layout(title: str, body_html: str) -> str:
             <li><hr class="dropdown-divider"></li>
             <li>
               <form method="POST" action="/logout" class="d-inline">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                 <button type="submit" class="dropdown-item">Logout</button>
               </form>
             </li>
@@ -611,6 +619,7 @@ def base_layout(title: str, body_html: str) -> str:
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      <meta name="csrf-token" content="{{ csrf_token() }}">
       <title>{html.escape(title)} - CPP Test Prep</title>
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
       <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
@@ -630,8 +639,10 @@ def base_layout(title: str, body_html: str) -> str:
 # CSRF Token Helper
 @app.template_global()
 def csrf_token():
-    from flask_wtf.csrf import generate_csrf
-    return generate_csrf()
+    if HAS_CSRF:
+        from flask_wtf.csrf import generate_csrf
+        return generate_csrf()
+    return ""
 
 # ------------------------ Stripe ------------------------
 def create_stripe_checkout_session(user_email, plan='monthly'):
@@ -687,6 +698,7 @@ def login_page():
             <div class="card-body">
               <h2 class="card-title text-center mb-4">Sign In</h2>
               <form method="POST" action="/login">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                 <div class="mb-3">
                   <label for="email" class="form-label">Email</label>
                   <input type="email" class="form-control" name="email" required>
@@ -716,7 +728,14 @@ def login_post():
         return redirect(url_for('login_page'))
     user = _find_user(email)
     if user and check_password_hash(user.get('password_hash', ''), password):
-        session.regenerate()  # Regenerate session ID to prevent fixation
+        # Regenerate session ID to prevent fixation (if method exists)
+        try:
+            session.regenerate()
+        except AttributeError:
+            # Fallback: clear and reset session
+            old_data = dict(session)
+            session.clear()
+            session.permanent = True
         session['user_id'] = user['id']
         session['email'] = user['email']
         session['name'] = user.get('name', '')
@@ -771,6 +790,7 @@ def signup_page():
             <div class="card-body">
               <h3 class="card-title">Your Details</h3>
               <form method="POST" action="/signup" id="signupForm">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                 <input type="hidden" name="plan" id="selectedPlan" value="monthly">
                 <div class="mb-3">
                   <label class="form-label">Full Name</label>
@@ -828,7 +848,13 @@ def signup_post():
     USERS.append(user)
     _save_json("users.json", USERS)
 
-    session.regenerate()  # Regenerate session ID to prevent fixation
+    # Regenerate session ID to prevent fixation (if method exists)
+    try:
+        session.regenerate()
+    except AttributeError:
+        # Fallback: clear and reset session
+        session.clear()
+        session.permanent = True
     session['user_id'] = user['id']
     session['email'] = user['email']
     session['name']  = user['name']
@@ -1001,7 +1027,10 @@ def study_page():
         input.value = '';
         fetch('/api/chat', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          },
           body: JSON.stringify({message: message, domain: currentDomain})
         })
         .then(r => r.json())
@@ -1169,7 +1198,10 @@ def quiz_page():
         const count = parseInt(document.getElementById('questionCount').value);
         fetch('/api/build-quiz', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          },
           body: JSON.stringify({domain: currentDomain, count})
         })
         .then(r => r.json())
@@ -1194,7 +1226,10 @@ def quiz_page():
         
         fetch('/api/submit-quiz', {
           method: 'POST',
-          headers: {'Content-Type': 'application/json'},
+          headers: {
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          },
           body: JSON.stringify({
             quiz_type: 'practice',
             domain: currentDomain,
@@ -1836,6 +1871,7 @@ def progress_page():
                 </table>
               </div>
               <form method="POST" action="/progress/reset" class="mt-4">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                 <button type="submit" class="btn btn-outline-danger btn-sm" onclick="return confirm('Reset all session progress data?')">Reset Session Progress</button>
               </form>
             </div>
@@ -2108,6 +2144,7 @@ def settings_page():
           <div class="card"><div class="card-body">
             <h2>Settings</h2>
             <form method="POST" action="/settings">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
               <div class="mb-3">
                 <label class="form-label">Email</label>
                 <input type="email" class="form-control" name="email" value="{html.escape(email or '')}" required>
@@ -2180,6 +2217,7 @@ def admin_login_page():
             {'<div class="alert alert-danger">Incorrect password</div>' if error=="badpass" else ''}
             {'<div class="alert alert-warning">ADMIN_PASSWORD is not set; admin login is disabled.</div>' if (not ADMIN_PASSWORD or error=="nopass") else ''}
             <form method="POST" action="/admin/login">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
               <input type="hidden" name="next" value="{request.args.get('next', '')}">
               <div class="mb-3">
                 <label class="form-label">Password</label>
@@ -2223,6 +2261,7 @@ def admin_home():
           <td>{q.get("correct","")}</td>
           <td>
             <form method="POST" action="/admin/questions/delete" class="d-inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
               <input type="hidden" name="id" value="{q.get('id', '')}">
               <button type="submit" class="btn btn-sm btn-danger" onclick="return confirm('Delete this question?')">Delete</button>
             </form>
@@ -2252,6 +2291,7 @@ def admin_home():
       <div class="d-flex justify-content-between align-items-center mb-4">
         <h2>Admin Dashboard</h2>
         <form method="POST" action="/admin/logout" class="d-inline">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
           <button type="submit" class="btn btn-outline-secondary">Log out</button>
         </form>
       </div>
@@ -2263,6 +2303,7 @@ def admin_home():
         <div class="card mb-4"><div class="card-body">
           <h4>Add Question</h4>
           <form method="POST" action="/admin/questions/add">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
             <div class="row">
               <div class="col-md-3">
                 <label>Domain</label>
@@ -2295,6 +2336,7 @@ def admin_home():
         <div class="card mb-4"><div class="card-body">
           <h4>Import Questions (CSV)</h4>
           <form method="POST" action="/admin/questions/import" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
             <div class="mb-3">
               <input type="file" name="csv" accept=".csv" class="form-control" required>
             </div>
