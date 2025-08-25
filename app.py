@@ -201,6 +201,7 @@ def _get_or_create_user(email: str):
         "name": session.get("name",""),
         "email": email.strip().lower(),
         "subscription": "free",
+        "password_hash": generate_password_hash("changeme123"),
         "usage": {"quizzes": 0, "questions": 0, "last_active": ""},
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "history": []
@@ -2850,4 +2851,5 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
