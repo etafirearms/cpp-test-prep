@@ -1165,7 +1165,55 @@ def quiz_page():
   `;
   new bootstrap.Modal(document.getElementById('resultsModal')).show();
 }      
-      // Rest of your JavaScript...
+   function buildQuiz() {
+  const count = parseInt(document.getElementById('questionCount').value);
+  fetch('/api/build-quiz', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({domain: currentDomain, count})
+  })
+  .then(r => r.json())
+  .then(data => {
+    currentQuiz = data;
+    userAnswers = {};
+    document.getElementById('quizInfo').textContent = `${count} questions • Domain: ${currentDomain === 'random' ? 'Random' : 'All Topics'}`;
+    renderQuiz();
+  })
+  .catch(err => {
+    console.error('Failed to build quiz:', err);
+    alert('Failed to load quiz. Please try again.');
+  });
+}
+
+function submitQuiz() {
+  const questions = currentQuiz.questions || [];
+  const unanswered = questions.length - Object.keys(userAnswers).length;
+  if (unanswered > 0 && !confirm(`You have ${unanswered} unanswered questions. Submit anyway?`)) {
+    return;
+  }
+    fetch('/api/submit-quiz', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      quiz_type: 'practice',
+      domain: currentDomain,
+      questions: questions,
+      answers: userAnswers
+    })
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      showResults(data);
+    } else {
+      alert(data.error || 'Submission failed. Please try again.');
+    }
+  })
+  .catch(err => {
+    console.error('Submit failed:', err);
+    alert('Failed to submit quiz. Please try again.');
+  });
+}
     </script>
       document.querySelectorAll('.domain-chip').forEach(chip => {{
         chip.addEventListener('click', function() {{
@@ -2338,6 +2386,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
