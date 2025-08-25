@@ -218,8 +218,17 @@ def check_usage_limit(user, action_type):
     if not user:
         return False, "Please log in to continue"
     
-    subscription = user.get('subscription', 'free')
-    usage = user.get('usage', {})
+    # Expiry check for 6-month purchases
+expires_at = user.get('subscription_expires_at')
+if subscription == 'premium' and expires_at:
+    try:
+        if datetime.fromisoformat(expires_at.replace('Z','+00:00')) < datetime.utcnow():
+            user['subscription'] = 'free'
+            user.pop('subscription_expires_at', None)
+            _save_json("users.json", USERS)
+            subscription = 'free'
+    except Exception:
+        pass
     
     today = datetime.utcnow()
     month_key = today.strftime('%Y-%m')
@@ -2853,6 +2862,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
