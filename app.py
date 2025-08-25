@@ -834,7 +834,7 @@ def signup_post():
     name = request.form.get('name', '').strip()
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
-    plan = request.form.get('plan', 'free')
+    plan = request.form.get('plan', '').strip()
     discount_code = request.form.get('discount_code', '').strip()
     
     if not name or not email or not password:
@@ -2880,6 +2880,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
