@@ -1015,19 +1015,18 @@ def study_page():
           chatHistory.lastElementChild.outerHTML = `<div class="mb-3 text-danger">Error: Please try again</div>`;
         }});
       }}
-      document.querySelectorAll('.domain-chip').forEach(chip => {{
-        chip.addEventListener('click', function() {{
-          document.querySelectorAll('.domain-chip').forEach(c => {{
+      document.querySelectorAll('.domain-chip').forEach(chip => {
+        chip.addEventListener('click', function() {
+          document.querySelectorAll('.domain-chip').forEach(c => {
             c.classList.remove('bg-success'); c.classList.remove('bg-primary'); c.classList.add('bg-primary');
-          }});
+          });
           this.classList.remove('bg-primary'); this.classList.add('bg-success');
           currentDomain = this.dataset.domain;
-          updateSuggestions(currentDomain);
-        }});
-      }});
-      document.getElementById('sendBtn').addEventListener('click', sendMessage);
-      document.getElementById('chatInput').addEventListener('keypress', function(e) {{ if (e.key === 'Enter') sendMessage(); }});
-      updateSuggestions('random');
+        });
+      });
+      document.getElementById('buildQuiz').addEventListener('click', buildQuiz);
+      document.getElementById('submitQuiz').addEventListener('click', submitQuiz);
+      renderQuiz();
     </script>
     """
     return base_layout("AI Tutor", body)
@@ -2376,6 +2375,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
