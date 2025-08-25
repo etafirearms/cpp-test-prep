@@ -638,21 +638,37 @@ def base_layout(title: str, body_html: str) -> str:
     </html>"""
 
 # --- Stripe Integration ---
-def create_stripe_checkout_session(user_email, plan='premium'):
+def create_stripe_checkout_session(user_email, plan='monthly'):
     try:
-        if not STRIPE_PREMIUM_PRICE_ID:
-            logger.error("Stripe price ID not configured")
-            return None
-            
+        if plan == 'monthly':
+            if not STRIPE_MONTHLY_PRICE_ID:
+                logger.error("Monthly price ID not configured")
+                return None
             checkout_session = stripe.checkout.Session.create(
-            payment_method_types=['card'],
-            line_items=[{'price': STRIPE_PREMIUM_PRICE_ID, 'quantity': 1}],
-            mode='subscription',
-            customer_email=user_email,
-            success_url=request.url_root + 'billing/success',
-            cancel_url=request.url_root + 'billing',
-            metadata={'user_email': user_email, 'plan': plan}
-        )
+                payment_method_types=['card'],
+                line_items=[{'price': STRIPE_MONTHLY_PRICE_ID, 'quantity': 1}],
+                mode='subscription',
+                customer_email=user_email,
+                success_url=request.url_root + 'billing/success',
+                cancel_url=request.url_root + 'billing',
+                metadata={'user_email': user_email, 'plan': 'monthly'}
+            )
+        elif plan == 'sixmonth':
+            if not STRIPE_SIXMONTH_PRICE_ID:
+                logger.error("Six-month price ID not configured")
+                return None
+            checkout_session = stripe.checkout.Session.create(
+                payment_method_types=['card'],
+                line_items=[{'price': STRIPE_SIXMONTH_PRICE_ID, 'quantity': 1}],
+                mode='payment',  # <-- one-time charge
+                customer_email=user_email,
+                success_url=request.url_root + 'billing/success',
+                cancel_url=request.url_root + 'billing',
+                metadata={'user_email': user_email, 'plan': 'sixmonth', 'duration_days': 180}
+            )
+        else:
+            return None
+
         return checkout_session.url
     except Exception as e:
         logger.error(f"Stripe session creation failed: {e}")
@@ -2862,6 +2878,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
