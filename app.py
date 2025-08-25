@@ -1281,7 +1281,7 @@ def base_layout(title: str, body_html: str) -> str:
     stage_banner = ("""
     <div class="alert alert-warning alert-dismissible fade show" role="alert">
       <div class="container text-center">
-        <strong>STAGING ENVIRONMENT</strong> — Not for production use.
+        <strong>STAGING ENVIRONMENT</strong> - Not for production use.
         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
       </div>
     </div>
@@ -2798,4 +2798,5 @@ def quiz_page():
     </script>
     """
     return base_layout("Practice Quiz", body)
+
 
