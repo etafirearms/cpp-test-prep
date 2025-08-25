@@ -1,704 +1,4 @@
-# ------------------------ Billing ------------------------
-@app.get("/billing")
-@login_required
-def billing_page():
-    user = _find_user(session.get('email', ''))
-    if not user:
-        return redirect(url_for('login_page'))
-    
-    subscription = user.get('subscription', 'inactive')
-    exp_html = ""
-    if subscription == 'sixmonth' and user.get('subscription_expires_at'):
-        try:
-            exp_date = datetime.fromisoformat(user['subscription_expires_at'].replace('Z', '+00:00'))
-            formatted_date = exp_date.strftime('%B %d, %Y')
-            exp_html = f'<p class="text-muted mb-0">Expires: {formatted_date}</p>'
-        except:
-            pass
-
-    if subscription == 'inactive':
-        plans_html = """
-        <div class="row mt-4 g-4">
-          <div class="col-md-6">
-            <div class="card border-primary h-100">
-              <div class="card-header bg-primary text-white text-center">
-                <h4 class="mb-0">Monthly Plan</h4>
-              </div>
-              <div class="card-body text-center p-4">
-                <div class="mb-3">
-                  <span class="display-4 fw-bold text-primary">$39.99</span>
-                  <span class="text-muted fs-5">/month</span>
-                </div>
-                <p class="text-muted mb-4">Perfect for focused study periods</p>
-                <ul class="list-unstyled mb-4">
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Unlimited practice quizzes</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>AI tutor with instant help</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Progress tracking & analytics</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Mobile-friendly access</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Cancel anytime</li>
-                </ul>
-                <a href="/billing/checkout/monthly" class="btn btn-primary btn-lg w-100">Choose Monthly</a>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="card border-success h-100 position-relative">
-              <div class="badge bg-warning text-dark position-absolute top-0 start-50 translate-middle px-3 py-2">
-                <i class="bi bi-star-fill"></i> Best Value
-              </div>
-              <div class="card-header bg-success text-white text-center">
-                <h4 class="mb-0">6-Month Plan</h4>
-              </div>
-              <div class="card-body text-center p-4">
-                <div class="mb-3">
-                  <span class="display-4 fw-bold text-success">$99.00</span>
-                  <span class="text-muted fs-6 d-block">One-time payment</span>
-                </div>
-                <p class="text-muted mb-4">Complete preparation program</p>
-                <ul class="list-unstyled mb-4">
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Everything in Monthly</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>6 full months of access</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>No auto-renewal</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Save $140+ vs monthly</li>
-                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Extended study time</li>
-                </ul>
-                <a href="/billing/checkout/sixmonth" class="btn btn-success btn-lg w-100">Choose 6-Month</a>
-              </div>
-            </div>
-          </div>
-        </div>
-        """
-    else:
-        status_icon = "check-circle-fill" if subscription in ['monthly', 'sixmonth'] else "exclamation-triangle-fill"
-        status_color = "success" if subscription in ['monthly', 'sixmonth'] else "warning"
-        
-        plans_html = f"""
-        <div class="alert alert-{status_color} border-0 mt-4">
-          <div class="d-flex align-items-center">
-            <i class="bi bi-{status_icon} text-{status_color} fs-4 me-3"></i>
-            <div>
-              <h5 class="alert-heading mb-1">{_plan_badge_text(subscription)} Plan Active</h5>
-              <p class="mb-0">You have unlimited access to all features. Thank you for your support!</p>
-              {exp_html}
-            </div>
-          </div>
-        </div>
-        """
-
-    body = f"""
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-lg-10">
-          <div class="card border-0 shadow-sm mb-4">
-            <div class="card-body p-4">
-              <div class="d-flex align-items-center mb-4">
-                <div class="me-3">
-                  <div class="rounded-circle bg-success bg-opacity-10 p-3">
-                    <i class="bi bi-credit-card text-success fs-2"></i>
-                  </div>
-                </div>
-                <div>
-                  <h2 class="mb-1">Billing & Subscription</h2>
-                  <p class="text-muted mb-0">Manage your plan and billing information</p>
-                </div>
-              </div>
-              
-              <div class="card border-0 bg-light mb-4">
-                <div class="card-body p-4">
-                  <h5 class="d-flex align-items-center">
-                    Current Plan: 
-                    <span class="badge plan-{subscription} ms-2">{_plan_badge_text(subscription)}</span>
-                  </h5>
-                  {plans_html}
-                </div>
-              </div>
-              
-              <div class="card border-0 bg-light">
-                <div class="card-body p-4">
-                  <h5 class="mb-3">Billing History</h5>
-                  <div class="text-center py-4">
-                    <i class="bi bi-receipt text-muted display-6 mb-3"></i>
-                    <p class="text-muted mb-3">Billing history and invoices will appear here</p>
-                    <small class="text-muted">Payment processing is handled securely by Stripe</small>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    return base_layout("Billing", body)
-
-@app.get('/billing/checkout/<plan>')
-@login_required
-def billing_checkout(plan):
-    user = _find_user(session.get('email', ''))
-    if not user:
-        return redirect(url_for('login_page'))
-    if plan not in ['monthly', 'sixmonth']:
-        return redirect(url_for('billing_page'))
-    
-    checkout_url = create_stripe_checkout_session(user['email'], plan)
-    if checkout_url:
-        return redirect(checkout_url)
-    else:
-        return redirect(url_for('billing_page'))
-
-@app.get('/billing/success')
-@login_required
-def billing_success():
-    session_id = request.args.get('session_id')
-    plan = request.args.get('plan', '')
-    
-    if not session_id:
-        return redirect(url_for('billing_page'))
-    
-    try:
-        cs = stripe.checkout.Session.retrieve(session_id)
-        if cs.customer_email != session.get('email'):
-            return redirect(url_for('billing_page'))
-    except Exception:
-        return redirect(url_for('billing_page'))
-    
-    plan_names = {'monthly': 'Monthly Plan', 'sixmonth': '6-Month Plan'}
-    title = plan_names.get(plan, 'Plan Activated')
-    
-    body = f"""
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-8 text-center">
-          <div class="card border-0 shadow-sm">
-            <div class="card-body p-5">
-              <div class="mb-4">
-                <i class="bi bi-check-circle-fill text-success display-1"></i>
-              </div>
-              <h1 class="h3 text-success mb-3">Payment Successful!</h1>
-              <h2 class="h4 mb-4">{html.escape(title)} Activated</h2>
-              <div class="alert alert-success border-0 mb-4">
-                <p class="mb-0">Your plan is now active with unlimited access to all features. Start learning immediately!</p>
-              </div>
-              <div class="d-grid gap-2 col-6 mx-auto">
-                <a href="/quiz" class="btn btn-primary btn-lg">
-                  <i class="bi bi-rocket-takeoff me-2"></i>Start Learning
-                </a>
-                <a href="/progress" class="btn btn-outline-primary">
-                  <i class="bi bi-graph-up me-2"></i>View Progress
-                </a>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    return base_layout(title, body)
-
-@app.post('/stripe/webhook')
-def stripe_webhook():
-    payload = request.get_data()
-    sig_header = request.headers.get('Stripe-Signature')
-    
-    if not STRIPE_WEBHOOK_SECRET:
-        return '', 400
-        
-    try:
-        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except ValueError:
-        logger.error("Invalid Stripe webhook payload")
-        return '', 400
-    except stripe.error.SignatureVerificationError:
-        logger.error("Invalid Stripe webhook signature")
-        return '', 400
-
-    if event['type'] == 'checkout.session.completed':
-        session_obj = event['data']['object']
-        customer_email = session_obj.get('customer_email')
-        mode = session_obj.get('mode')
-        
-        if customer_email:
-            user = _find_user(customer_email)
-            if user:
-                if mode == 'subscription':
-                    user['subscription'] = 'monthly'
-                    user['stripe_customer_id'] = session_obj.get('customer')
-                    user.pop('subscription_expires_at', None)
-                else:
-                    duration_days = 180
-                    user['subscription'] = 'sixmonth'
-                    user['subscription_expires_at'] = (datetime.utcnow() + timedelta(days=duration_days)).isoformat(timespec="seconds") + "Z"
-                
-                _save_json("users.json", USERS)
-                logger.info(f"Updated subscription for {customer_email} to {user['subscription']}")
-
-    elif event['type'] == 'customer.subscription.deleted':
-        subscription_obj = event['data']['object']
-        customer_id = subscription_obj['customer']
-        
-        for user in USERS:
-            if user.get('stripe_customer_id') == customer_id:
-                user['subscription'] = 'inactive'
-                _save_json("users.json", USERS)
-                logger.info(f"Downgraded subscription for {user['email']} to inactive")
-                break
-                
-    return '', 200
-
-# ------------------------ Settings ------------------------
-@app.get("/settings")
-@login_required
-def settings_page():
-    name = session.get("name", "")
-    email = session.get("email", "")
-    tz = session.get("timezone", "UTC")
-    
-    body = f"""
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-8">
-          <div class="card border-0 shadow-sm">
-            <div class="card-body p-4">
-              <div class="d-flex align-items-center mb-4">
-                <div class="me-3">
-                  <div class="rounded-circle bg-secondary bg-opacity-10 p-3">
-                    <i class="bi bi-gear text-secondary fs-2"></i>
-                  </div>
-                </div>
-                <div>
-                  <h2 class="mb-1">Account Settings</h2>
-                  <p class="text-muted mb-0">Manage your profile and preferences</p>
-                </div>
-              </div>
-              
-              <form method="POST" action="/settings">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <div class="row g-4">
-                  <div class="col-md-6">
-                    <label class="form-label fw-semibold">Email Address</label>
-                    <input type="email" class="form-control" name="email" value="{html.escape(email or '')}" required>
-                    <div class="form-text">Used for account access and notifications</div>
-                  </div>
-                  <div class="col-md-6">
-                    <label class="form-label fw-semibold">Full Name</label>
-                    <input type="text" class="form-control" name="name" value="{html.escape(name or '')}" required>
-                    <div class="form-text">Displayed in your dashboard</div>
-                  </div>
-                </div>
-                <div class="row g-4 mt-2">
-                  <div class="col-md-6">
-                    <label class="form-label fw-semibold">Timezone</label>
-                    <select class="form-select" name="timezone">
-                      <option value="UTC" {'selected' if tz == 'UTC' else ''}>UTC (Coordinated Universal Time)</option>
-                      <option value="US/Eastern" {'selected' if tz == 'US/Eastern' else ''}>Eastern Time (US & Canada)</option>
-                      <option value="US/Central" {'selected' if tz == 'US/Central' else ''}>Central Time (US & Canada)</option>
-                      <option value="US/Mountain" {'selected' if tz == 'US/Mountain' else ''}>Mountain Time (US & Canada)</option>
-                      <option value="US/Pacific" {'selected' if tz == 'US/Pacific' else ''}>Pacific Time (US & Canada)</option>
-                    </select>
-                    <div class="form-text">Used for activity timestamps</div>
-                  </div>
-                </div>
-                <div class="d-flex justify-content-between align-items-center mt-4 pt-3 border-top">
-                  <a href="/" class="btn btn-outline-secondary">
-                    <i class="bi bi-arrow-left me-1"></i>Back to Dashboard
-                  </a>
-                  <button type="submit" class="btn btn-primary">
-                    <i class="bi bi-check-circle me-1"></i>Save Changes
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    return base_layout("Settings", body)
-
-@app.post("/settings")
-@login_required
-def settings_save():
-    name = (request.form.get("name") or "").strip()
-    email = (request.form.get("email") or "").strip().lower()
-    tz = (request.form.get("timezone") or "").strip() or "UTC"
-    
-    if not name or not email:
-        return redirect(url_for('settings_page'))
-
-    # Prevent email collision
-    if email != session.get('email','') and _find_user(email):
-        return redirect(url_for('settings_page'))
-
-    user = _find_user(session.get('email', ''))
-    if user:
-        user['name'] = name
-        user['email'] = email
-        _save_json("users.json", USERS)
-
-    session["name"] = name
-    session["email"] = email
-    session["timezone"] = tz
-    return redirect(url_for('settings_page'))
-
-# ------------------------ Admin ------------------------
-@app.post("/admin/login")
-def admin_login():
-    if _rate_limited("admin-login", limit=5, per_seconds=300):
-        return redirect(url_for("admin_login_page", error="ratelimited"))
-    
-    pwd = (request.form.get("password") or "").strip()
-    nxt = request.form.get("next") or url_for("admin_home")
-    
-    if ADMIN_PASSWORD and pwd == ADMIN_PASSWORD:
-        session["admin_ok"] = True
-        return redirect(nxt)
-    
-    return redirect(url_for("admin_login_page", error=("nopass" if not ADMIN_PASSWORD else "badpass")))
-
-@app.get("/admin/login")
-def admin_login_page():
-    if is_admin():
-        return redirect(url_for("admin_home"))
-    
-    error = request.args.get("error")
-    body = f"""
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-6">
-          <div class="card border-0 shadow-sm">
-            <div class="card-body p-4">
-              <div class="text-center mb-4">
-                <i class="bi bi-shield-lock text-warning display-4 mb-3"></i>
-                <h2>Admin Access</h2>
-                <p class="text-muted">Administrative portal login</p>
-              </div>
-              
-              {'<div class="alert alert-danger border-0">Incorrect password. Access denied.</div>' if error=="badpass" else ''}
-              {'<div class="alert alert-danger border-0">Too many attempts. Please wait 5 minutes.</div>' if error=="ratelimited" else ''}
-              {'<div class="alert alert-warning border-0">Admin access is not configured.</div>' if (not ADMIN_PASSWORD or error=="nopass") else ''}
-              
-              <form method="POST" action="/admin/login">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <input type="hidden" name="next" value="{request.args.get('next', '')}">
-                <div class="mb-3">
-                  <label class="form-label fw-semibold">Password</label>
-                  <input type="password" class="form-control" name="password" required placeholder="Enter admin password">
-                </div>
-                <button type="submit" class="btn btn-warning w-100" {'disabled' if not ADMIN_PASSWORD else ''}>
-                  <i class="bi bi-unlock me-1"></i>Access Admin Panel
-                </button>
-              </form>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    return base_layout("Admin Login", body)
-
-@app.post("/admin/logout")
-def admin_logout():
-    session.pop("admin_ok", None)
-    return redirect(url_for("admin_login_page"))
-
-@app.get("/admin")
-def admin_home():
-    if not is_admin():
-        return redirect(url_for("admin_login_page", next=request.path))
-    
-    tab = request.args.get("tab", "overview")
-
-    # Overview stats
-    total_users = len(USERS)
-    active_users = len([u for u in USERS if u.get('subscription') != 'inactive'])
-    total_questions = len(ALL_QUESTIONS)
-
-    body = f"""
-    <div class="container-fluid">
-      <div class="d-flex justify-content-between align-items-center mb-4">
-        <div class="d-flex align-items-center">
-          <i class="bi bi-shield-check text-warning fs-1 me-3"></i>
-          <div>
-            <h1 class="mb-1">Admin Dashboard</h1>
-            <p class="text-muted mb-0">System management and oversight</p>
-          </div>
-        </div>
-        <form method="POST" action="/admin/logout" class="d-inline">
-          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-          <button type="submit" class="btn btn-outline-danger">
-            <i class="bi bi-box-arrow-right me-1"></i>Logout
-          </button>
-        </form>
-      </div>
-      
-      <ul class="nav nav-tabs mb-4">
-        <li class="nav-item">
-          <a class="nav-link {'active' if tab == 'overview' else ''}" href="?tab=overview">
-            <i class="bi bi-speedometer2 me-1"></i>Overview
-          </a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link {'active' if tab == 'users' else ''}" href="?tab=users">
-            <i class="bi bi-people me-1"></i>Users ({total_users})
-          </a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link {'active' if tab == 'questions' else ''}" href="?tab=questions">
-            <i class="bi bi-question-circle me-1"></i>Questions ({total_questions})
-          </a>
-        </li>
-      </ul>
-      
-      {'<div>' if tab == 'overview' else '<div style="display:none;">'}
-        <div class="row g-4 mb-4">
-          <div class="col-md-3">
-            <div class="card border-0 shadow-sm">
-              <div class="card-body text-center p-4">
-                <i class="bi bi-people text-primary fs-1 mb-2"></i>
-                <h3 class="text-primary">{total_users}</h3>
-                <p class="text-muted mb-0">Total Users</p>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-3">
-            <div class="card border-0 shadow-sm">
-              <div class="card-body text-center p-4">
-                <i class="bi bi-person-check text-success fs-1 mb-2"></i>
-                <h3 class="text-success">{active_users}</h3>
-                <p class="text-muted mb-0">Active Subscriptions</p>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-3">
-            <div class="card border-0 shadow-sm">
-              <div class="card-body text-center p-4">
-                <i class="bi bi-question-circle text-info fs-1 mb-2"></i>
-                <h3 class="text-info">{total_questions}</h3>
-                <p class="text-muted mb-0">Questions Available</p>
-              </div>
-            </div>
-          </div>
-          <div class="col-md-3">
-            <div class="card border-0 shadow-sm">
-              <div class="card-body text-center p-4">
-                <i class="bi bi-graph-up text-warning fs-1 mb-2"></i>
-                <h3 class="text-warning">{len(DOMAINS)}</h3>
-                <p class="text-muted mb-0">Study Domains</p>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      {'<div>' if tab == 'users' else '<div style="display:none;">'}
-        <div class="card border-0 shadow-sm">
-          <div class="card-header border-0 bg-light">
-            <h4 class="mb-0">User Management</h4>
-          </div>
-          <div class="card-body">
-            <div class="table-responsive">
-              <table class="table">
-                <thead class="table-light">
-                  <tr>
-                    <th>User</th>
-                    <th>Plan</th>
-                    <th>Usage This Month</th>
-                    <th>Last Active</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {''.join([f'''
-                  <tr>
-                    <td>
-                      <div>
-                        <div class="fw-semibold">{html.escape(u.get("name","Unknown"))}</div>
-                        <small class="text-muted">{html.escape(u.get("email",""))}</small>
-                      </div>
-                    </td>
-                    <td>
-                      <span class="badge plan-{u.get("subscription","inactive")}">
-                        {_plan_badge_text(u.get("subscription","inactive"))}
-                      </span>
-                    </td>
-                    <td>
-                      <small>
-                        Q: {u.get("usage", {}).get("monthly", {}).get(datetime.utcnow().strftime('%Y-%m'), {}).get("quizzes", 0)} • 
-                        A: {u.get("usage", {}).get("monthly", {}).get(datetime.utcnow().strftime('%Y-%m'), {}).get("questions", 0)}
-                      </small>
-                    </td>
-                    <td>
-                      <small class="text-muted">{u.get("usage", {}).get("last_active", "Never")[:16]}</small>
-                    </td>
-                  </tr>
-                  ''' for u in USERS]) or '<tr><td colspan="4" class="text-center text-muted py-4">No users registered</td></tr>'}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-      
-      {'<div>' if tab == 'questions' else '<div style="display:none;">'}
-        <div class="row g-4">
-          <div class="col-12">
-            <div class="card border-0 shadow-sm mb-4">
-              <div class="card-header border-0 bg-light">
-                <h4 class="mb-0">Add New Question</h4>
-              </div>
-              <div class="card-body">
-                <form method="POST" action="/admin/questions/add">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                  <div class="row g-3">
-                    <div class="col-md-3">
-                      <label class="form-label fw-semibold">Domain</label>
-                      <select name="domain" class="form-select">
-                        {''.join([f'<option value="{k}">{v}</option>' for k, v in DOMAINS.items()])}
-                      </select>
-                    </div>
-                    <div class="col-md-9">
-                      <label class="form-label fw-semibold">Question</label>
-                      <input type="text" name="question" class="form-control" required placeholder="Enter question text">
-                    </div>
-                  </div>
-                  <div class="row g-3 mt-2">
-                    <div class="col-md-3">
-                      <label class="form-label fw-semibold">Option A</label>
-                      <input type="text" name="opt1" class="form-control" required>
-                    </div>
-                    <div class="col-md-3">
-                      <label class="form-label fw-semibold">Option B</label>
-                      <input type="text" name="opt2" class="form-control" required>
-                    </div>
-                    <div class="col-md-3">
-                      <label class="form-label fw-semibold">Option C</label>
-                      <input type="text" name="opt3" class="form-control" required>
-                    </div>
-                    <div class="col-md-3">
-                      <label class="form-label fw-semibold">Option D</label>
-                      <input type="text" name="opt4" class="form-control" required>
-                    </div>
-                  </div>
-                  <div class="row g-3 mt-2">
-                    <div class="col-md-2">
-                      <label class="form-label fw-semibold">Correct Answer</label>
-                      <select name="answer" class="form-select" required>
-                        <option value="1">A</option>
-                        <option value="2">B</option>
-                        <option value="3">C</option>
-                        <option value="4">D</option>
-                      </select>
-                    </div>
-                    <div class="col-md-10">
-                      <label class="form-label fw-semibold">Explanation</label>
-                      <input type="text" name="explanation" class="form-control" placeholder="Why is this answer correct?">
-                    </div>
-                  </div>
-                  <button type="submit" class="btn btn-primary mt-3">
-                    <i class="bi bi-plus-circle me-1"></i>Add Question
-                  </button>
-                </form>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-    """
-    return base_layout("Admin Dashboard", body)
-
-# Admin CRUD operations  
-@app.post("/admin/questions/add")
-def admin_questions_add():
-    if not is_admin():
-        return redirect("/admin")
-    
-    form = request.form
-    dom = (form.get("domain") or "security-principles").strip()
-
-    num_to_letter = {1:"A", 2:"B", 3:"C", 4:"D"}
-    try:
-        ans_num = int(form.get("answer") or 1)
-        correct_letter = num_to_letter.get(ans_num, "A")
-    except Exception:
-        correct_letter = "A"
-
-    q = {
-        "id": str(uuid.uuid4()),
-        "domain": dom,
-        "question": (form.get("question") or "").strip(),
-        "options": {
-            "A": (form.get("opt1") or "").strip(),
-            "B": (form.get("opt2") or "").strip(), 
-            "C": (form.get("opt3") or "").strip(),
-            "D": (form.get("opt4") or "").strip(),
-        },
-        "correct": correct_letter,
-        "explanation": (form.get("explanation") or "").strip(),
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    }
-    
-    if q["question"] and all(q["options"].get(L) for L in ("A","B","C","D")):
-        QUESTIONS.append(q)
-        _save_json("questions.json", QUESTIONS)
-        global ALL_QUESTIONS
-        ALL_QUESTIONS = _build_all_questions()
-
-    return redirect("/admin?tab=questions")
-
-# Error handlers
-@app.errorhandler(403)
-def forbidden(e):
-    return base_layout("Access Denied", """
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-6 text-center">
-          <div class="mb-4">
-            <i class="bi bi-shield-x text-danger display-1"></i>
-          </div>
-          <h1 class="display-4 text-muted mb-3">403</h1>
-          <h3 class="mb-3">Access Denied</h3>
-          <p class="text-muted mb-4">You don't have permission to access this resource.</p>
-          <a href="/" class="btn btn-primary">
-            <i class="bi bi-house me-1"></i>Go Home
-          </a>
-        </div>
-      </div>
-    </div>
-    """), 403
-
-@app.errorhandler(404)
-def not_found(e):
-    return base_layout("Not Found", """
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-6 text-center">
-          <div class="mb-4">
-            <i class="bi bi-compass text-warning display-1"></i>
-          </div>
-          <h1 class="display-4 text-muted mb-3">404</h1>
-          <h3 class="mb-3">Page Not Found</h3>
-          <p class="text-muted mb-4">The page you're looking for doesn't exist or has been moved.</p>
-          <a href="/" class="btn btn-primary">
-            <i class="bi bi-house me-1"></i>Go Home
-          </a>
-        </div>
-      </div>
-    </div>
-    """), 404
-
-@app.errorhandler(500)
-def server_error(e):
-    logger.error(f"Server error: {str(e)}", exc_info=True)
-    return base_layout("Server Error", """
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-6 text-center">
-          <div class="mb-4">
-            <i class="bi bi-exclamation-triangle text-danger display-1"></i>
-          </div>
-          <h1 class="display-4 text-muted mb-3">500</h1>
-          <h3 class="mb-3">Something Went Wrong</h3>
-          <p class="text-muted mb-# app.py
+# app.py
 # NOTE: Ensure "stripe" is listed in requirements.txt to avoid ModuleNotFoundError.
 
 from flask import Flask, request, jsonify, session, redirect, url_for, Response
@@ -1790,9 +1090,9 @@ def signup_page():
         });
         
         if (plan === 'monthly') {
-          document.querySelector('[onclick="selectPlan(\'monthly\')"]').closest('.card').classList.add('border-primary', 'shadow-lg');
+          document.querySelector('[onclick="selectPlan(\\'monthly\\')"]').closest('.card').classList.add('border-primary', 'shadow-lg');
         } else {
-          document.querySelector('[onclick="selectPlan(\'sixmonth\')"]').closest('.card').classList.add('border-success', 'shadow-lg');
+          document.querySelector('[onclick="selectPlan(\\'sixmonth\\')"]').closest('.card').classList.add('border-success', 'shadow-lg');
         }
         
         // Update submit button text
@@ -2457,7 +1757,138 @@ def api_chat():
     increment_usage(user['email'], 'tutor_msgs')
     return safe_json_response({"response": reply, "timestamp": datetime.utcnow().isoformat()})
 
-# ------------------------ Quiz ------------------------
+# ------------------------ Quiz API ------------------------
+@app.post("/api/build-quiz")
+@login_required
+def api_build_quiz():
+    user = _find_user(session.get('email', ''))
+    can_quiz, error_msg = check_usage_limit(user, 'quizzes')
+    if not can_quiz:
+        return safe_json_response({"error": error_msg, "upgrade_required": True}, 403)
+
+    data = request.get_json() or {}
+    domain = data.get("domain", "random")
+    count = min(max(int(data.get("count", 10)), 1), 50)
+    
+    quiz = build_quiz(count, domain)
+    return safe_json_response(quiz)
+
+@app.post("/api/submit-quiz")
+@login_required
+def api_submit_quiz():
+    data = request.get_json() or {}
+    validation_errors = validate_quiz_submission(data)
+    
+    if validation_errors:
+        return safe_json_response({"success": False, "error": validation_errors[0]}, 400)
+    
+    questions = data['questions']
+    answers = data.get('answers', {})
+    quiz_type = data.get('quiz_type', 'practice')
+    domain = data.get('domain', 'random')
+    
+    # Calculate results
+    correct = 0
+    total = len(questions)
+    detailed_results = []
+    
+    for i, q in enumerate(questions):
+        user_answer = answers.get(str(i))
+        correct_answer = q['correct']
+        is_correct = user_answer == correct_answer
+        
+        if is_correct:
+            correct += 1
+        
+        detailed_results.append({
+            "index": i + 1,
+            "question": q['question'],
+            "is_correct": is_correct,
+            "user_letter": user_answer,
+            "user_text": q['options'].get(user_answer, 'No answer selected'),
+            "correct_letter": correct_answer,
+            "correct_text": q['options'][correct_answer],
+            "explanation": q.get('explanation', ''),
+            "domain": q.get('domain', 'unknown')
+        })
+    
+    score = round((correct / total) * 100, 1) if total > 0 else 0
+    
+    # Generate insights
+    insights = []
+    if score >= 90:
+        insights.append("Outstanding performance! You're demonstrating mastery across topics.")
+    elif score >= 80:
+        insights.append("Strong understanding! Focus on the missed questions for exam readiness.")
+    elif score >= 70:
+        insights.append("Good foundation. Review weak areas and practice similar questions.")
+    elif score >= 60:
+        insights.append("Making progress. Identify patterns in missed questions and study those topics.")
+    else:
+        insights.append("Focus on fundamentals. Review core concepts before attempting more questions.")
+    
+    # Domain-specific insights
+    domain_results = {}
+    for result in detailed_results:
+        domain_key = result.get('domain', 'unknown')
+        if domain_key not in domain_results:
+            domain_results[domain_key] = {'correct': 0, 'total': 0}
+        domain_results[domain_key]['total'] += 1
+        if result['is_correct']:
+            domain_results[domain_key]['correct'] += 1
+    
+    weak_domains = []
+    for domain_key, stats in domain_results.items():
+        if stats['total'] >= 2:
+            domain_score = (stats['correct'] / stats['total']) * 100
+            if domain_score < 70:
+                domain_name = DOMAINS.get(domain_key, domain_key.replace('-', ' ').title())
+                weak_domains.append(domain_name)
+    
+    if weak_domains:
+        insights.append(f"Consider additional study in: {', '.join(weak_domains)}")
+    
+    # Save to history
+    user_email = session.get('email', '')
+    if user_email:
+        increment_usage(user_email, 'questions', total)
+        increment_usage(user_email, 'quizzes', 1)
+        
+        # Update session history for progress tracking
+        hist = session.get("quiz_history", [])
+        hist.append({
+            "score": score,
+            "date": datetime.utcnow().isoformat(),
+            "questions": total,
+            "domain": domain,
+            "type": quiz_type
+        })
+        # Keep last 50 attempts
+        if len(hist) > 50:
+            hist = hist[-50:]
+        session["quiz_history"] = hist
+        
+        # Save to user file
+        _append_user_history(user_email, {
+            "type": "quiz_completed",
+            "score": score,
+            "questions": total,
+            "domain": domain,
+            "quiz_type": quiz_type,
+            "timestamp": datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        })
+    
+    return safe_json_response({
+        "success": True,
+        "score": score,
+        "correct": correct,
+        "total": total,
+        "performance_insights": insights,
+        "detailed_results": detailed_results,
+        "domain_breakdown": domain_results
+    })
+
+# ------------------------ Quiz Route ------------------------
 @app.get("/quiz")
 @login_required
 def quiz_page():
@@ -2799,4 +2230,214 @@ def quiz_page():
     """
     return base_layout("Practice Quiz", body)
 
+# ------------------------ Missing Essential Routes ------------------------
 
+@app.get("/progress")
+@login_required
+def progress_page():
+    hist = session.get("quiz_history", [])
+    
+    body = """
+    <div class="container">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <h2 class="mb-4">Your Progress</h2>
+          <p class="text-muted">Track your learning journey and identify areas for improvement.</p>
+          
+          <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            Complete quizzes to see detailed progress analytics here.
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Progress Dashboard", body)
+
+@app.get("/flashcards")
+@login_required
+def flashcards_page():
+    body = """
+    <div class="container">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <h2 class="mb-4">Flashcards</h2>
+          <p class="text-muted">Quick review sessions with key CPP concepts.</p>
+          
+          <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            Flashcard feature coming soon! Focus on quizzes and AI tutor for now.
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Flashcards", body)
+
+@app.get("/mock-exam")
+@login_required  
+def mock_exam_page():
+    body = """
+    <div class="container">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <h2 class="mb-4">Mock Exam</h2>
+          <p class="text-muted">Simulate real CPP exam conditions with timed practice sessions.</p>
+          
+          <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            Mock exam feature coming soon! Use practice quizzes to prepare.
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Mock Exam", body)
+
+@app.get("/usage")
+@login_required
+def usage_page():
+    body = """
+    <div class="container">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <h2 class="mb-4">Usage Dashboard</h2>
+          <p class="text-muted">Monitor your monthly usage and subscription status.</p>
+          
+          <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            Usage tracking details will appear here.
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Usage Dashboard", body)
+
+# ------------------------ Billing Routes (Placeholder) ------------------------
+
+@app.get("/billing")
+@login_required
+def billing_page():
+    body = """
+    <div class="container">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <h2 class="mb-4">Billing & Subscription</h2>
+          <p class="text-muted">Manage your subscription and billing information.</p>
+          
+          <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            Billing integration coming soon. Contact support for subscription management.
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Billing", body)
+
+@app.get("/billing/checkout/<plan>")
+@login_required
+def billing_checkout(plan):
+    return redirect(url_for('billing_page'))
+
+@app.get("/billing/success")
+@login_required  
+def billing_success():
+    return redirect(url_for('home'))
+
+@app.post('/stripe/webhook')
+def stripe_webhook():
+    return '', 200
+
+@app.get("/settings")
+@login_required
+def settings_page():
+    body = """
+    <div class="container">
+      <div class="card border-0 shadow-sm">
+        <div class="card-body p-4">
+          <h2 class="mb-4">Account Settings</h2>
+          <p class="text-muted">Manage your profile and preferences.</p>
+          
+          <div class="alert alert-info">
+            <i class="bi bi-info-circle me-2"></i>
+            Settings interface coming soon.
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Settings", body)
+
+@app.post("/settings")
+@login_required
+def settings_save():
+    return redirect(url_for('settings_page'))
+
+# ------------------------ Error Handlers ------------------------
+@app.errorhandler(403)
+def forbidden(e):
+    return base_layout("Access Denied", """
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+          <div class="mb-4">
+            <i class="bi bi-shield-x text-danger display-1"></i>
+          </div>
+          <h1 class="display-4 text-muted mb-3">403</h1>
+          <h3 class="mb-3">Access Denied</h3>
+          <p class="text-muted mb-4">You don't have permission to access this resource.</p>
+          <a href="/" class="btn btn-primary">
+            <i class="bi bi-house me-1"></i>Go Home
+          </a>
+        </div>
+      </div>
+    </div>
+    """), 403
+
+@app.errorhandler(404)
+def not_found(e):
+    return base_layout("Not Found", """
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+          <div class="mb-4">
+            <i class="bi bi-compass text-warning display-1"></i>
+          </div>
+          <h1 class="display-4 text-muted mb-3">404</h1>
+          <h3 class="mb-3">Page Not Found</h3>
+          <p class="text-muted mb-4">The page you're looking for doesn't exist or has been moved.</p>
+          <a href="/" class="btn btn-primary">
+            <i class="bi bi-house me-1"></i>Go Home
+          </a>
+        </div>
+      </div>
+    </div>
+    """), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    logger.error(f"Server error: {str(e)}", exc_info=True)
+    return base_layout("Server Error", """
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-6 text-center">
+          <div class="mb-4">
+            <i class="bi bi-exclamation-triangle text-danger display-1"></i>
+          </div>
+          <h1 class="display-4 text-muted mb-3">500</h1>
+          <h3 class="mb-3">Something Went Wrong</h3>
+          <p class="text-muted mb-4">We're working to fix this issue. Please try again later.</p>
+          <a href="/" class="btn btn-primary">
+            <i class="bi bi-house me-1"></i>Go Home
+          </a>
+        </div>
+      </div>
+    </div>
+    """), 500
+
+# ------------------------ Main Application Entry Point ------------------------
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=port, debug=DEBUG)
