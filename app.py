@@ -1,4 +1,3 @@
-@@ -1,2542 +1,2553 @@
 # app.py
 # NOTE: Ensure "stripe" is listed in requirements.txt to avoid ModuleNotFoundError.
 
@@ -2552,3 +2551,4 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
