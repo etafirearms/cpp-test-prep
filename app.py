@@ -164,14 +164,14 @@ def _rate_limited(route: str, limit: int = 10, per_seconds: int = 60) -> bool:
         return True
     window.append(now)
     _RATE_BUCKETS[key] = window
-
+    
     # Cleanup old entries periodically to prevent memory leak
     if len(_RATE_BUCKETS) > 1000:
         cutoff = now - (per_seconds * 2)
         _RATE_BUCKETS = {k: [t for t in v if t > cutoff] 
                         for k, v in _RATE_BUCKETS.items() 
                         if any(t > cutoff for t in v)}
-
+    
     return False
 
 def _submission_sig(payload: dict) -> str:
@@ -508,7 +508,7 @@ def base_layout(title: str, body_html: str) -> str:
     user_email = session.get('email', '')
     is_logged_in = 'user_id' in session
 
-    # ADD THIS BLOCK HERE - Generate CSRF token
+    # Generate CSRF token for template replacement
     if HAS_CSRF:
         try:
             from flask_wtf.csrf import generate_csrf
@@ -535,7 +535,6 @@ def base_layout(title: str, body_html: str) -> str:
             <li><hr class="dropdown-divider"></li>
             <li>
               <form method="POST" action="/logout" class="d-inline">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
                 <input type="hidden" name="csrf_token" value="{csrf_token_value}"/>
                 <button type="submit" class="dropdown-item">Logout</button>
               </form>
@@ -625,12 +624,15 @@ def base_layout(title: str, body_html: str) -> str:
     </style>
     """
 
+    # Replace all CSRF token placeholders in the body_html with actual token
+    body_html = body_html.replace('{{ csrf_token() }}', csrf_token_value)
+
     return f"""<!DOCTYPE html>
     <html lang="en">
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <meta name="csrf-token" content="{{ csrf_token() }}">
+      <meta name="csrf-token" content="{csrf_token_value}">
       <title>{html.escape(title)} - CPP Test Prep</title>
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
       <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css" rel="stylesheet">
@@ -1004,7 +1006,7 @@ def study_page():
         ]
     }
     sugg_json = json.dumps(SUGGESTIONS)
-
+    
     # Use regular string concatenation for JavaScript parts to avoid f-string issues
     javascript_code = """
     <script>
@@ -1072,7 +1074,7 @@ def study_page():
       updateSuggestions('random');
     </script>
     """
-
+    
     body = f"""
     <div class="container mt-4">
       <div class="row justify-content-center">
@@ -1140,7 +1142,7 @@ def quiz_page():
     chips.extend([f'<span class="badge bg-primary me-2 mb-2 domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
     q = build_quiz(10, "random")
     q_json = json.dumps(q)
-
+    
     # Use regular string for JavaScript to avoid f-string curly brace conflicts
     javascript_code = """
     <script>
@@ -1276,7 +1278,7 @@ def quiz_page():
       renderQuiz();
     </script>
     """
-
+    
     body = f"""
     <div class="container mt-4">
       <div class="card">
@@ -1442,7 +1444,7 @@ def flashcards_page():
         back = f"✅ Correct: {ans}\n\n💡 {q.get('explanation', '')}"
         all_cards.append({"front": q["question"], "back": back, "domain": q["domain"]})
     cards_json = json.dumps(all_cards)
-
+    
     # Use regular string for JavaScript to avoid f-string issues
     javascript_code = """
     <script>
@@ -1538,7 +1540,7 @@ def flashcards_page():
       filterCards('random');
     </script>
     """
-
+    
     body = f"""
     <div class="container mt-4">
       <div class="row justify-content-center">
@@ -1607,7 +1609,7 @@ def mock_exam_page():
     chips.extend([f'<span class="badge bg-primary me-2 mb-2 domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
     q = build_quiz(25, "random")
     q_json = json.dumps(q)
-
+    
     # Use regular string for JavaScript to avoid f-string issues
     javascript_code = """
     <script>
@@ -1744,7 +1746,7 @@ def mock_exam_page():
       renderExam();
     </script>
     """
-
+    
     body = f"""
     <div class="container mt-4">
       <div class="card">
@@ -2444,7 +2446,7 @@ def admin_questions_import():
     count = 0
     for row in reader:
         dom = (row.get("domain") or "security-principles").strip()
-
+        
         opts = {
             "A": (row.get("A") or "").strip(),
             "B": (row.get("B") or "").strip(),
@@ -2551,4 +2553,3 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
