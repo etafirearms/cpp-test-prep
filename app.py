@@ -1021,16 +1021,16 @@ def signup_page():
             </div>
             <div class="col-md-6 mb-4">
               <div class="card h-100 border-success position-relative">
-                <div class="badge bg-warning text-dark position-absolute top-0 start-50 translate-middle px-3 py-2">
-                  <i class="bi bi-star-fill"></i> Best Value
+                <div class="badge bg-warning text-dark position-absolute top-0 start-50 translate-middle px-3 py-2 fw-bold">
+                  <i class="bi bi-star-fill me-1"></i>Best Value
                 </div>
-                <div class="card-header bg-success text-white text-center">
+                <div class="card-header bg-success text-white text-center pt-4">
                   <h4 class="mb-0">6-Month Plan</h4>
                 </div>
                 <div class="card-body text-center p-4">
                   <div class="mb-3">
-                    <span class="display-4 fw-bold text-success">$99.00</span>
-                    <span class="text-muted fs-6 d-block">One-time payment</span>
+                    <div class="display-4 fw-bold text-success mb-1">$99.00</div>
+                    <span class="text-muted fs-6">One-time payment</span>
                   </div>
                   <p class="text-muted mb-4">Complete preparation program</p>
                   <ul class="list-unstyled mb-4">
@@ -1087,12 +1087,17 @@ def signup_page():
         // Update visual feedback
         document.querySelectorAll('.card').forEach(card => {
           card.classList.remove('border-primary', 'border-success', 'shadow-lg');
+          card.style.transform = 'none';
         });
         
         if (plan === 'monthly') {
-          document.querySelector('[onclick="selectPlan(\\'monthly\\')"]').closest('.card').classList.add('border-primary', 'shadow-lg');
+          const monthlyCard = document.querySelector('[onclick="selectPlan(\\'monthly\\')"]').closest('.card');
+          monthlyCard.classList.add('border-primary', 'shadow-lg');
+          monthlyCard.style.transform = 'translateY(-8px)';
         } else {
-          document.querySelector('[onclick="selectPlan(\\'sixmonth\\')"]').closest('.card').classList.add('border-success', 'shadow-lg');
+          const sixmonthCard = document.querySelector('[onclick="selectPlan(\\'sixmonth\\')"]').closest('.card');
+          sixmonthCard.classList.add('border-success', 'shadow-lg');
+          sixmonthCard.style.transform = 'translateY(-8px)';
         }
         
         // Update submit button text
@@ -1103,7 +1108,56 @@ def signup_page():
       
       // Pre-select monthly plan
       selectPlan('monthly');
+      
+      // Add hover effects for better UX
+      document.querySelectorAll('.card').forEach(card => {
+        card.addEventListener('mouseenter', function() {
+          if (!this.classList.contains('shadow-lg')) {
+            this.style.transform = 'translateY(-4px)';
+          }
+        });
+        
+        card.addEventListener('mouseleave', function() {
+          if (!this.classList.contains('shadow-lg')) {
+            this.style.transform = 'none';
+          }
+        });
+      });
     </script>
+    
+    <style>
+      .card {
+        transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      }
+      
+      .badge.position-absolute {
+        z-index: 10;
+        font-size: 0.8rem;
+        letter-spacing: 0.025em;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      }
+      
+      .card-header {
+        position: relative;
+        padding-top: 2rem;
+      }
+      
+      .display-4 {
+        line-height: 1;
+        color: inherit;
+      }
+      
+      .btn-lg {
+        font-size: 1.1rem;
+        padding: 0.875rem 2rem;
+        font-weight: 600;
+        letter-spacing: 0.025em;
+      }
+      
+      .list-unstyled li {
+        padding: 0.25rem 0;
+      }
+    </style>
     """
     return base_layout("Create Account", body)
 
