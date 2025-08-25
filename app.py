@@ -1124,45 +1124,11 @@ def quiz_page():
           }});
         }});
       }}
-      function buildQuiz() {{
-        const count = parseInt(document.getElementById('questionCount').value);
-        fetch('/api/build-quiz', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{domain: currentDomain, count}})
-        }})
-        .then(r => r.json())
-        .then(data => {{
-          currentQuiz = data;
-          userAnswers = {{}};
-          document.getElementById('quizInfo').textContent = `${{count}} questions • Domain: ${{currentDomain === 'random' ? 'Random' : currentDomain}}`;
-          renderQuiz();
-        }});
-      }}
-      function submitQuiz() {{
-        const questions = currentQuiz.questions || [];
-        if (Object.keys(userAnswers).length < questions.length) {{
-          alert('Please answer all questions before submitting.');
-          return;
-        }}
-        fetch('/api/submit-quiz', {{
-          method: 'POST',
-          headers: {{'Content-Type': 'application/json'}},
-          body: JSON.stringify({{
-            quiz_type: 'practice',
-            domain: currentDomain,
-            questions: questions,
-            answers: userAnswers
-          }})
-        }})
-        .then(r => r.json())
-        .then(data => {{
-          if (data.success) {{ showResults(data); }} else {{ alert(data.error || 'Submission failed'); }}
-        }});
-      }}
+      
       function showResults(data) {{
         const content = document.getElementById('resultsContent');
         const insights = (data.performance_insights || []).join('<br>');
+        const detailedResults = data.detailed_results || [];
         content.innerHTML = `
           <div class="text-center mb-4">
             <h3 class="display-4 text-${{data.score >= 70 ? 'success' : 'warning'}}">${{data.score}}%</h3>
@@ -1170,25 +1136,28 @@ def quiz_page():
             <div class="alert alert-info">${{insights}}</div>
           </div>
           <h5>Detailed Results</h5>
-          ${(data.detailed_results || []).map((result) => `
-            <div class="card mb-2 ${result.is_correct ? 'border-success' : 'border-danger'}">
+          ${{detailedResults.map((result) => `
+            <div class="card mb-2 ${{result.is_correct ? 'border-success' : 'border-danger'}}">
               <div class="card-body">
                 <div class="d-flex justify-content-between">
-                  <strong>Question ${result.index}</strong>
-                  <span class="badge bg-${result.is_correct ? 'success' : 'danger'}">${result.is_correct ? 'Correct' : 'Incorrect'}</span>
+                  <strong>Question ${{result.index}}</strong>
+                  <span class="badge bg-${{result.is_correct ? 'success' : 'danger'}}">${{result.is_correct ? 'Correct' : 'Incorrect'}}</span>
                 </div>
-                <p class="mt-2">${result.question}</p>
+                <p class="mt-2">${{result.question}}</p>
                 <div class="row">
-                  <div class="col-md-6"><small><strong>Your answer:</strong> ${result.user_letter || 'None'} ${result.user_text || ''}</small></div>
-                  <div class="col-md-6"><small><strong>Correct answer:</strong> ${result.correct_letter} ${result.correct_text}</small></div>
+                  <div class="col-md-6"><small><strong>Your answer:</strong> ${{result.user_letter || 'None'}} ${{result.user_text || ''}}</small></div>
+                  <div class="col-md-6"><small><strong>Correct answer:</strong> ${{result.correct_letter}} ${{result.correct_text}}</small></div>
                 </div>
-                ${result.explanation ? `<div class="alert alert-light mt-2"><small>${result.explanation}</small></div>` : ''}
+                ${{result.explanation ? `<div class="alert alert-light mt-2"><small>${{result.explanation}}</small></div>` : ''}}
               </div>
             </div>
-          `).join('')}
+          `).join('')}}
         `;
         new bootstrap.Modal(document.getElementById('resultsModal')).show();
       }}
+      
+      // Rest of your JavaScript...
+    </script>
       document.querySelectorAll('.domain-chip').forEach(chip => {{
         chip.addEventListener('click', function() {{
           document.querySelectorAll('.domain-chip').forEach(c => {{
@@ -2355,3 +2324,4 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
