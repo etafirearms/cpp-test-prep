@@ -62,8 +62,14 @@ def _load_json(name, default):
 def _save_json(name, data):
     path = os.path.join(DATA_DIR, name)
     tmp = path + ".tmp"
+    import fcntl  # Add this import at top of file if not already present
     with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        try:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        except ImportError:
+            # Windows doesn't have fcntl, fallback to basic write
+            json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
 QUESTIONS   = _load_json("questions.json", [])
@@ -2387,6 +2393,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
