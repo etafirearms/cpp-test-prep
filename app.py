@@ -139,6 +139,92 @@ BASE_QUESTIONS = [
     },
 ]
 
+# --- Normalize & merge questions (NEW) ---
+def _normalize_question(q: dict) -> dict | None:
+    """
+    Accepts:
+      - Dict options with letters and 'correct' letter.
+      - Admin legacy list options (opt1..opt4) with numeric 'answer'.
+    Returns unified dict: options A-D and correct letter in {'A','B','C','D'}.
+    """
+    if not q or not q.get("question"):
+        return None
+
+    nq = {
+        "question": q.get("question", "").strip(),
+        "explanation": q.get("explanation", "").strip(),
+        "domain": q.get("domain", "security-principles"),
+        "difficulty": q.get("difficulty", "medium"),
+    }
+
+    opts = q.get("options")
+    correct_letter = q.get("correct")
+
+    # Case: dict options already (preferred)
+    if isinstance(opts, dict):
+        letters = ["A", "B", "C", "D"]
+        clean = {}
+        for i, L in enumerate(letters):
+            if L in opts:
+                clean[L] = str(opts[L])
+            elif str(i+1) in opts:
+                clean[L] = str(opts[str(i+1)])
+        if len(clean) != 4:
+            return None
+        nq["options"] = clean
+        if correct_letter and isinstance(correct_letter, str) and correct_letter.upper() in ("A","B","C","D"):
+            nq["correct"] = correct_letter.upper()
+        else:
+            try:
+                idx = int(correct_letter)
+                nq["correct"] = ["A","B","C","D"][idx-1]
+            except Exception:
+                return None
+
+    # Case: list options with numeric 'answer'
+    elif isinstance(opts, list) and q.get("answer"):
+        letters = ["A", "B", "C", "D"]
+        if len(opts) < 4:
+            return None
+        nq["options"] = {letters[i]: str(opts[i]) for i in range(4)}
+        try:
+            ans_idx = int(q.get("answer"))
+            nq["correct"] = letters[ans_idx - 1]
+        except Exception:
+            return None
+    else:
+        return None
+
+    if nq.get("correct") not in ("A","B","C","D"):
+        return None
+    return nq
+
+def _build_all_questions() -> list[dict]:
+    """
+    Merge admin-persisted QUESTIONS with BASE_QUESTIONS,
+    normalize into the unified lettered model, dedupe.
+    """
+    merged = []
+    seen = set()
+
+    def add_many(src):
+        for q in src:
+            nq = _normalize_question(q)
+            if not nq:
+                continue
+            key = (nq["question"], nq["domain"], nq["correct"])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(nq)
+
+    add_many(QUESTIONS)       # Admin-managed first
+    add_many(BASE_QUESTIONS)  # Defaults
+    return merged
+
+ALL_QUESTIONS = _build_all_questions()
+# --- end normalize & merge ---
+
 # Human-friendly domain names shown to the user
 DOMAINS = {
     "security-principles": "Security Principles & Practices",
@@ -392,15 +478,16 @@ def base_layout(title: str, body_html: str) -> str:
 
 def filter_questions(domain_key: str | None) -> list[dict]:
     """Return all questions if domain_key is None/'random'; otherwise only that domain."""
+    pool = ALL_QUESTIONS
     if not domain_key or domain_key == "random":
-        return BASE_QUESTIONS[:]
-    return [q for q in BASE_QUESTIONS if q.get("domain") == domain_key]
+        return pool[:]
+    return [q for q in pool if q.get("domain") == domain_key]
 
 def build_quiz(num: int, domain_key: str | None) -> dict:
     pool = filter_questions(domain_key)
     out = []
     if not pool:
-        pool = BASE_QUESTIONS[:]
+        pool = ALL_QUESTIONS[:]
     while len(out) < num:
         random.shuffle(pool)
         for q in pool:
@@ -780,9 +867,9 @@ def flashcards_page():
     chips = ['<span class="domain-chip active" data-domain="random">Random</span>'] + \
             [f'<span class="domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()]
     all_cards = []
-    for q in BASE_QUESTIONS:
+    for q in ALL_QUESTIONS:
         ans = q["options"].get(q["correct"], "")
-        back = "✅ Correct: " + ans + "\n\n💡 " + q["explanation"]
+        back = "✅ Correct: " + ans + "\n\n💡 " + q.get("explanation", "")
         all_cards.append({"front": q["question"], "back": back, "domain": q["domain"]})
     cards_json = json.dumps(all_cards)
 
@@ -809,7 +896,7 @@ def flashcards_page():
   <span class="badge bg-success me-2">Know: <span id="kCount">0</span></span>
   <span class="badge bg-danger">Don't Know: <span id="dCount">0</span></span>
 </div>
-<div class="text-center mt-2 small text-muted">Press J to flip, K for next.</div>
+<div class="text-center mt-2 small text-muted">Press J to flip, L for next, K for prev.</div>
           </div>
         </div>
       </div>
@@ -818,7 +905,7 @@ def flashcards_page():
       var ALL = """ + cards_json + """;
       var domain = 'random';
       var CARDS = [];
-      var i = 0, back=false, dk=0, k=0;
+      var i = 0, back=false, dk=0, k=0, viewed=0;
       var el = document.getElementById('card');
 
       function rebuildCards() {
@@ -830,20 +917,38 @@ def flashcards_page():
         stack = stack.slice(0, 20);
         for (var s=stack.length-1;s>0;--s){ var r=Math.floor(Math.random()*(s+1)); var tmp=stack[s]; stack[s]=stack[r]; stack[r]=tmp; }
         CARDS = stack;
-        i=0; back=false; render();
+        i=0; back=false; viewed=0; dk=0; k=0;
+        updateBadges();
+        render();
       }
 
       function render() {
         var c = CARDS[i] || {front:'No cards', back:''};
         var txt = (back ? c.back : c.front).replace(/\\n/g,'<br>');
-        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6%;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
+        el.innerHTML = '<div style="font-size:1.1rem; line-height:1.6;">'+txt+'</div><div class="mt-2 small text-muted">'+(back?'Back — click/J to see front':'Front — click/J to see back')+'</div>';
       }
       function prev(){ back=false; i = (i - 1 + CARDS.length) % CARDS.length; render(); }
-      function next(){ back=false; i = (i + 1) % CARDS.length; render(); }
+      function next(){ back=false; i = (i + 1) % CARDS.length; viewed++; updateBadges(); render(); }
+
+      function updateBadges() {
+        var v = document.getElementById('vCount'); if (v) v.textContent = viewed;
+        var kk = document.getElementById('kCount'); if (kk) kk.textContent = k;
+        var dd = document.getElementById('dCount'); if (dd) dd.textContent = dk;
+      }
+
+      async function mark(know) {
+        try {
+          await fetch('/api/flashcards/mark', {
+            method:'POST',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({know: !!know, domain: domain})
+          });
+        } catch(e) { /* non-blocking */ }
+      }
 
       el.addEventListener('click', function(){ back=!back; render(); });
-      document.getElementById('btnDK').addEventListener('click', function(){ dk++; next(); });
-      document.getElementById('btnK').addEventListener('click', function(){ k++; next(); });
+      document.getElementById('btnDK').addEventListener('click', async function(){ dk++; await mark(false); next(); });
+      document.getElementById('btnK').addEventListener('click', async function(){ k++; await mark(true); next(); });
       document.getElementById('prevBtn').addEventListener('click', prev);
       document.getElementById('nextBtn').addEventListener('click', next);
       document.addEventListener('keydown', function(e){
@@ -1569,20 +1674,30 @@ def admin_home():
     if not is_admin():
         return redirect(url_for("admin_login_page", next=request.path))
 
-    # Build rows for Questions table
+    # Build rows for Questions table (UPDATED to handle lettered model)
     q_rows = []
     for q in QUESTIONS:
-        opts = q.get("options", [])
         domain = q.get("domain", "random")
+        question_text = (q.get("question","")[:120]).replace("<","&lt;").replace(">","&gt;")
+        opts = q.get("options", {})
+        if isinstance(opts, dict):
+            opt_preview = ", ".join([f"{L}) {opts.get(L,'')}" for L in ("A","B","C","D")])
+            ans_display = q.get("correct","")
+        else:
+            # legacy safety
+            opt_preview = ", ".join([f"{i+1}) {o}" for i,o in enumerate(opts)])[:120]
+            ans_display = str(q.get("answer",""))
+        opt_preview = opt_preview.replace("<","&lt;").replace(">","&gt;")[:120]
+
         q_rows.append(
             "<tr>"
-            "<td>" + domain + "</td>"
-            "<td>" + (q.get("question","")[:120]).replace("<","&lt;").replace(">","&gt;") + "</td>"
-            "<td>" + (",".join([str(i+1)+") "+o for i,o in enumerate(opts)])[:120]).replace("<","&lt;").replace(">","&gt;") + "</td>"
-            "<td>" + str(q.get("answer","")) + "</td>"
+            f"<td>{domain}</td>"
+            f"<td>{question_text}</td>"
+            f"<td>{opt_preview}</td>"
+            f"<td>{ans_display}</td>"
             "<td>"
               '<form method="post" action="/admin/questions/delete" style="display:inline;">'
-              '<input type="hidden" name="id" value="' + str(q.get("id","")) + '"/>'
+              f'<input type="hidden" name="id" value="{str(q.get("id",""))}"/>'
               '<button class="btn btn-sm btn-outline-danger">Delete</button>'
               "</form>"
             "</td>"
@@ -1658,9 +1773,8 @@ def admin_home():
 
     body = f"""
 <div class="row"><div class="col-md-11 mx-auto">
-  ...
   {guard}
-    <div class="d-flex justify-content-end mb-2">
+  <div class="d-flex justify-content-end mb-2">
     <form method="post" action="/admin/logout" class="ms-auto">
       <button class="btn btn-sm btn-outline-secondary">Log out</button>
     </form>
@@ -1718,7 +1832,7 @@ def admin_home():
           </div>
         </form>
         <div class="text-muted mt-2 small">
-          Columns: domain, question, opt1, opt2, opt3, opt4, answer, explanation
+          Columns: domain, question, A, B, C, D, correct, explanation
         </div>
       </div>
     </div>
@@ -1841,22 +1955,37 @@ def admin_questions_add():
     dom = (form.get("domain") or "random").strip()
     if dom not in DOMAINS and dom != "random":
         dom = "random"
+
+    # Map 1-4 to A-D
+    num_to_letter = {1:"A", 2:"B", 3:"C", 4:"D"}
+    try:
+        ans_num = int(form.get("answer") or 1)
+        correct_letter = num_to_letter.get(ans_num, "A")
+    except Exception:
+        correct_letter = "A"
+
     q = {
         "id": str(uuid.uuid4()),
         "domain": dom,
         "question": (form.get("question") or "").strip(),
-        "options": [
-            (form.get("opt1") or "").strip(),
-            (form.get("opt2") or "").strip(),
-            (form.get("opt3") or "").strip(),
-            (form.get("opt4") or "").strip(),
-        ],
-        "answer": int(form.get("answer") or 1),
+        "options": {
+            "A": (form.get("opt1") or "").strip(),
+            "B": (form.get("opt2") or "").strip(),
+            "C": (form.get("opt3") or "").strip(),
+            "D": (form.get("opt4") or "").strip(),
+        },
+        "correct": correct_letter,
         "explanation": (form.get("explanation") or "").strip(),
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
     }
-    QUESTIONS.append(q)
-    _save_json("questions.json", QUESTIONS)
+    if q["question"] and all(q["options"].get(L) for L in ("A","B","C","D")):
+        QUESTIONS.append(q)
+        _save_json("questions.json", QUESTIONS)
+
+    # refresh runtime pool so new questions appear immediately
+    global ALL_QUESTIONS
+    ALL_QUESTIONS = _build_all_questions()
+
     return redirect("/admin?tab=questions")
 
 @app.post("/admin/questions/delete")
@@ -1869,6 +1998,54 @@ def admin_questions_delete():
         if idx >= 0:
             QUESTIONS.pop(idx)
             _save_json("questions.json", QUESTIONS)
+    return redirect("/admin?tab=questions")
+
+# NEW: Questions CSV import (lettered columns)
+@app.post("/admin/questions/import")
+def admin_questions_import():
+    if not is_admin():
+        return redirect("/admin?tab=questions")
+    f = request.files.get("csv")
+    if not f:
+        return redirect("/admin?tab=questions")
+
+    # CSV columns: domain,question,A,B,C,D,correct,explanation
+    reader = csv.DictReader(f.stream.read().decode("utf-8").splitlines())
+    count = 0
+    for row in reader:
+        dom = (row.get("domain") or "random").strip()
+        if dom not in DOMAINS and dom != "random":
+            dom = "random"
+
+        opts = {
+            "A": (row.get("A") or "").strip(),
+            "B": (row.get("B") or "").strip(),
+            "C": (row.get("C") or "").strip(),
+            "D": (row.get("D") or "").strip(),
+        }
+        correct = (row.get("correct") or "A").strip().upper()
+        if correct not in ("A","B","C","D"):
+            correct = "A"
+
+        q = {
+            "id": str(uuid.uuid4()),
+            "domain": dom,
+            "question": (row.get("question") or "").strip(),
+            "options": opts,
+            "correct": correct,
+            "explanation": (row.get("explanation") or "").strip(),
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+        if q["question"] and all(q["options"].get(L) for L in ("A","B","C","D")):
+            QUESTIONS.append(q)
+            count += 1
+
+    if count:
+        _save_json("questions.json", QUESTIONS)
+        # refresh runtime pool
+        global ALL_QUESTIONS
+        ALL_QUESTIONS = _build_all_questions()
+
     return redirect("/admin?tab=questions")
 
 # --- Flashcards CRUD + exports ---
@@ -1952,8 +2129,10 @@ def admin_export_flashcards():
 def admin_example_questions_csv():
     if not is_admin():
         return redirect("/admin")
-    csv_text = "domain,question,opt1,opt2,opt3,opt4,answer,explanation\n" \
-               "security-principles,What is defense in depth?,Layered controls,Single control,No controls,Budget only,1,Multiple layers reduce single-point failures\n"
+    csv_text = (
+        "domain,question,A,B,C,D,correct,explanation\n"
+        "security-principles,What is defense in depth?,Layered controls,Single control,No controls,Budget only,B,Multiple layers reduce single-point failures\n"
+    )
     return Response(
         csv_text, mimetype="text/csv",
         headers={"Content-Disposition": "attachment; filename=questions_template.csv"}
@@ -2000,3 +2179,4 @@ def admin_users_subscription():
             break
     _save_json("users.json", USERS)
     return redirect("/admin?tab=users")
+
