@@ -133,12 +133,13 @@ def add_security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+    resp.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
 
-    # Allow Stripe + CDN + OpenAI
+    # Tighter CSP - remove unsafe-inline for scripts
     csp = (
         "default-src 'self' https: data: blob:; "
         "img-src 'self' https: data:; "
-        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://js.stripe.com; "
+        "script-src 'self' https://cdn.jsdelivr.net https://js.stripe.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "font-src 'self' https: data:; "
         "connect-src 'self' https://api.openai.com https://js.stripe.com https://api.stripe.com; "
@@ -480,7 +481,7 @@ def chat_with_ai(msgs: list[str]) -> str:
             "messages": [{"role": "system", "content": "You are a helpful CPP exam tutor. Format your answers for easy reading with short sections and bullet points where helpful."}]
                         + [{"role": "user", "content": m} for m in msgs][-10:],
             "temperature": 0.7,
-            "max_tokens": 700,
+            "max_tokens": 500,  # Reduced for snappier UI
         }
         r = requests.post(
             f"{OPENAI_API_BASE}/chat/completions",
@@ -669,7 +670,7 @@ def create_stripe_checkout_session(user_email, plan='monthly'):
                 line_items=[{'price': STRIPE_MONTHLY_PRICE_ID, 'quantity': 1}],
                 mode='subscription',
                 customer_email=user_email,
-                success_url=request.url_root + 'billing/success?plan=monthly',
+                success_url=request.url_root + 'billing/success?session_id={CHECKOUT_SESSION_ID}&plan=monthly',
                 cancel_url=request.url_root + 'billing',
                 metadata={'user_email': user_email, 'plan': 'monthly'}
             )
@@ -682,7 +683,7 @@ def create_stripe_checkout_session(user_email, plan='monthly'):
                 line_items=[{'price': STRIPE_SIXMONTH_PRICE_ID, 'quantity': 1}],
                 mode='payment',  # one-time
                 customer_email=user_email,
-                success_url=request.url_root + 'billing/success?plan=sixmonth',
+                success_url=request.url_root + 'billing/success?session_id={CHECKOUT_SESSION_ID}&plan=sixmonth',
                 cancel_url=request.url_root + 'billing',
                 metadata={'user_email': user_email, 'plan': 'sixmonth', 'duration_days': 180}
             )
@@ -735,6 +736,9 @@ def login_page():
 
 @app.post("/login")
 def login_post():
+    if _rate_limited("login", limit=5, per_seconds=300):
+        return redirect(url_for('login_page'))
+    
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
     if not email or not password:
@@ -1007,74 +1011,6 @@ def study_page():
     }
     sugg_json = json.dumps(SUGGESTIONS)
     
-    # Use regular string concatenation for JavaScript parts to avoid f-string issues
-    javascript_code = """
-    <script>
-      const suggestions = """ + sugg_json + """;
-      let currentDomain = 'random';
-      
-      function escapeHtml(text) {
-        const div = document.createElement('div');
-        div.textContent = text;
-        return div.innerHTML;
-      }
-      
-      function updateSuggestions(domain) {
-        const list = document.getElementById('suggestionList');
-        const domainSuggestions = suggestions[domain] || suggestions['security-principles'];
-        list.innerHTML = domainSuggestions.map(s =>
-          `<span class="badge bg-light text-dark me-2 mb-2" style="cursor:pointer" onclick="askQuestion('${s}')">${s}</span>`
-        ).join('');
-      }
-      function askQuestion(question) {
-        document.getElementById('chatInput').value = question;
-        sendMessage();
-      }
-      function sendMessage() {
-        const input = document.getElementById('chatInput');
-        const message = input.value.trim();
-        if (!message) return;
-        const chatHistory = document.getElementById('chatHistory');
-        chatHistory.innerHTML += `<div class="mb-2"><strong>You:</strong> ${message}</div>`;
-        chatHistory.innerHTML += `<div class="mb-2 text-muted">AI is thinking...</div>`;
-        input.value = '';
-        fetch('/api/chat', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
-          },
-          body: JSON.stringify({message: message, domain: currentDomain})
-        })
-        .then(r => r.json())
-        .then(data => {
-          if (data.error) {
-            chatHistory.lastElementChild.outerHTML = `<div class="mb-3 text-danger">${data.error}</div>`;
-            return;
-          }
-          chatHistory.lastElementChild.outerHTML = `<div class="mb-3"><strong>AI Tutor:</strong><br>${escapeHtml(data.response || '').replace(/\\n/g, '<br>')}</div>`;
-          chatHistory.scrollTop = chatHistory.scrollHeight;
-        })
-        .catch(() => {
-          chatHistory.lastElementChild.outerHTML = `<div class="mb-3 text-danger">Error: Please try again</div>`;
-        });
-      }
-      document.querySelectorAll('.domain-chip').forEach(chip => {
-        chip.addEventListener('click', function() {
-          document.querySelectorAll('.domain-chip').forEach(c => {
-            c.classList.remove('bg-success'); c.classList.remove('bg-primary'); c.classList.add('bg-primary');
-          });
-          this.classList.remove('bg-primary'); this.classList.add('bg-success');
-          currentDomain = this.dataset.domain;
-          updateSuggestions(currentDomain);
-        });
-      });
-      document.getElementById('sendBtn').addEventListener('click', sendMessage);
-      document.getElementById('chatInput').addEventListener('keypress', function(e) { if (e.key === 'Enter') sendMessage(); });
-      updateSuggestions('random');
-    </script>
-    """
-    
     body = f"""
     <div class="container mt-4">
       <div class="row justify-content-center">
@@ -1110,7 +1046,74 @@ def study_page():
         </div>
       </div>
     </div>
-    {javascript_code}
+    """
+    
+    # External JavaScript file content (to be served separately in production)
+    body += f"""
+    <script>
+      const suggestions = {sugg_json};
+      let currentDomain = 'random';
+      
+      function escapeHtml(text) {{
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }}
+      
+      function updateSuggestions(domain) {{
+        const list = document.getElementById('suggestionList');
+        const domainSuggestions = suggestions[domain] || suggestions['security-principles'];
+        list.innerHTML = domainSuggestions.map(s =>
+          `<span class="badge bg-light text-dark me-2 mb-2" style="cursor:pointer" onclick="askQuestion('${{s}}')">${{s}}</span>`
+        ).join('');
+      }}
+      function askQuestion(question) {{
+        document.getElementById('chatInput').value = question;
+        sendMessage();
+      }}
+      function sendMessage() {{
+        const input = document.getElementById('chatInput');
+        const message = input.value.trim();
+        if (!message) return;
+        const chatHistory = document.getElementById('chatHistory');
+        chatHistory.innerHTML += `<div class="mb-2"><strong>You:</strong> ${{message}}</div>`;
+        chatHistory.innerHTML += `<div class="mb-2 text-muted">AI is thinking...</div>`;
+        input.value = '';
+        fetch('/api/chat', {{
+          method: 'POST',
+          headers: {{
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          }},
+          body: JSON.stringify({{message: message, domain: currentDomain}})
+        }})
+        .then(r => r.json())
+        .then(data => {{
+          if (data.error) {{
+            chatHistory.lastElementChild.outerHTML = `<div class="mb-3 text-danger">${{data.error}}</div>`;
+            return;
+          }}
+          chatHistory.lastElementChild.outerHTML = `<div class="mb-3"><strong>AI Tutor:</strong><br>${{escapeHtml(data.response || '').replace(/\\n/g, '<br>')}}</div>`;
+          chatHistory.scrollTop = chatHistory.scrollHeight;
+        }})
+        .catch(() => {{
+          chatHistory.lastElementChild.outerHTML = `<div class="mb-3 text-danger">Error: Please try again</div>`;
+        }});
+      }}
+      document.querySelectorAll('.domain-chip').forEach(chip => {{
+        chip.addEventListener('click', function() {{
+          document.querySelectorAll('.domain-chip').forEach(c => {{
+            c.classList.remove('bg-success'); c.classList.remove('bg-primary'); c.classList.add('bg-primary');
+          }});
+          this.classList.remove('bg-primary'); this.classList.add('bg-success');
+          currentDomain = this.dataset.domain;
+          updateSuggestions(currentDomain);
+        }});
+      }});
+      document.getElementById('sendBtn').addEventListener('click', sendMessage);
+      document.getElementById('chatInput').addEventListener('keypress', function(e) {{ if (e.key === 'Enter') sendMessage(); }});
+      updateSuggestions('random');
+    </script>
     """
     return base_layout("AI Tutor", body)
 
@@ -1142,142 +1145,6 @@ def quiz_page():
     chips.extend([f'<span class="badge bg-primary me-2 mb-2 domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
     q = build_quiz(10, "random")
     q_json = json.dumps(q)
-    
-    # Use regular string for JavaScript to avoid f-string curly brace conflicts
-    javascript_code = """
-    <script>
-      let currentQuiz = """ + q_json + """;
-      let currentDomain = 'random';
-      let userAnswers = {};
-      
-      function renderQuiz() {
-        const container = document.getElementById('quizQuestions');
-        const questions = currentQuiz.questions || [];
-        container.innerHTML = questions.map((q, i) => `
-          <div class="card mb-3">
-            <div class="card-body">
-              <h6>Question ${i + 1} of ${questions.length}</h6>
-              <p>${q.question}</p>
-              ${Object.entries(q.options).map(([letter, text]) => `
-                <div class="form-check">
-                  <input class="form-check-input" type="radio" name="q${i}" value="${letter}" id="q${i}${letter}">
-                  <label class="form-check-label" for="q${i}${letter}">${letter}) ${text}</label>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-        `).join('');
-        document.getElementById('submitQuiz').style.display = questions.length > 0 ? 'block' : 'none';
-        container.querySelectorAll('input[type="radio"]').forEach(input => {
-          input.addEventListener('change', function() {
-            const questionIndex = this.name.replace('q', '');
-            userAnswers[questionIndex] = this.value;
-          });
-        });
-      }
-      
-      function showResults(data) {
-        const content = document.getElementById('resultsContent');
-        const insights = (data.performance_insights || []).join('<br>');
-        const detailedResults = data.detailed_results || [];
-        content.innerHTML = `
-          <div class="text-center mb-4">
-            <h3 class="display-4 text-${data.score >= 70 ? 'success' : 'warning'}">${data.score}%</h3>
-            <p>You got ${data.correct} out of ${data.total} correct</p>
-            <div class="alert alert-info">${insights}</div>
-          </div>
-          <h5>Detailed Results</h5>
-          ${detailedResults.map((result) => `
-            <div class="card mb-2 ${result.is_correct ? 'border-success' : 'border-danger'}">
-              <div class="card-body">
-                <div class="d-flex justify-content-between">
-                  <strong>Question ${result.index}</strong>
-                  <span class="badge bg-${result.is_correct ? 'success' : 'danger'}">${result.is_correct ? 'Correct' : 'Incorrect'}</span>
-                </div>
-                <p class="mt-2">${result.question}</p>
-                <div class="row">
-                  <div class="col-md-6"><small><strong>Your answer:</strong> ${result.user_letter || 'None'} ${result.user_text || ''}</small></div>
-                  <div class="col-md-6"><small><strong>Correct answer:</strong> ${result.correct_letter} ${result.correct_text}</small></div>
-                </div>
-                ${result.explanation ? `<div class="alert alert-light mt-2"><small>${result.explanation}</small></div>` : ''}
-              </div>
-            </div>
-          `).join('')}
-        `;
-        new bootstrap.Modal(document.getElementById('resultsModal')).show();
-      }
-      
-      function buildQuiz() {
-        const count = parseInt(document.getElementById('questionCount').value);
-        fetch('/api/build-quiz', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
-          },
-          body: JSON.stringify({domain: currentDomain, count})
-        })
-        .then(r => r.json())
-        .then(data => {
-          currentQuiz = data;
-          userAnswers = {};
-          document.getElementById('quizInfo').textContent = `${count} questions • Domain: ${currentDomain === 'random' ? 'Random' : 'All Topics'}`;
-          renderQuiz();
-        })
-        .catch(err => {
-          console.error('Failed to build quiz:', err);
-          alert('Failed to load quiz. Please try again.');
-        });
-      }
-
-      function submitQuiz() {
-        const questions = currentQuiz.questions || [];
-        const unanswered = questions.length - Object.keys(userAnswers).length;
-        if (unanswered > 0 && !confirm(`You have ${unanswered} unanswered questions. Submit anyway?`)) {
-          return;
-        }
-        
-        fetch('/api/submit-quiz', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
-          },
-          body: JSON.stringify({
-            quiz_type: 'practice',
-            domain: currentDomain,
-            questions: questions,
-            answers: userAnswers
-          })
-        })
-        .then(r => r.json())
-        .then(data => {
-          if (data.success) {
-            showResults(data);
-          } else {
-            alert(data.error || 'Submission failed. Please try again.');
-          }
-        })
-        .catch(err => {
-          console.error('Submit failed:', err);
-          alert('Failed to submit quiz. Please try again.');
-        });
-      }
-      
-      document.querySelectorAll('.domain-chip').forEach(chip => {
-        chip.addEventListener('click', function() {
-          document.querySelectorAll('.domain-chip').forEach(c => {
-            c.classList.remove('bg-success'); c.classList.remove('bg-primary'); c.classList.add('bg-primary');
-          });
-          this.classList.remove('bg-primary'); this.classList.add('bg-success');
-          currentDomain = this.dataset.domain;
-        });
-      });
-      document.getElementById('buildQuiz').addEventListener('click', buildQuiz);
-      document.getElementById('submitQuiz').addEventListener('click', submitQuiz);
-      renderQuiz();
-    </script>
-    """
     
     body = f"""
     <div class="container mt-4">
@@ -1314,7 +1181,148 @@ def quiz_page():
         </div>
       </div>
     </div>
-    {javascript_code}
+    """
+    
+    # Secure JavaScript with XSS protection
+    body += f"""
+    <script>
+      let currentQuiz = {q_json};
+      let currentDomain = 'random';
+      let userAnswers = {{}};
+      
+      function escapeHtml(text) {{
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }}
+      
+      function renderQuiz() {{
+        const container = document.getElementById('quizQuestions');
+        const questions = currentQuiz.questions || [];
+        container.innerHTML = questions.map((q, i) => `
+          <div class="card mb-3">
+            <div class="card-body">
+              <h6>Question ${{i + 1}} of ${{questions.length}}</h6>
+              <p>${{escapeHtml(q.question)}}</p>
+              ${{Object.entries(q.options).map(([letter, text]) => `
+                <div class="form-check">
+                  <input class="form-check-input" type="radio" name="q${{i}}" value="${{letter}}" id="q${{i}}${{letter}}">
+                  <label class="form-check-label" for="q${{i}}${{letter}}">${{letter}}) ${{escapeHtml(text)}}</label>
+                </div>
+              `).join('')}}
+            </div>
+          </div>
+        `).join('');
+        document.getElementById('submitQuiz').style.display = questions.length > 0 ? 'block' : 'none';
+        container.querySelectorAll('input[type="radio"]').forEach(input => {{
+          input.addEventListener('change', function() {{
+            const questionIndex = this.name.replace('q', '');
+            userAnswers[questionIndex] = this.value;
+          }});
+        }});
+      }}
+      
+      function showResults(data) {{
+        const content = document.getElementById('resultsContent');
+        const insights = (data.performance_insights || []).join('<br>');
+        const detailedResults = data.detailed_results || [];
+        content.innerHTML = `
+          <div class="text-center mb-4">
+            <h3 class="display-4 text-${{data.score >= 70 ? 'success' : 'warning'}}">${{data.score}}%</h3>
+            <p>You got ${{data.correct}} out of ${{data.total}} correct</p>
+            <div class="alert alert-info">${{insights}}</div>
+          </div>
+          <h5>Detailed Results</h5>
+          ${{detailedResults.map((result) => `
+            <div class="card mb-2 ${{result.is_correct ? 'border-success' : 'border-danger'}}">
+              <div class="card-body">
+                <div class="d-flex justify-content-between">
+                  <strong>Question ${{result.index}}</strong>
+                  <span class="badge bg-${{result.is_correct ? 'success' : 'danger'}}">${{result.is_correct ? 'Correct' : 'Incorrect'}}</span>
+                </div>
+                <p class="mt-2">${{escapeHtml(result.question)}}</p>
+                <div class="row">
+                  <div class="col-md-6"><small><strong>Your answer:</strong> ${{result.user_letter || 'None'}} ${{escapeHtml(result.user_text || '')}}</small></div>
+                  <div class="col-md-6"><small><strong>Correct answer:</strong> ${{result.correct_letter}} ${{escapeHtml(result.correct_text)}}</small></div>
+                </div>
+                ${{result.explanation ? `<div class="alert alert-light mt-2"><small>${{escapeHtml(result.explanation)}}</small></div>` : ''}}
+              </div>
+            </div>
+          `).join('')}}
+        `;
+        new bootstrap.Modal(document.getElementById('resultsModal')).show();
+      }}
+      
+      function buildQuiz() {{
+        const count = parseInt(document.getElementById('questionCount').value);
+        fetch('/api/build-quiz', {{
+          method: 'POST',
+          headers: {{
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          }},
+          body: JSON.stringify({{domain: currentDomain, count}})
+        }})
+        .then(r => r.json())
+        .then(data => {{
+          currentQuiz = data;
+          userAnswers = {{}};
+          document.getElementById('quizInfo').textContent = `${{count}} questions • Domain: ${{currentDomain === 'random' ? 'Random' : 'All Topics'}}`;
+          renderQuiz();
+        }})
+        .catch(err => {{
+          console.error('Failed to build quiz:', err);
+          alert('Failed to load quiz. Please try again.');
+        }});
+      }}
+
+      function submitQuiz() {{
+        const questions = currentQuiz.questions || [];
+        const unanswered = questions.length - Object.keys(userAnswers).length;
+        if (unanswered > 0 && !confirm(`You have ${{unanswered}} unanswered questions. Submit anyway?`)) {{
+          return;
+        }}
+        
+        fetch('/api/submit-quiz', {{
+          method: 'POST',
+          headers: {{
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          }},
+          body: JSON.stringify({{
+            quiz_type: 'practice',
+            domain: currentDomain,
+            questions: questions,
+            answers: userAnswers
+          }})
+        }})
+        .then(r => r.json())
+        .then(data => {{
+          if (data.success) {{
+            showResults(data);
+          }} else {{
+            alert(data.error || 'Submission failed. Please try again.');
+          }}
+        }})
+        .catch(err => {{
+          console.error('Submit failed:', err);
+          alert('Failed to submit quiz. Please try again.');
+        }});
+      }}
+      
+      document.querySelectorAll('.domain-chip').forEach(chip => {{
+        chip.addEventListener('click', function() {{
+          document.querySelectorAll('.domain-chip').forEach(c => {{
+            c.classList.remove('bg-success'); c.classList.remove('bg-primary'); c.classList.add('bg-primary');
+          }});
+          this.classList.remove('bg-primary'); this.classList.add('bg-success');
+          currentDomain = this.dataset.domain;
+        }});
+      }});
+      document.getElementById('buildQuiz').addEventListener('click', buildQuiz);
+      document.getElementById('submitQuiz').addEventListener('click', submitQuiz);
+      renderQuiz();
+    </script>
     """
     return base_layout("Practice Quiz", body)
 
@@ -1445,102 +1453,6 @@ def flashcards_page():
         all_cards.append({"front": q["question"], "back": back, "domain": q["domain"]})
     cards_json = json.dumps(all_cards)
     
-    # Use regular string for JavaScript to avoid f-string issues
-    javascript_code = """
-    <script>
-      const allCards = """ + cards_json + """;
-      let currentCards = [];
-      let currentIndex = 0;
-      let showingBack = false;
-      let currentDomain = 'random';
-      let stats = {viewed: 0, know: 0, dontKnow: 0};
-      
-      function filterCards(domain) {
-        currentCards = domain === 'random' ? allCards.slice() : allCards.filter(c => c.domain === domain);
-        currentIndex = 0; showingBack = false; shuffleCards(); showCurrentCard();
-      }
-      
-      function shuffleCards() {
-        for (let i = currentCards.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [currentCards[i], currentCards[j]] = [currentCards[j], currentCards[i]];
-        }
-      }
-      
-      function showCurrentCard() {
-        if (currentCards.length === 0) { 
-          document.getElementById('cardContent').innerHTML = '<p>No cards for this domain</p>'; 
-          return; 
-        }
-        const card = currentCards[currentIndex];
-        const content = showingBack ? card.back.replace(/\\n/g, '<br>') : card.front;
-        document.getElementById('cardContent').innerHTML = `
-          <div class="card-number mb-2"><small class="text-muted">${currentIndex + 1} of ${currentCards.length}</small></div>
-          <div class="card-text">${content}</div>
-          <div class="mt-3"><small class="text-muted">${showingBack ? 'Back' : 'Front'} - Click to flip</small></div>
-        `;
-      }
-      
-      function flipCard() { showingBack = !showingBack; showCurrentCard(); }
-      function nextCard() { 
-        if (!currentCards.length) return; 
-        currentIndex = (currentIndex + 1) % currentCards.length; 
-        showingBack = false; 
-        showCurrentCard(); 
-        updateStats('viewed'); 
-      }
-      function prevCard() { 
-        if (!currentCards.length) return; 
-        currentIndex = currentIndex === 0 ? currentCards.length - 1 : currentIndex - 1; 
-        showingBack = false; 
-        showCurrentCard(); 
-      }
-      
-      function markCard(know) {
-        updateStats(know ? 'know' : 'dontKnow');
-        fetch('/api/flashcards/mark', {
-          method: 'POST', 
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({know: know, domain: currentDomain})
-        });
-        nextCard();
-      }
-      
-      function updateStats(type) {
-        stats[type]++; 
-        document.getElementById('viewed').textContent = stats.viewed;
-        document.getElementById('knowCount').textContent = stats.know;
-        document.getElementById('dontKnowCount').textContent = stats.dontKnow;
-      }
-      
-      document.querySelectorAll('.domain-chip').forEach(chip => {
-        chip.addEventListener('click', function() {
-          document.querySelectorAll('.domain-chip').forEach(c => { 
-            c.classList.remove('bg-success'); 
-            c.classList.remove('bg-primary'); 
-            c.classList.add('bg-primary'); 
-          });
-          this.classList.remove('bg-primary'); 
-          this.classList.add('bg-success');
-          currentDomain = this.dataset.domain; 
-          filterCards(currentDomain);
-        });
-      });
-      
-      document.getElementById('flashcard').addEventListener('click', flipCard);
-      document.getElementById('nextCard').addEventListener('click', nextCard);
-      document.getElementById('prevCard').addEventListener('click', prevCard);
-      document.getElementById('know').addEventListener('click', () => markCard(true));
-      document.getElementById('dontKnow').addEventListener('click', () => markCard(false));
-      document.addEventListener('keydown', function(e) { 
-        if (e.key === 'j' || e.key === 'J') flipCard(); 
-        else if (e.key === 'l' || e.key === 'L') nextCard(); 
-        else if (e.key === 'k' || e.key === 'K') prevCard(); 
-      });
-      filterCards('random');
-    </script>
-    """
-    
     body = f"""
     <div class="container mt-4">
       <div class="row justify-content-center">
@@ -1577,7 +1489,111 @@ def flashcards_page():
         </div>
       </div>
     </div>
-    {javascript_code}
+    """
+    
+    # Secure JavaScript with XSS protection
+    body += f"""
+    <script>
+      const allCards = {cards_json};
+      let currentCards = [];
+      let currentIndex = 0;
+      let showingBack = false;
+      let currentDomain = 'random';
+      let stats = {{viewed: 0, know: 0, dontKnow: 0}};
+      
+      function escapeHtml(text) {{
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }}
+      
+      function filterCards(domain) {{
+        currentCards = domain === 'random' ? allCards.slice() : allCards.filter(c => c.domain === domain);
+        currentIndex = 0; showingBack = false; shuffleCards(); showCurrentCard();
+      }}
+      
+      function shuffleCards() {{
+        for (let i = currentCards.length - 1; i > 0; i--) {{
+          const j = Math.floor(Math.random() * (i + 1));
+          [currentCards[i], currentCards[j]] = [currentCards[j], currentCards[i]];
+        }}
+      }}
+      
+      function showCurrentCard() {{
+        if (currentCards.length === 0) {{ 
+          document.getElementById('cardContent').innerHTML = '<p>No cards for this domain</p>'; 
+          return; 
+        }}
+        const card = currentCards[currentIndex];
+        const content = showingBack ? escapeHtml(card.back).replace(/\\n/g, '<br>') : escapeHtml(card.front);
+        document.getElementById('cardContent').innerHTML = `
+          <div class="card-number mb-2"><small class="text-muted">${{currentIndex + 1}} of ${{currentCards.length}}</small></div>
+          <div class="card-text">${{content}}</div>
+          <div class="mt-3"><small class="text-muted">${{showingBack ? 'Back' : 'Front'}} - Click to flip</small></div>
+        `;
+      }}
+      
+      function flipCard() {{ showingBack = !showingBack; showCurrentCard(); }}
+      function nextCard() {{ 
+        if (!currentCards.length) return; 
+        currentIndex = (currentIndex + 1) % currentCards.length; 
+        showingBack = false; 
+        showCurrentCard(); 
+        updateStats('viewed'); 
+      }}
+      function prevCard() {{ 
+        if (!currentCards.length) return; 
+        currentIndex = currentIndex === 0 ? currentCards.length - 1 : currentIndex - 1; 
+        showingBack = false; 
+        showCurrentCard(); 
+      }}
+      
+      function markCard(know) {{
+        updateStats(know ? 'know' : 'dontKnow');
+        fetch('/api/flashcards/mark', {{
+          method: 'POST', 
+          headers: {{
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          }},
+          body: JSON.stringify({{know: know, domain: currentDomain}})
+        }});
+        nextCard();
+      }}
+      
+      function updateStats(type) {{
+        stats[type]++; 
+        document.getElementById('viewed').textContent = stats.viewed;
+        document.getElementById('knowCount').textContent = stats.know;
+        document.getElementById('dontKnowCount').textContent = stats.dontKnow;
+      }}
+      
+      document.querySelectorAll('.domain-chip').forEach(chip => {{
+        chip.addEventListener('click', function() {{
+          document.querySelectorAll('.domain-chip').forEach(c => {{ 
+            c.classList.remove('bg-success'); 
+            c.classList.remove('bg-primary'); 
+            c.classList.add('bg-primary'); 
+          }});
+          this.classList.remove('bg-primary'); 
+          this.classList.add('bg-success');
+          currentDomain = this.dataset.domain; 
+          filterCards(currentDomain);
+        }});
+      }});
+      
+      document.getElementById('flashcard').addEventListener('click', flipCard);
+      document.getElementById('nextCard').addEventListener('click', nextCard);
+      document.getElementById('prevCard').addEventListener('click', prevCard);
+      document.getElementById('know').addEventListener('click', () => markCard(true));
+      document.getElementById('dontKnow').addEventListener('click', () => markCard(false));
+      document.addEventListener('keydown', function(e) {{ 
+        if (e.key === 'j' || e.key === 'J') flipCard(); 
+        else if (e.key === 'l' || e.key === 'L') nextCard(); 
+        else if (e.key === 'k' || e.key === 'K') prevCard(); 
+      }});
+      filterCards('random');
+    </script>
     """
     return base_layout("Flashcards", body)
 
@@ -1609,143 +1625,6 @@ def mock_exam_page():
     chips.extend([f'<span class="badge bg-primary me-2 mb-2 domain-chip" data-domain="{k}">{v}</span>' for k, v in DOMAINS.items()])
     q = build_quiz(25, "random")
     q_json = json.dumps(q)
-    
-    # Use regular string for JavaScript to avoid f-string issues
-    javascript_code = """
-    <script>
-      let currentExam = """ + q_json + """;
-      let currentDomain = 'random';
-      let userAnswers = {};
-      let startTime = null;
-      
-      function renderExam() {
-        const container = document.getElementById('examQuestions');
-        const questions = currentExam.questions || [];
-        startTime = Date.now();
-        container.innerHTML = questions.map((q, i) => `
-          <div class="card mb-3">
-            <div class="card-body">
-              <h6>Question ${i + 1} of ${questions.length}</h6>
-              <p>${q.question}</p>
-              ${Object.entries(q.options).map(([letter, text]) => `
-                <div class="form-check">
-                  <input class="form-check-input" type="radio" name="q${i}" value="${letter}" id="eq${i}${letter}">
-                  <label class="form-check-label" for="eq${i}${letter}">${letter}) ${text}</label>
-                </div>
-              `).join('')}
-            </div>
-          </div>
-        `).join('');
-        document.getElementById('submitExam').style.display = questions.length > 0 ? 'block' : 'none';
-        container.querySelectorAll('input[type="radio"]').forEach(input => {
-          input.addEventListener('change', function() {
-            const questionIndex = this.name.replace('q', '');
-            userAnswers[questionIndex] = this.value;
-          });
-        });
-      }
-      
-      function buildExam() {
-        const count = parseInt(document.getElementById('questionCount').value);
-        fetch('/api/build-quiz', {
-          method: 'POST', 
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({domain: currentDomain, count})
-        })
-        .then(r => r.json()).then(data => {
-          currentExam = data; 
-          userAnswers = {};
-          document.getElementById('examInfo').textContent = `${count} questions • Domain: ${currentDomain === 'random' ? 'Random' : currentDomain.replace('-', ' ').replace(/\\b\\w/g, l => l.toUpperCase())}`;
-          renderExam();
-        });
-      }
-      
-      function submitExam() {
-        const questions = currentExam.questions || [];
-        const unanswered = questions.length - Object.keys(userAnswers).length;
-        if (unanswered > 0 && !confirm(`You have ${unanswered} unanswered questions. Submit anyway?`)) return;
-        const timeSpent = Math.round((Date.now() - startTime) / 1000 / 60);
-        fetch('/api/submit-quiz', {
-          method: 'POST', 
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({
-            quiz_type: 'mock_exam', 
-            domain: currentDomain, 
-            questions, 
-            answers: userAnswers, 
-            time_spent: timeSpent
-          })
-        })
-        .then(r => r.json()).then(data => {
-          if (data.success) { showResults(data, timeSpent); } else { alert(data.error || 'Submission failed'); }
-        });
-      }
-      
-      function showResults(data, timeSpent) {
-        const content = document.getElementById('resultsContent');
-        const insights = (data.performance_insights || []).join('<br>');
-        const passFail = data.score >= 70 ? 'PASS' : 'FAIL';
-        const passingClass = data.score >= 70 ? 'success' : 'danger';
-        content.innerHTML = `
-          <div class="text-center mb-4">
-            <h3 class="display-4 text-${passingClass}">${data.score}%</h3>
-            <h4 class="text-${passingClass}">${passFail}</h4>
-            <p>You got ${data.correct} / ${data.total}</p>
-            <p><small class="text-muted">Time spent: ${timeSpent} minutes</small></p>
-            <div class="alert alert-info">${insights}</div>
-          </div>
-          <div class="row mb-4">
-            <div class="col-md-4 text-center"><div class="card"><div class="card-body"><h5>${data.score}%</h5><small>Overall Score</small></div></div></div>
-            <div class="col-md-4 text-center"><div class="card"><div class="card-body"><h5>${data.correct}/${data.total}</h5><small>Correct</small></div></div></div>
-            <div class="col-md-4 text-center"><div class="card"><div class="card-body"><h5>${timeSpent}m</h5><small>Time Spent</small></div></div></div>
-          </div>
-          <h5>Detailed Results</h5>
-          <div style="max-height: 400px; overflow-y: auto;">
-            ${(data.detailed_results || []).map(r => `
-              <div class="card mb-2 ${r.is_correct ? 'border-success' : 'border-danger'}">
-                <div class="card-body">
-                  <div class="d-flex justify-content-between">
-                    <strong>Question ${r.index}</strong>
-                    <span class="badge bg-${r.is_correct ? 'success' : 'danger'}">
-                      ${r.is_correct ? 'Correct' : 'Incorrect'}
-                    </span>
-                  </div>
-                  <p class="mt-2">${r.question}</p>
-                  <div class="row">
-                    <div class="col-md-6">
-                      <small><strong>Your answer:</strong> ${r.user_letter || 'None'} ${r.user_text || ''}</small>
-                    </div>
-                    <div class="col-md-6">
-                      <small><strong>Correct answer:</strong> ${r.correct_letter} ${r.correct_text}</small>
-                    </div>
-                  </div>
-                  ${r.explanation ? `<div class="alert alert-light mt-2"><small>${r.explanation}</small></div>` : ''}
-                </div>
-              </div>
-            `).join('')}
-          </div>
-        `;
-        new bootstrap.Modal(document.getElementById('resultsModal')).show();
-      }
-      
-      document.querySelectorAll('.domain-chip').forEach(chip => {
-        chip.addEventListener('click', function() {
-          document.querySelectorAll('.domain-chip').forEach(c => { 
-            c.classList.remove('bg-success'); 
-            c.classList.remove('bg-primary'); 
-            c.classList.add('bg-primary'); 
-          });
-          this.classList.remove('bg-primary'); 
-          this.classList.add('bg-success');
-          currentDomain = this.dataset.domain;
-        });
-      });
-      
-      document.getElementById('buildExam').addEventListener('click', buildExam);
-      document.getElementById('submitExam').addEventListener('click', submitExam);
-      renderExam();
-    </script>
-    """
     
     body = f"""
     <div class="container mt-4">
@@ -1786,7 +1665,155 @@ def mock_exam_page():
         </div>
       </div>
     </div>
-    {javascript_code}
+    """
+    
+    # Secure JavaScript with XSS protection and CSRF headers
+    body += f"""
+    <script>
+      let currentExam = {q_json};
+      let currentDomain = 'random';
+      let userAnswers = {{}};
+      let startTime = null;
+      
+      function escapeHtml(text) {{
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }}
+      
+      function renderExam() {{
+        const container = document.getElementById('examQuestions');
+        const questions = currentExam.questions || [];
+        startTime = Date.now();
+        container.innerHTML = questions.map((q, i) => `
+          <div class="card mb-3">
+            <div class="card-body">
+              <h6>Question ${{i + 1}} of ${{questions.length}}</h6>
+              <p>${{escapeHtml(q.question)}}</p>
+              ${{Object.entries(q.options).map(([letter, text]) => `
+                <div class="form-check">
+                  <input class="form-check-input" type="radio" name="q${{i}}" value="${{letter}}" id="eq${{i}}${{letter}}">
+                  <label class="form-check-label" for="eq${{i}}${{letter}}">${{letter}}) ${{escapeHtml(text)}}</label>
+                </div>
+              `).join('')}}
+            </div>
+          </div>
+        `).join('');
+        document.getElementById('submitExam').style.display = questions.length > 0 ? 'block' : 'none';
+        container.querySelectorAll('input[type="radio"]').forEach(input => {{
+          input.addEventListener('change', function() {{
+            const questionIndex = this.name.replace('q', '');
+            userAnswers[questionIndex] = this.value;
+          }});
+        }});
+      }}
+      
+      function buildExam() {{
+        const count = parseInt(document.getElementById('questionCount').value);
+        fetch('/api/build-quiz', {{
+          method: 'POST',
+          headers: {{
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          }},
+          body: JSON.stringify({{domain: currentDomain, count}})
+        }})
+        .then(r => r.json()).then(data => {{
+          currentExam = data; 
+          userAnswers = {{}};
+          document.getElementById('examInfo').textContent = `${{count}} questions • Domain: ${{currentDomain === 'random' ? 'Random' : currentDomain.replace('-', ' ').replace(/\\b\\w/g, l => l.toUpperCase())}}`;
+          renderExam();
+        }});
+      }}
+      
+      function submitExam() {{
+        const questions = currentExam.questions || [];
+        const unanswered = questions.length - Object.keys(userAnswers).length;
+        if (unanswered > 0 && !confirm(`You have ${{unanswered}} unanswered questions. Submit anyway?`)) return;
+        const timeSpent = Math.round((Date.now() - startTime) / 1000 / 60);
+        fetch('/api/submit-quiz', {{
+          method: 'POST',
+          headers: {{
+            'Content-Type': 'application/json',
+            'X-CSRFToken': document.querySelector('meta[name=csrf-token]').getAttribute('content')
+          }},
+          body: JSON.stringify({{
+            quiz_type: 'mock_exam', 
+            domain: currentDomain, 
+            questions, 
+            answers: userAnswers, 
+            time_spent: timeSpent
+          }})
+        }})
+        .then(r => r.json()).then(data => {{
+          if (data.success) {{ showResults(data, timeSpent); }} else {{ alert(data.error || 'Submission failed'); }}
+        }});
+      }}
+      
+      function showResults(data, timeSpent) {{
+        const content = document.getElementById('resultsContent');
+        const insights = (data.performance_insights || []).join('<br>');
+        const passFail = data.score >= 70 ? 'PASS' : 'FAIL';
+        const passingClass = data.score >= 70 ? 'success' : 'danger';
+        content.innerHTML = `
+          <div class="text-center mb-4">
+            <h3 class="display-4 text-${{passingClass}}">${{data.score}}%</h3>
+            <h4 class="text-${{passingClass}}">${{passFail}}</h4>
+            <p>You got ${{data.correct}} / ${{data.total}}</p>
+            <p><small class="text-muted">Time spent: ${{timeSpent}} minutes</small></p>
+            <div class="alert alert-info">${{insights}}</div>
+          </div>
+          <div class="row mb-4">
+            <div class="col-md-4 text-center"><div class="card"><div class="card-body"><h5>${{data.score}}%</h5><small>Overall Score</small></div></div></div>
+            <div class="col-md-4 text-center"><div class="card"><div class="card-body"><h5>${{data.correct}}/${{data.total}}</h5><small>Correct</small></div></div></div>
+            <div class="col-md-4 text-center"><div class="card"><div class="card-body"><h5>${{timeSpent}}m</h5><small>Time Spent</small></div></div></div>
+          </div>
+          <h5>Detailed Results</h5>
+          <div style="max-height: 400px; overflow-y: auto;">
+            ${{(data.detailed_results || []).map(r => `
+              <div class="card mb-2 ${{r.is_correct ? 'border-success' : 'border-danger'}}">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between">
+                    <strong>Question ${{r.index}}</strong>
+                    <span class="badge bg-${{r.is_correct ? 'success' : 'danger'}}">
+                      ${{r.is_correct ? 'Correct' : 'Incorrect'}}
+                    </span>
+                  </div>
+                  <p class="mt-2">${{escapeHtml(r.question)}}</p>
+                  <div class="row">
+                    <div class="col-md-6">
+                      <small><strong>Your answer:</strong> ${{r.user_letter || 'None'}} ${{escapeHtml(r.user_text || '')}}</small>
+                    </div>
+                    <div class="col-md-6">
+                      <small><strong>Correct answer:</strong> ${{r.correct_letter}} ${{escapeHtml(r.correct_text)}}</small>
+                    </div>
+                  </div>
+                  ${{r.explanation ? `<div class="alert alert-light mt-2"><small>${{escapeHtml(r.explanation)}}</small></div>` : ''}}
+                </div>
+              </div>
+            `).join('')}}
+          </div>
+        `;
+        new bootstrap.Modal(document.getElementById('resultsModal')).show();
+      }}
+      
+      document.querySelectorAll('.domain-chip').forEach(chip => {{
+        chip.addEventListener('click', function() {{
+          document.querySelectorAll('.domain-chip').forEach(c => {{ 
+            c.classList.remove('bg-success'); 
+            c.classList.remove('bg-primary'); 
+            c.classList.add('bg-primary'); 
+          }});
+          this.classList.remove('bg-primary'); 
+          this.classList.add('bg-success');
+          currentDomain = this.dataset.domain;
+        }});
+      }});
+      
+      document.getElementById('buildExam').addEventListener('click', buildExam);
+      document.getElementById('submitExam').addEventListener('click', submitExam);
+      renderExam();
+    </script>
     """
     return base_layout("Mock Exam", body)
 
@@ -2073,7 +2100,19 @@ def billing_checkout(plan):
 @app.get('/billing/success')
 @login_required
 def billing_success():
+    session_id = request.args.get('session_id')
     plan = request.args.get('plan', '')
+    
+    if not session_id:
+        return redirect(url_for('billing_page'))
+    
+    try:
+        cs = stripe.checkout.Session.retrieve(session_id)
+        if cs.customer_email != session.get('email'):
+            return redirect(url_for('billing_page'))
+    except Exception:
+        return redirect(url_for('billing_page'))
+    
     msg = "Your plan is now active with unlimited access."
     if plan == 'monthly':
         title = "Welcome to Monthly"
@@ -2081,6 +2120,7 @@ def billing_success():
         title = "6-Month Plan Activated"
     else:
         title = "Purchase Successful"
+    
     body = f"""
     <div class="container mt-5">
       <div class="row justify-content-center">
@@ -2115,8 +2155,7 @@ def stripe_webhook():
         session_obj = event['data']['object']
         customer_email = session_obj.get('customer_email')
         mode = session_obj.get('mode')  # 'subscription' or 'payment'
-        metadata = session_obj.get('metadata') or {}
-
+        
         if customer_email:
             user = _find_user(customer_email)
             if user:
@@ -2125,10 +2164,11 @@ def stripe_webhook():
                     user['stripe_customer_id'] = session_obj.get('customer')
                     user.pop('subscription_expires_at', None)
                 else:
-                    # one-time sixmonth
-                    duration_days = int((metadata.get('duration_days') or 180))
-                    user['subscription'] = 'sixmonth'
-                    user['subscription_expires_at'] = (datetime.utcnow() + timedelta(days=duration_days)).isoformat(timespec="seconds") + "Z"
+                    # one-time sixmonth - set duration server-side for security
+                    duration_days = 180 if mode == 'payment' else None
+                    if duration_days:
+                        user['subscription'] = 'sixmonth'
+                        user['subscription_expires_at'] = (datetime.utcnow() + timedelta(days=duration_days)).isoformat(timespec="seconds") + "Z"
                 _save_json("users.json", USERS)
                 logger.info(f"Updated subscription for {customer_email} to {user['subscription']}")
 
@@ -2195,6 +2235,10 @@ def settings_save():
     if not name or not email:
         return redirect(url_for('settings_page'))
 
+    # Prevent email collision
+    if email != session.get('email','') and _find_user(email):
+        return redirect(url_for('settings_page'))
+
     user = _find_user(session.get('email', ''))
     if user:
         user['name'] = name
@@ -2209,6 +2253,9 @@ def settings_save():
 # ------------------------ Admin ------------------------
 @app.post("/admin/login")
 def admin_login():
+    if _rate_limited("admin-login", limit=5, per_seconds=300):
+        return redirect(url_for("admin_login_page", error="ratelimited"))
+    
     pwd = (request.form.get("password") or "").strip()
     nxt = request.form.get("next") or url_for("admin_home")
     if ADMIN_PASSWORD and pwd == ADMIN_PASSWORD:
@@ -2228,6 +2275,7 @@ def admin_login_page():
           <div class="card"><div class="card-body">
             <h2>Admin Login</h2>
             {'<div class="alert alert-danger">Incorrect password</div>' if error=="badpass" else ''}
+            {'<div class="alert alert-danger">Too many attempts. Try again in 5 minutes.</div>' if error=="ratelimited" else ''}
             {'<div class="alert alert-warning">ADMIN_PASSWORD is not set; admin login is disabled.</div>' if (not ADMIN_PASSWORD or error=="nopass") else ''}
             <form method="POST" action="/admin/login">
               <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
@@ -2542,7 +2590,7 @@ def diag_openai():
         return jsonify({"error": "Unauthorized"}), 401
     try:
         msg = chat_with_ai(["Say 'pong' if you can hear me."])
-        ok = "pong" in msg.lower()
+        ok = "pong" in msg.lower().strip()
         # Don't return the actual response content to prevent info leakage
         return jsonify({"success": ok, "timestamp": datetime.utcnow().isoformat()}), (200 if ok else 500)
     except Exception as e:
