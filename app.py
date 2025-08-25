@@ -1596,24 +1596,28 @@ def mock_exam_page():
           </div>
                     <h5>Detailed Results</h5>
           <div style="max-height: 400px; overflow-y: auto;">
-            " + (data.detailed_results || []).map(function(r) {
-              return '<div class="card mb-2 ' + (r.is_correct ? 'border-success' : 'border-danger') + '">'
-                +   '<div class="card-body">'
-                +     '<div class="d-flex justify-content-between">'
-                +       '<strong>Question ' + r.index + '</strong>'
-                +       '<span class="badge bg-' + (r.is_correct ? 'success' : 'danger') + '">'
-                +         (r.is_correct ? 'Correct' : 'Incorrect')
-                +       '</span>'
-                +     '</div>'
-                +     '<p class="mt-2">' + r.question + '</p>'
-                +     '<div class="row">'
-                +       '<div class="col-md-6"><small><strong>Your answer:</strong> ' + (r.user_letter || 'None') + ' ' + (r.user_text || '') + '</small></div>'
-                +       '<div class="col-md-6"><small><strong>Correct answer:</strong> ' + r.correct_letter + ' ' + r.correct_text + '</small></div>'
-                +     '</div>'
-                +     (r.explanation ? '<div class="alert alert-light mt-2"><small>' + r.explanation + '</small></div>' : '')
-                +   '</div>'
-                + '</div>';
-            }).join("") + "
+            ${(data.detailed_results || []).map(r => `
+              <div class="card mb-2 ${r.is_correct ? 'border-success' : 'border-danger'}">
+                <div class="card-body">
+                  <div class="d-flex justify-content-between">
+                    <strong>Question ${r.index}</strong>
+                    <span class="badge bg-${r.is_correct ? 'success' : 'danger'}">
+                      ${r.is_correct ? 'Correct' : 'Incorrect'}
+                    </span>
+                  </div>
+                  <p class="mt-2">${r.question}</p>
+                  <div class="row">
+                    <div class="col-md-6">
+                      <small><strong>Your answer:</strong> ${r.user_letter || 'None'} ${r.user_text || ''}</small>
+                    </div>
+                    <div class="col-md-6">
+                      <small><strong>Correct answer:</strong> ${r.correct_letter} ${r.correct_text}</small>
+                    </div>
+                  </div>
+                  ${r.explanation ? `<div class="alert alert-light mt-2"><small>${r.explanation}</small></div>` : ''}
+                </div>
+              </div>
+            `).join('')}
           </div>
         `;
         new bootstrap.Modal(document.getElementById('resultsModal')).show();
@@ -2383,6 +2387,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
