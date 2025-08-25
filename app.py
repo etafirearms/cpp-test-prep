@@ -232,14 +232,16 @@ if subscription == 'premium' and expires_at:
     
     today = datetime.utcnow()
     month_key = today.strftime('%Y-%m')
-    monthly_usage = usage.get('monthly', {}).get(month_key, {})
-    
-   limits = {
-    'free': {'quizzes': 0, 'questions': 0, 'tutor_msgs': 0, 'flashcards': 0},
-    'premium': {'quizzes': -1, 'questions': -1, 'tutor_msgs': -1, 'flashcards': -1},
-}
-   
-    user_limits = limits.get(subscription, limits['free'])
+       monthly_usage = usage.get('monthly', {}).get(month_key, {})
+
+    # Plans: 'monthly' (auto-renew), 'six_month' (non-renewing), 'inactive' (no access)
+    limits = {
+        'monthly':   {'quizzes': -1, 'questions': -1, 'tutor_msgs': -1, 'flashcards': -1},
+        'six_month': {'quizzes': -1, 'questions': -1, 'tutor_msgs': -1, 'flashcards': -1},
+        'inactive':  {'quizzes': 0,  'questions': 0,  'tutor_msgs': 0,  'flashcards': 0},
+    }
+
+    user_limits = limits.get(subscription, limits['inactive'])
     current_usage = monthly_usage.get(action_type, 0)
     limit = user_limits.get(action_type, 0)
     
@@ -2878,6 +2880,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
