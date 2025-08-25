@@ -880,10 +880,7 @@ def signup_post():
     session['email'] = user['email']
     session['name'] = user['name']
     
-    if final_plan == 'premium':
-        return redirect(url_for('billing_page'))
-    
-    return redirect(url_for('home'))
+    return redirect(url_for('billing_page'))
 
 @app.post("/logout")
 def logout():
@@ -2880,6 +2877,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
