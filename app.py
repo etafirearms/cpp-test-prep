@@ -199,11 +199,11 @@ def _get_or_create_user(email: str):
     u = _find_user(email)
     if u:
         return u
-    u = {
+        u = {
         "id": str(uuid.uuid4()),
         "name": session.get("name",""),
         "email": email.strip().lower(),
-        "subscription": "free",
+        "subscription": "inactive",
         "password_hash": generate_password_hash("changeme123"),
         "usage": {"quizzes": 0, "questions": 0, "last_active": ""},
         "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
@@ -2880,6 +2880,7 @@ def diag_openai():
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
