@@ -2450,13 +2450,12 @@ def _track_page_views():
 @app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
 @login_required
 def tutor_page():
+    return tutor_page()
 # --- Alias: keep existing UI link "/study" working without changing markup ---
 @app.route("/study", methods=["GET", "POST"], strict_slashes=False)
 @app.route("/study/", methods=["GET", "POST"], strict_slashes=False)
 @login_required
 def study_alias():
-    return tutor_page()
-
     user = _find_user(session.get("email","")) or {}
     user_id = user.get("id") or session.get("email") or "unknown"
 
@@ -3479,4 +3478,5 @@ def admin_content_acceptance():
             "questions_total": QUESTION_TARGET_TOTAL
         }
     })
+
 
