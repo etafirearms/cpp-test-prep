@@ -1458,6 +1458,113 @@ def init_sample_data():
         logger.info("Sample data initialized (questions loaded: %d)", len(ALL_QUESTIONS))
     except Exception as e:
         logger.error("Failed to initialize sample data: %s", e)
+# ====== Core Feature Routes (placeholders, no layout changes) ======
+
+@app.route("/tutor", methods=["GET", "POST"])
+@login_required
+def tutor_page():
+    # Minimal, non-breaking page so links stop 404'ing.
+    content = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-primary text-white">
+            <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted">Tutor mode is wired up. This page will host interactive tutoring logic next.</p>
+            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Tutor", content)
+
+
+@app.route("/flashcards", methods=["GET", "POST"])
+@login_required
+def flashcards_page():
+    content = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-success text-white">
+            <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted">Flashcards are enabled at this route. Content hooks will be added next.</p>
+            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Flashcards", content)
+
+
+@app.route("/quiz", methods=["GET", "POST"])
+@login_required
+def quiz_page():
+    content = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-warning text-dark">
+            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted">Quiz route is active. We’ll connect the question engine in the next pass.</p>
+            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Quiz", content)
+
+
+# Some navs use "/mock" and others "/mock-exam"; register both so neither 404s
+@app.route("/mock", methods=["GET", "POST"])
+@app.route("/mock-exam", methods=["GET", "POST"])
+@login_required
+def mock_exam_page():
+    content = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-danger text-white">
+            <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Mock Exam</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted">Mock Exam route is live. Timer/scoring hooks will be attached here.</p>
+            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Mock Exam", content)
+
+@app.route("/progress", methods=["GET"])
+@login_required
+def progress_page():
+    content = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-info text-white">
+            <h3 class="mb-0"><i class="bi bi-graph-up-arrow me-2"></i>Progress</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted">Your progress dashboard will render here (scores, domains, streaks).</p>
+            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Progress", content)
 
 # ====== App Factory & Main ======
 def create_app():
@@ -1473,3 +1580,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
