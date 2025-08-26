@@ -2141,52 +2141,103 @@ def _get_user_history(user_id, channel, limit=10):
 # ====== AI Client (uses your existing env keys) ======
 def _call_tutor_agent(user_query, meta=None):
     """
-    Calls your AI agent using environment configuration.
-    Supports either:
-      - OPENAI_API_KEY + MODEL_TUTOR (chat.completions)
-      - Or a custom base via OPENAI_API_BASE (compatible with OpenAI spec)
+    Calls your Tutor agent using env configuration.
+    Supports:
+      - OpenAI (OPENAI_API_KEY, OPENAI_API_BASE?, MODEL_TUTOR?)
+      - Azure OpenAI (AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT)
+    Adds: retries, richer errors, and small timeouts.
     """
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    base_url = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-    model = os.environ.get("MODEL_TUTOR", "gpt-4o-mini")
-
-    if not api_key:
-        return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
-
-    # Chat Completions (widely compatible)
-    url = f"{base_url}/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
-
+    meta = meta or {}
+    timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
+    temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
+    max_tokens = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
     system_msg = os.environ.get("TUTOR_SYSTEM_PROMPT",
         "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step, "
         "cite domain numbers when relevant, and ask a short follow-up check for understanding."
     )
 
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_msg},
-            {"role": "user", "content": user_query}
-        ],
-        "temperature": float(os.environ.get("TUTOR_TEMP", "0.3")),
-        "max_tokens": int(os.environ.get("TUTOR_MAX_TOKENS", "800")),
-    }
+    # --- Detect provider: Azure OpenAI vs OpenAI-compatible ---
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+    azure_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+    azure_deploy = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
 
-    try:
-        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
-        if resp.status_code >= 400:
-            return False, f"Agent error {resp.status_code}: {resp.text[:300]}", {"status": resp.status_code}
-        data = resp.json()
-        # OpenAI-format extraction
-        answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-        usage = data.get("usage", {})
-        return True, answer, {"usage": usage, "model": model}
-    except Exception as e:
-        logger.error("Tutor agent call failed: %s", e, exc_info=True)
-        return False, "Network error talking to the tutor agent.", {}
+    if azure_endpoint and azure_key and azure_deploy:
+        # Azure OpenAI
+        url = f"{azure_endpoint}/openai/deployments/{azure_deploy}/chat/completions?api-version=2024-06-01"
+        headers = {
+            "api-key": azure_key,
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_query}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+            # Azure ignores "model" here; it's tied to the deployment
+        }
+    else:
+        # OpenAI / compatible
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return False, "Tutor is not configured: missing API key.", {}
+        base_url = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+        model = os.environ.get("MODEL_TUTOR", "gpt-4o-mini").strip()
+        url = f"{base_url}/chat/completions"
+        headers = {
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+        }
+        org = os.environ.get("OPENAI_ORG", "").strip()
+        if org:
+            headers["OpenAI-Organization"] = org
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_query}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+    # --- Simple retry with backoff for transient errors ---
+    backoffs = [0, 1.5, 3.0]  # seconds
+    last_err = None
+    for wait_s in backoffs:
+        if wait_s:
+            time.sleep(wait_s)
+        try:
+            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout_s)
+            status = resp.status_code
+            # Soft-handle rate limits/transients with another retry
+            if status in (429, 500, 502, 503, 504):
+                last_err = f"{status} {resp.text[:300]}"
+                continue
+            if status >= 400:
+                # Try to surface a readable message from JSON error
+                try:
+                    j = resp.json()
+                    msg = (j.get("error") or {}).get("message") or resp.text[:300]
+                except Exception:
+                    msg = resp.text[:300]
+                return False, f"Agent error {status}: {msg}", {"status": status}
+            data = resp.json()
+            answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            usage = data.get("usage", {})
+            # Normalize meta for analytics
+            meta_out = {"usage": usage}
+            if azure_endpoint:
+                meta_out.update({"provider": "azure", "deployment": azure_deploy})
+            else:
+                meta_out.update({"provider": "openai", "model": payload.get("model")})
+            return True, answer, meta_out
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    return False, f"Network/agent error: {last_err or 'unknown'}", {}
 
 
 # ====== Page Views Tracking (no UI change) ======
@@ -2197,7 +2248,21 @@ def _track_page_views():
         _log_event(uid, "page.view", {"path": request.path, "method": request.method})
     except Exception:
         pass
-
+@app.route("/tutor/ping", methods=["GET"])
+@login_required
+def tutor_ping():
+    """
+    Quick sanity check for Tutor config from the browser.
+    Does a tiny roundtrip with the agent and returns JSON (no UI).
+    """
+    ok, answer, meta = _call_tutor_agent("Reply 'pong' only.", meta={"ping": True})
+    # Trim long answers defensively
+    short = (answer or "")[:200]
+    return jsonify({
+        "ok": bool(ok),
+        "answer_preview": short,
+        "meta": meta
+    }), (200 if ok else 502)
 
 # ====== Analytics Hooks ======
 @app.route("/api/track", methods=["POST"])
@@ -2232,6 +2297,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
