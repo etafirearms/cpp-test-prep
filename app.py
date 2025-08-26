@@ -1565,6 +1565,479 @@ def tutor_page():
     </div>
     """
     return base_layout("Tutor", content)
+# ====== Quiz / Mock Exam Engine (file-backed; preserves layout) ======
+
+# ---------- Helpers ----------
+def _user_id():
+    return (session.get("user_id")
+            or session.get("email")
+            or "unknown")
+
+def _normalize_question(q, idx=None):
+    """
+    Normalize heterogeneous question shapes into a common structure:
+
+    Returns:
+      {
+        "id": str,
+        "text": "Question text",
+        "domain": "Domain string or None",
+        "choices": [{"key":"A","text":"..."}, ...],
+        "correct_key": "A" (optional; stored server-side only)
+      }
+    """
+    if q is None:
+        return None
+    qid = str(q.get("id") or idx or uuid.uuid4())
+    text = (q.get("question") or q.get("q") or q.get("stem") or q.get("text") or "").strip()
+    domain = (q.get("domain") or q.get("category") or q.get("section") or None)
+
+    raw_choices = (q.get("choices") or q.get("options") or q.get("answers") or [])
+    if isinstance(raw_choices, dict):
+        items = sorted(list(raw_choices.items()), key=lambda x: x[0])
+        choices = [{"key": k.strip(), "text": str(v)} for k, v in items]
+    else:
+        choices = []
+        letters = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+        for i, c in enumerate(raw_choices):
+            if isinstance(c, dict):
+                k = str(c.get("key") or letters[i])
+                t = str(c.get("text") or c.get("label") or c.get("value") or "")
+            else:
+                k = letters[i]
+                t = str(c)
+            choices.append({"key": k.strip(), "text": t})
+
+    correct = q.get("correct") or q.get("answer") or q.get("correct_key")
+    correct_key = None
+    if isinstance(correct, (int, float)):
+        idx = int(correct)
+        if 0 <= idx < len(choices):
+            correct_key = choices[idx]["key"]
+    elif isinstance(correct, str):
+        c_str = correct.strip()
+        keyset = {c["key"] for c in choices}
+        if c_str in keyset:
+            correct_key = c_str
+        else:
+            for c in choices:
+                if c_str.lower() == c["text"].strip().lower():
+                    correct_key = c["key"]
+                    break
+
+    return {
+        "id": qid,
+        "text": text,
+        "domain": domain,
+        "choices": choices,
+        "correct_key": correct_key
+    }
+
+def _all_normalized_questions():
+    try:
+        qs = ALL_QUESTIONS  # must exist in your app
+    except Exception:
+        qs = []
+    out = []
+    for i, q in enumerate(qs):
+        nq = _normalize_question(q, idx=i)
+        if nq and nq.get("text") and nq.get("choices"):
+            out.append(nq)
+    return out
+
+def _pick_questions(count, domain=None):
+    pool = _all_normalized_questions()
+    if domain:
+        pool = [q for q in pool if str(q.get("domain") or "").lower() == str(domain).lower()]
+    random.shuffle(pool)
+    return pool[:max(1, min(count, len(pool)))]
+
+def _run_key(mode, user_id):
+    # mode in {"quiz","mock"}
+    return f"{mode}_run_{user_id}.json"
+
+def _load_run(mode, user_id):
+    return _load_json(_run_key(mode, user_id), {})
+
+def _save_run(mode, user_id, run):
+    _save_json(_run_key(mode, user_id), run)
+
+def _finish_run(mode, user_id):
+    try:
+        os.remove(os.path.join(DATA_DIR, _run_key(mode, user_id)))
+    except Exception:
+        pass
+
+def _grade(run):
+    """
+    run = {
+      "mode": "quiz"/"mock",
+      "qset": [{"id","text","domain","choices","correct_key"}...],
+      "answers": {"qid":"A"...}
+    }
+    Returns (score, total, details_by_qid, domain_breakdown)
+    """
+    answers = run.get("answers", {})
+    qset = run.get("qset", [])
+    total = len(qset)
+    correct = 0
+    details = {}
+    domain_stats = {}  # {domain: {"correct":n,"total":n}}
+    for q in qset:
+        qid = q["id"]
+        user_key = answers.get(qid)
+        corr = (q.get("correct_key") and user_key == q["correct_key"])
+        if corr:
+            correct += 1
+        d = (q.get("domain") or "Unspecified")
+        ds = domain_stats.setdefault(d, {"correct": 0, "total": 0})
+        ds["total"] += 1
+        if corr:
+            ds["correct"] += 1
+        details[qid] = {
+            "user_key": user_key,
+            "correct_key": q.get("correct_key"),
+            "is_correct": bool(corr),
+            "domain": d
+        }
+    return correct, total, details, domain_stats
+
+def _percent(num, den):
+    if not den:
+        return 0.0
+    return round(100.0 * float(num) / float(den), 1)
+
+def _record_attempt(user_id, mode, run, results):
+    try:
+        attempts = _load_json("attempts.json", [])
+        correct, total, _details, domain_stats = results
+        attempts.append({
+            "id": str(uuid.uuid4()),
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "user_id": user_id,
+            "mode": mode,
+            "count": total,
+            "correct": correct,
+            "score_pct": _percent(correct, total),
+            "domains": domain_stats
+        })
+        _save_json("attempts.json", attempts)
+    except Exception as e:
+        logger.warning("record_attempt failed: %s", e)
+
+# ---------- Shared rendering (no backslashes inside f-string expressions) ----------
+def _render_question_card(title, route, run, index, error_msg=""):
+    qset = run.get("qset", [])
+    total = len(qset)
+    i = max(0, min(index, total - 1))
+    q = qset[i]
+    qnum = i + 1
+    prev_disabled = "disabled" if i == 0 else ""
+    next_label = "Finish" if i == total - 1 else "Next"
+    chosen = (run.get("answers", {}) or {}).get(q["id"])
+
+    radios_html = []
+    for c in q["choices"]:
+        checked = "checked" if chosen == c["key"] else ""
+        radios_html.append(
+            f"""
+            <div class="form-check mb-2">
+              <input class="form-check-input" type="radio" name="choice" id="c_{q['id']}_{c['key']}" value="{html.escape(c['key'])}" {checked}>
+              <label class="form-check-label" for="c_{q['id']}_{c['key']}"><span class="fw-semibold">{html.escape(c['key'])}.</span> {html.escape(c['text'])}</label>
+            </div>
+            """
+        )
+    choices_html = "".join(radios_html)
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-10 col-xl-8">
+        <div class="card">
+          <div class="card-header bg-warning text-dark">
+            <div class="d-flex justify-content-between align-items-center">
+              <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>{html.escape(title)}</h3>
+              <div class="small text-muted">Question {qnum} of {total}</div>
+            </div>
+          </div>
+          <div class="card-body">
+            {"<div class='alert alert-danger'>" + html.escape(error_msg) + "</div>" if error_msg else ""}
+            <div class="mb-3">
+              <div class="fw-semibold mb-1">Question</div>
+              <div>{html.escape(q['text'])}</div>
+              {"<div class='text-muted small mt-1'>Domain: " + html.escape(str(q.get('domain') or 'Unspecified')) + "</div>"}
+            </div>
+
+            <form method="POST" class="mt-3">
+              <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+              <input type="hidden" name="index" value="{i}"/>
+              <div class="mb-3">
+                <div class="fw-semibold mb-2">Select one:</div>
+                {choices_html}
+              </div>
+              <div class="d-flex gap-2">
+                <button name="nav" value="prev" class="btn btn-outline-secondary" {prev_disabled}>
+                  <i class="bi bi-arrow-left me-1"></i>Prev
+                </button>
+                <button name="nav" value="next" class="btn btn-primary">
+                  {next_label} <i class="bi bi-arrow-right ms-1"></i>
+                </button>
+              </div>
+            </form>
+
+            <div class="mt-3">
+              <a href="{route}?reset=1" class="btn btn-outline-danger"><i class="bi bi-arrow-counterclockwise me-1"></i>Reset</a>
+              <a href="/" class="btn btn-outline-secondary ms-2"><i class="bi bi-house me-1"></i>Home</a>
+            </div>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout(title, content)
+
+def _render_results_card(title, route, run, results):
+    correct, total, details, domain_stats = results
+    pct = _percent(correct, total)
+
+    qrows = []
+    for q in run.get("qset", []):
+        qid = q["id"]
+        d = details.get(qid, {})
+        is_ok = d.get("is_correct")
+        badge = "<span class='badge bg-success'>Correct</span>" if is_ok else "<span class='badge bg-danger'>Wrong</span>"
+        user_k = d.get("user_key") or "—"
+        corr_k = d.get("correct_key") or "—"
+        qrows.append(f"""
+          <tr>
+            <td class="text-nowrap">{html.escape(d.get('domain','Unspecified'))}</td>
+            <td>{html.escape(q['text'])}</td>
+            <td class="text-center">{html.escape(user_k)}</td>
+            <td class="text-center">{html.escape(corr_k)}</td>
+            <td class="text-center">{badge}</td>
+          </tr>
+        """)
+    qtable = "".join(qrows) or "<tr><td colspan='5' class='text-center text-muted'>No items.</td></tr>"
+
+    drows = []
+    for dname, stats in sorted(domain_stats.items(), key=lambda x: x[0]):
+        c = stats["correct"]; t = stats["total"]
+        drows.append(f"""
+          <tr>
+            <td>{html.escape(str(dname))}</td>
+            <td class="text-center">{c}/{t}</td>
+            <td class="text-center">{_percent(c,t)}%</td>
+          </tr>
+        """)
+    dtable = "".join(drows) or "<tr><td colspan='3' class='text-center text-muted'>No domain data.</td></tr>"
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-info text-white">
+            <h3 class="mb-0"><i class="bi bi-graph-up-arrow me-2"></i>{html.escape(title)} — Results</h3>
+          </div>
+          <div class="card-body">
+            <div class="row g-3">
+              <div class="col-md-4">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold">Score</div>
+                  <div class="display-6">{correct}/{total}</div>
+                  <div class="text-muted">{pct}%</div>
+                </div>
+              </div>
+              <div class="col-md-8">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">By Domain</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-center">Correct</th><th class="text-center">%</th></tr></thead>
+                      <tbody>{dtable}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-4">
+              <div class="fw-semibold mb-2">Question Review</div>
+              <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                  <thead>
+                    <tr>
+                      <th>Domain</th>
+                      <th>Question</th>
+                      <th class="text-center">Your</th>
+                      <th class="text-center">Correct</th>
+                      <th class="text-center">Result</th>
+                    </tr>
+                  </thead>
+                  <tbody>{qtable}</tbody>
+                </table>
+              </div>
+            </div>
+
+            <div class="mt-3 d-flex gap-2">
+              <a href="{route}?new=1" class="btn btn-primary"><i class="bi bi-arrow-repeat me-1"></i>New {html.escape(title)}</a>
+              <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
+            </div>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout(f"{title} Results", content)
+
+# ---------- QUIZ ----------
+@app.route("/quiz", methods=["GET", "POST"])
+@login_required
+def quiz_page():
+    user_id = _user_id()
+
+    if request.method == "GET":
+        if request.args.get("reset") == "1":
+            _finish_run("quiz", user_id)
+            return redirect(url_for("quiz_page"))
+        if request.args.get("new") == "1":
+            _finish_run("quiz", user_id)
+
+    run = _load_run("quiz", user_id)
+
+    if not run:
+        try:
+            count = int(request.args.get("count") or 10)
+        except Exception:
+            count = 10
+        count = max(5, min(count, 50))
+        domain = request.args.get("domain")
+        qset = _pick_questions(count, domain=domain)
+        run = {
+            "mode": "quiz",
+            "created": datetime.utcnow().isoformat() + "Z",
+            "user_id": user_id,
+            "qset": qset,
+            "answers": {},
+            "index": 0,
+            "finished": False
+        }
+        _save_run("quiz", user_id, run)
+
+    error_msg = ""
+    if request.method == "POST":
+        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            abort(403)
+        try:
+            idx = int(request.form.get("index") or run.get("index", 0))
+        except Exception:
+            idx = run.get("index", 0)
+        idx = max(0, min(idx, len(run["qset"]) - 1))
+
+        choice = (request.form.get("choice") or "").strip()
+        nav = (request.form.get("nav") or "next").strip()
+        qid = run["qset"][idx]["id"]
+
+        if nav == "prev":
+            if choice:
+                run["answers"][qid] = choice
+            run["index"] = max(0, idx - 1)
+        else:
+            if not choice and qid not in run["answers"]:
+                error_msg = "Please select an answer to continue."
+            else:
+                if choice:
+                    run["answers"][qid] = choice
+                if idx == len(run["qset"]) - 1:
+                    run["finished"] = True
+                else:
+                    run["index"] = idx + 1
+
+        _save_run("quiz", user_id, run)
+        _log_event(user_id, "quiz.answer", {"idx": idx, "chosen": choice or run["answers"].get(qid)})
+
+    if run.get("finished"):
+        results = _grade(run)
+        _record_attempt(user_id, "quiz", run, results)
+        _finish_run("quiz", user_id)
+        return _render_results_card("Quiz", "/quiz", run, results)
+
+    curr_idx = int(run.get("index", 0))
+    return _render_question_card("Quiz", "/quiz", run, curr_idx, error_msg)
+
+# ---------- MOCK EXAM ----------
+@app.route("/mock-exam", methods=["GET", "POST"])
+@app.route("/mock", methods=["GET", "POST"])
+@login_required
+def mock_exam_page():
+    user_id = _user_id()
+
+    if request.method == "GET":
+        if request.args.get("reset") == "1":
+            _finish_run("mock", user_id)
+            return redirect(url_for("mock_exam_page"))
+        if request.args.get("new") == "1":
+            _finish_run("mock", user_id)
+
+    run = _load_run("mock", user_id)
+
+    if not run:
+        try:
+            count = int(request.args.get("count") or 50)
+        except Exception:
+            count = 50
+        count = max(25, min(count, 150))
+        domain = request.args.get("domain")
+        qset = _pick_questions(count, domain=domain)
+        run = {
+            "mode": "mock",
+            "created": datetime.utcnow().isoformat() + "Z",
+            "user_id": user_id,
+            "qset": qset,
+            "answers": {},
+            "index": 0,
+            "finished": False
+        }
+        _save_run("mock", user_id, run)
+
+    error_msg = ""
+    if request.method == "POST":
+        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            abort(403)
+        try:
+            idx = int(request.form.get("index") or run.get("index", 0))
+        except Exception:
+            idx = run.get("index", 0)
+        idx = max(0, min(idx, len(run["qset"]) - 1))
+
+        choice = (request.form.get("choice") or "").strip()
+        nav = (request.form.get("nav") or "next").strip()
+        qid = run["qset"][idx]["id"]
+
+        if nav == "prev":
+            if choice:
+                run["answers"][qid] = choice
+            run["index"] = max(0, idx - 1)
+        else:
+            if not choice and qid not in run["answers"]:
+                error_msg = "Please select an answer to continue."
+            else:
+                if choice:
+                    run["answers"][qid] = choice
+                if idx == len(run["qset"]) - 1:
+                    run["finished"] = True
+                else:
+                    run["index"] = idx + 1
+
+        _save_run("mock", user_id, run)
+        _log_event(user_id, "mock.answer", {"idx": idx, "chosen": choice or run["answers"].get(qid)})
+
+    if run.get("finished"):
+        results = _grade(run)
+        _record_attempt(user_id, "mock", run, results)
+        _finish_run("mock", user_id)
+        return _render_results_card("Mock Exam", "/mock-exam", run, results)
+
+    curr_idx = int(run.get("index", 0))
+    return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
 
 @app.route("/flashcards", methods=["GET", "POST"])
 @login_required
@@ -1586,49 +2059,6 @@ def flashcards_page():
     """
     return base_layout("Flashcards", content)
 
-
-@app.route("/quiz", methods=["GET", "POST"])
-@login_required
-def quiz_page():
-    content = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8">
-        <div class="card">
-          <div class="card-header bg-warning text-dark">
-            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted">Quiz route is active. We’ll connect the question engine in the next pass.</p>
-            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Quiz", content)
-
-
-# Some navs use "/mock" and others "/mock-exam"; register both so neither 404s
-@app.route("/mock", methods=["GET", "POST"])
-@app.route("/mock-exam", methods=["GET", "POST"])
-@login_required
-def mock_exam_page():
-    content = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8">
-        <div class="card">
-          <div class="card-header bg-danger text-white">
-            <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Mock Exam</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted">Mock Exam route is live. Timer/scoring hooks will be attached here.</p>
-            <a href="/" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Mock Exam", content)
 
 @app.route("/progress", methods=["GET"])
 @login_required
@@ -1780,6 +2210,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
