@@ -1,7 +1,5 @@
-# app.py
-
 # ====== Imports & Basic Config ======
-from flask import Flask, request, jsonify, session, redirect, url_for, Response
+from flask import Flask, request, jsonify, session, redirect, url_for, Response, abort
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
@@ -39,16 +37,28 @@ app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
 if HAS_CSRF:
     csrf = CSRFProtect(app)
 
+# ====== OpenAI / Models ======
 OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 OPENAI_API_BASE   = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-stripe.api_key            = os.environ.get('STRIPE_SECRET_KEY', '')
-STRIPE_WEBHOOK_SECRET     = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
-STRIPE_MONTHLY_PRICE_ID   = os.environ.get('STRIPE_MONTHLY_PRICE_ID', '')
-STRIPE_SIXMONTH_PRICE_ID  = os.environ.get('STRIPE_SIXMONTH_PRICE_ID', '')
-ADMIN_PASSWORD            = os.environ.get("ADMIN_PASSWORD", "").strip()
+# ====== Stripe (env-bridge for your existing variable names) ======
+stripe.api_key = os.environ.get('STRIPE_SECRET_KEY', '')
 
+# Accept BOTH naming schemes without touching your Render envs
+STRIPE_MONTHLY_PRICE_ID = (
+    os.environ.get('STRIPE_MONTHLY_PRICE_ID') or
+    os.environ.get('STRIPE_PRICE_MONTHLY_ID', '')
+)
+STRIPE_SIXMONTH_PRICE_ID = (
+    os.environ.get('STRIPE_SIXMONTH_PRICE_ID') or
+    os.environ.get('STRIPE_PRICE_6MONTH_ID', '')
+)
+
+STRIPE_WEBHOOK_SECRET    = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
+STRIPE_PUBLISHABLE_KEY   = os.environ.get('STRIPE_PUBLISHABLE_KEY', '')
+
+# ====== App Meta / Flags ======
 APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 IS_STAGING  = os.environ.get("RENDER_SERVICE_NAME", "").endswith("-staging")
 DEBUG       = os.environ.get("FLASK_DEBUG", "0") == "1"
@@ -109,10 +119,33 @@ def _save_json(name, data):
         except Exception as e2:
             logger.error("Fallback _save_json failed for %s: %s", name, e2)
 
-QUESTIONS  = _load_json("questions.json", [])
-FLASHCARDS = _load_json("flashcards.json", [])
-USERS      = _load_json("users.json", [])
+# Base local stores (kept for backward compatibility)
+QUESTIONS_BASE  = _load_json("questions.json", [])
+FLASHCARDS_BASE = _load_json("flashcards.json", [])
+USERS           = _load_json("users.json", [])
 
+# ----- Bank Loader (adds /data/bank/*.json without breaking old files) -----
+def _load_bank():
+    bank_dir = os.path.join(DATA_DIR, "bank")
+    os.makedirs(bank_dir, exist_ok=True)
+    fpath = os.path.join(bank_dir, "cpp_flashcards_v1.json")
+    qpath = os.path.join(bank_dir, "cpp_questions_v1.json")
+
+    # Make names relative to DATA_DIR so _load_json works
+    f_rel = os.path.relpath(fpath, DATA_DIR)
+    q_rel = os.path.relpath(qpath, DATA_DIR)
+
+    bank_flashcards = _load_json(f_rel, [])
+    bank_questions  = _load_json(q_rel, [])
+    return bank_flashcards, bank_questions
+
+BANK_FLASHCARDS, BANK_QUESTIONS = _load_bank()
+
+# Merge: keep old + bank (no duplicates handling at this layer; ingestion handles that)
+FLASHCARDS = (FLASHCARDS_BASE or []) + (BANK_FLASHCARDS or [])
+QUESTIONS  = (QUESTIONS_BASE or [])  + (BANK_QUESTIONS  or [])
+
+# ----- Optional SQLite stub for future use -----
 @contextmanager
 def get_db_connection():
     conn = sqlite3.connect(DATABASE_PATH)
@@ -293,207 +326,32 @@ def increment_usage(user_email, action_type, count=1):
     month_usage[action_type] = month_usage.get(action_type, 0) + count
     usage['last_active'] = today.isoformat(timespec="seconds") + "Z"
     _save_json("users.json", USERS)
-# ====== Questions & Domains ======
-BASE_QUESTIONS = [
-    {
-        "question": "What is the primary purpose of a security risk assessment?",
-        "options": {"A": "Identify all threats", "B": "Determine cost-effective mitigation", "C": "Eliminate all risks", "D": "Satisfy compliance"},
-        "correct": "B",
-        "explanation": "Risk assessments balance risk, cost, and operational impact to choose practical controls.",
-        "domain": "security-principles", "difficulty": "medium"
-    },
-    {
-        "question": "In CPTED, natural surveillance primarily accomplishes what?",
-        "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
-        "correct": "B",
-        "explanation": "Design that increases visibility makes misconduct more likely to be observed and deterred.",
-        "domain": "physical-security", "difficulty": "medium"
-    },
-    {
-        "question": "Which concept applies multiple layers so if one fails others still protect?",
-        "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
-        "correct": "B",
-        "explanation": "Layered controls maintain protection despite single-point failures.",
-        "domain": "security-principles", "difficulty": "medium"
-    },
-    {
-        "question": "In incident response, what is usually the FIRST priority?",
-        "options": {"A": "Notify law enforcement", "B": "Contain the incident", "C": "Eradicate malware", "D": "Lessons learned"},
-        "correct": "B",
-        "explanation": "Containment stops the bleeding before eradication and recovery.",
-        "domain": "information-security", "difficulty": "medium"
-    },
-    {
-        "question": "Background investigations primarily support which objective?",
-        "options": {"A": "Regulatory compliance only", "B": "Marketing outcomes", "C": "Reduce insider risk", "D": "Disaster response"},
-        "correct": "C",
-        "explanation": "They help verify suitability and reduce personnel security risks.",
-        "domain": "personnel-security", "difficulty": "medium"
-    },
-    {
-        "question": "What is the primary goal of business continuity planning?",
-        "options": {"A": "Prevent all disasters", "B": "Maintain critical operations during disruption", "C": "Reduce insurance costs", "D": "Only satisfy regulators"},
-        "correct": "B",
-        "explanation": "BCP ensures critical functions continue during and after a disruption.",
-        "domain": "crisis-management", "difficulty": "medium"
-    },
-    {
-        "question": "What establishes legal admissibility of evidence in investigations?",
-        "options": {"A": "Chain of custody", "B": "Digital timestamps", "C": "Witness statements only", "D": "Management approval"},
-        "correct": "A",
-        "explanation": "Chain of custody proves integrity of evidence handling.",
-        "domain": "investigations", "difficulty": "medium"
-    },
-    {
-        "question": "Best approach to security budgeting?",
-        "options": {"A": "Historical spend", "B": "Risk-based allocation", "C": "Industry averages", "D": "Spend remaining funds"},
-        "correct": "B",
-        "explanation": "Direct funds to the highest-impact, risk-reducing controls.",
-        "domain": "business-principles", "difficulty": "medium"
-    },
-]
+@app.template_global()
+def csrf_token():
+    if HAS_CSRF:
+        from flask_wtf.csrf import generate_csrf
+        return generate_csrf()
+    return ""
 
-DOMAINS = {
-    "security-principles": "Security Principles & Practices",
-    "business-principles": "Business Principles & Practices", 
-    "investigations": "Investigations",
-    "personnel-security": "Personnel Security",
-    "physical-security": "Physical Security",
-    "information-security": "Information Security",
-    "crisis-management": "Crisis Management",
-}
+# ====== Health ======
+@app.get("/healthz")
+def healthz():
+    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "version": APP_VERSION}
 
-def _normalize_question(q: dict):
-    if not q or not q.get("question"):
-        return None
-    nq = {
-        "question": q.get("question", "").strip(),
-        "explanation": q.get("explanation", "").strip(),
-        "domain": q.get("domain", "security-principles"),
-        "difficulty": q.get("difficulty", "medium"),
-    }
-    opts = q.get("options")
-    correct_letter = q.get("correct")
-    if isinstance(opts, dict):
-        letters = ["A", "B", "C", "D"]
-        clean = {}
-        for i, L in enumerate(letters):
-            if L in opts:
-                clean[L] = str(opts[L])
-            elif str(i+1) in opts:
-                clean[L] = str(opts[str(i+1)])
-        if len(clean) != 4:
-            return None
-        nq["options"] = clean
-        if correct_letter and isinstance(correct_letter, str) and correct_letter.upper() in ("A","B","C","D"):
-            nq["correct"] = correct_letter.upper()
-        else:
-            try:
-                idx = int(correct_letter)
-                nq["correct"] = ["A","B","C","D"][idx-1]
-            except Exception:
-                return None
-    elif isinstance(opts, list) and q.get("answer"):
-        letters = ["A", "B", "C", "D"]
-        if len(opts) < 4:
-            return None
-        nq["options"] = {letters[i]: str(opts[i]) for i in range(4)}
-        try:
-            ans_idx = int(q.get("answer"))
-            nq["correct"] = letters[ans_idx - 1]
-        except Exception:
-            return None
-    else:
-        return None
-    if nq.get("correct") not in ("A","B","C","D"):
-        return None
-    return nq
-
-def _build_all_questions():
-    merged = []
-    seen = set()
-    def add_many(src):
-        for q in src:
-            nq = _normalize_question(q)
-            if not nq:
-                continue
-            key = (nq["question"], nq["domain"], nq["correct"])
-            if key in seen:
-                continue
-            seen.add(key)
-            merged.append(nq)
-    add_many(QUESTIONS)
-    add_many(BASE_QUESTIONS)
-    return merged
-
-ALL_QUESTIONS = _build_all_questions()
-
-# ====== Misc Helpers ======
-def safe_json_response(data, status_code=200):
-    try:
-        return jsonify(data), status_code
-    except Exception as e:
-        logger.error(f"JSON serialization error: {e}")
-        return jsonify({"error": "Internal server error"}), 500
-
-def filter_questions(domain_key: str | None):
-    pool = ALL_QUESTIONS
-    if not domain_key or domain_key == "random":
-        return pool[:]
-    return [q for q in pool if q.get("domain") == domain_key]
-
-def build_quiz(num: int, domain_key: str | None):
-    pool = filter_questions(domain_key)
-    out = []
-    if not pool:
-        pool = ALL_QUESTIONS[:]
-    while len(out) < num:
-        random.shuffle(pool)
-        for q in pool:
-            if len(out) >= num:
-                break
-            out.append(q.copy())
-    title = f"Practice ({num} questions)"
-    return {"title": title, "domain": domain_key or "random", "questions": out[:num]}
-
-def chat_with_ai(msgs: list[str]) -> str:
-    try:
-        if not OPENAI_API_KEY:
-            return "OpenAI key is not configured. Please set OPENAI_API_KEY."
-        payload = {
-            "model": OPENAI_CHAT_MODEL,
-            "messages": [{"role": "system", "content": "You are a helpful CPP exam tutor. Format your answers for easy reading with short sections and bullet points where helpful."}]
-                        + [{"role": "user", "content": m} for m in msgs][-10:],
-            "temperature": 0.7,
-            "max_tokens": 500,
-        }
-        r = requests.post(
-            f"{OPENAI_API_BASE}/chat/completions",
-            headers={"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"},
-            json=payload,
-            timeout=30,
-        )
-        if r.status_code != 200:
-            logger.error(f"OpenAI API error {r.status_code}: {r.text[:200]}")
-            return f"AI error ({r.status_code}). Please try again."
-        data = r.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        return f"AI request failed: {e}"
-
+# ====== Base Layout ======
 def _plan_badge_text(sub):
     if sub == 'monthly':
         return 'Monthly'
     if sub == 'sixmonth':
         return '6-Month'
     return 'Inactive'
-# ====== Base Layout ======
+
 def base_layout(title: str, body_html: str) -> str:
     user_name = session.get('name', '')
     user_email = session.get('email', '')
     is_logged_in = 'user_id' in session
 
-    # CSRF token value (string) for meta + forms
+    # CSRF token value for meta + forms
     if HAS_CSRF:
         try:
             from flask_wtf.csrf import generate_csrf
@@ -581,7 +439,6 @@ def base_layout(title: str, body_html: str) -> str:
     </footer>
     """
 
-    # Precompute staging banner to avoid f-string traps
     stage_banner = (
         """
         <div class="alert alert-warning alert-dismissible fade show m-0" role="alert">
@@ -660,7 +517,6 @@ def base_layout(title: str, body_html: str) -> str:
     # Replace literal Jinja token in body_html
     body_html = body_html.replace('{{ csrf_token() }}', csrf_token_value)
 
-    # Final HTML
     return f"""<!DOCTYPE html>
     <html lang="en">
     <head>
@@ -686,57 +542,45 @@ def base_layout(title: str, body_html: str) -> str:
     </body>
     </html>"""
 
-@app.template_global()
-def csrf_token():
-    if HAS_CSRF:
-        from flask_wtf.csrf import generate_csrf
-        return generate_csrf()
-    return ""
-# ====== Health ======
-@app.get("/healthz")
-def healthz():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "version": APP_VERSION}
-
 # ====== Auth (Login/Signup/Logout) ======
 @app.get("/login")
 def login_page():
-    if 'user_id' in session:
-        return redirect(url_for('home'))
-
-    body = """
-    <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-6 col-lg-4">
-          <div class="card shadow-lg">
-            <div class="card-body p-4">
-              <div class="text-center mb-4">
-                <i class="bi bi-shield-check text-primary display-4 mb-3"></i>
-                <h2 class="card-title fw-bold text-primary">Welcome Back</h2>
-                <p class="text-muted">Sign in to continue your CPP journey</p>
-              </div>
-              <form method="POST" action="/login">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <div class="mb-3">
-                  <label for="email" class="form-label fw-semibold">Email</label>
-                  <input type="email" class="form-control" name="email" required placeholder="your.email@example.com">
+    if 'user_id' not in session:
+        body = """
+        <div class="container">
+          <div class="row justify-content-center">
+            <div class="col-md-6 col-lg-4">
+              <div class="card shadow-lg">
+                <div class="card-body p-4">
+                  <div class="text-center mb-4">
+                    <i class="bi bi-shield-check text-primary display-4 mb-3"></i>
+                    <h2 class="card-title fw-bold text-primary">Welcome Back</h2>
+                    <p class="text-muted">Sign in to continue your CPP journey</p>
+                  </div>
+                  <form method="POST" action="/login">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                    <div class="mb-3">
+                      <label for="email" class="form-label fw-semibold">Email</label>
+                      <input type="email" class="form-control" name="email" required placeholder="your.email@example.com">
+                    </div>
+                    <div class="mb-4">
+                      <label for="password" class="form-label fw-semibold">Password</label>
+                      <input type="password" class="form-control" name="password" required placeholder="Enter your password">
+                    </div>
+                    <button type="submit" class="btn btn-primary w-100 mb-3">Sign In</button>
+                  </form>
+                  <div class="text-center">
+                    <p class="text-muted mb-2">Don't have an account?</p>
+                    <a href="/signup" class="btn btn-outline-primary">Create Account</a>
+                  </div>
                 </div>
-                <div class="mb-4">
-                  <label for="password" class="form-label fw-semibold">Password</label>
-                  <input type="password" class="form-control" name="password" required placeholder="Enter your password">
-                </div>
-                <button type="submit" class="btn btn-primary w-100 mb-3">Sign In</button>
-              </form>
-              <div class="text-center">
-                <p class="text-muted mb-2">Don't have an account?</p>
-                <a href="/signup" class="btn btn-outline-primary">Create Account</a>
               </div>
             </div>
           </div>
         </div>
-      </div>
-    </div>
-    """
-    return base_layout("Sign In", body)
+        """
+        return base_layout("Sign In", body)
+    return redirect(url_for('home'))
 
 @app.post("/login")
 def login_post():
@@ -865,13 +709,11 @@ def signup_page():
         selectedPlanType = plan;
         var el = document.getElementById('selectedPlan');
         if (el) { el.value = plan; }
-        // simple visual feedback
         var cards = document.querySelectorAll('.card.h-100');
         for (var i = 0; i < cards.length; i++) {
           cards[i].style.transform = 'none';
           cards[i].classList.remove('shadow-lg');
         }
-        // find the clicked button by selector using normal strings (no backticks)
         var selector = '[onclick="selectPlan(\\'' + plan + '\\')"]';
         var btn = document.querySelector(selector);
         if (btn) {
@@ -925,9 +767,14 @@ def signup_post():
 
     session['user_id'] = user['id']
     session['email'] = user['email']
-    session['name'] = user['name']
+    session['name']  = user['name']
 
-    checkout_url = create_stripe_checkout_session(user_email=email, plan=plan)
+    checkout_url = None
+    try:
+        checkout_url = create_stripe_checkout_session(user_email=email, plan=plan)
+    except Exception as e:
+        logger.warning("create_stripe_checkout_session error: %s", e)
+
     if checkout_url:
         return redirect(checkout_url)
     return redirect(url_for('billing_checkout', plan=plan))
@@ -1040,6 +887,7 @@ def home():
 
     # Logged-in dashboard
     user_name = session.get('name', '').split(' ')[0] or 'there'
+    # Preserve compatibility with any in-memory history the session might store
     hist = session.get("quiz_history", [])
     avg = round(sum(h.get("score", 0.0) for h in hist) / len(hist), 1) if hist else 0.0
 
@@ -1214,6 +1062,7 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
                 metadata={"user_email": user_email, "plan": "monthly"},
             )
             return sess.url
+
         elif plan == "sixmonth":
             if not STRIPE_SIXMONTH_PRICE_ID:
                 logger.error("Six-month price ID not configured")
@@ -1228,11 +1077,15 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
                 metadata={"user_email": user_email, "plan": "sixmonth", "duration_days": 180},
             )
             return sess.url
+
         else:
+            logger.warning("Unknown plan requested: %s", plan)
             return None
+
     except Exception as e:
-        logger.error("Stripe session creation failed: %s", e)
+        logger.error("Stripe session creation failed: %s", e, exc_info=True)
         return None
+
 
 @app.get("/billing")
 @login_required
@@ -1241,7 +1094,6 @@ def billing_page():
     sub = user.get("subscription","inactive") if user else "inactive"
     names = {"monthly":"Monthly Plan","sixmonth":"6-Month Plan","inactive":"Free Plan"}
 
-    # Build the plans section OUTSIDE the f-string to avoid f-string parser issues
     if sub == 'inactive':
         plans_html = """
           <div class="row g-3">
@@ -1288,10 +1140,14 @@ def billing_page():
         </div>
 
         {plans_html}
+        <div class="text-end mt-3">
+          <a href="/billing/debug" class="btn btn-sm btn-outline-secondary">Config sanity</a>
+        </div>
       </div></div>
     </div></div></div>
     """
     return base_layout("Billing", body)
+
 
 @app.get("/billing/checkout")
 @login_required
@@ -1300,10 +1156,13 @@ def billing_checkout():
     user_email = session.get("email","")
     if not user_email:
         return redirect(url_for("login_page"))
+
     url = create_stripe_checkout_session(user_email, plan=plan)
     if url:
         return redirect(url)
+    # Fall back to billing page if session creation failed
     return redirect(url_for("billing_page"))
+
 
 @app.get("/billing/success")
 @login_required
@@ -1344,6 +1203,7 @@ def billing_success():
     </div></div></div>"""
     return base_layout("Payment Success", content)
 
+
 # Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook")
 def stripe_webhook():
@@ -1378,69 +1238,29 @@ def stripe_webhook():
 
     return "", 200
 
-# ====== Settings ======
-@app.route("/settings", methods=["GET","POST"])
+
+# Tiny config sanity endpoint (no secrets). Requires login.
+@app.get("/billing/debug")
 @login_required
-def settings_page():
-    user = _find_user(session.get("email",""))
-    if not user:
-        return redirect(url_for("login_page"))
-
-    if request.method == "POST":
-        name = (request.form.get("name") or "").strip()
-        password = (request.form.get("password") or "").strip()
-        updates = {}
-        if name and name != user.get("name"):
-            updates["name"] = name
-            session["name"] = name
-        if password:
-            ok, _msg = validate_password(password)
-            if ok:
-                updates["password_hash"] = generate_password_hash(password)
-        if updates:
-            _update_user(user["id"], updates)
-        return redirect(url_for("settings_page"))
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-6">
-        <div class="card"><div class="card-header bg-secondary text-white"><h3 class="mb-0"><i class="bi bi-gear me-2"></i>Account Settings</h3></div>
-          <div class="card-body">
-            <form method="POST">
-              <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
-              <div class="mb-3">
-                <label class="form-label fw-semibold">Name</label>
-                <input type="text" class="form-control" name="name" value="{html.escape(user.get('name',''))}" required>
-              </div>
-              <div class="mb-3">
-                <label class="form-label fw-semibold">Email</label>
-                <input type="email" class="form-control" value="{html.escape(user.get('email',''))}" readonly>
-                <div class="form-text">Email cannot be changed</div>
-              </div>
-              <div class="mb-4">
-                <label class="form-label fw-semibold">New Password</label>
-                <input type="password" class="form-control" name="password" minlength="8" placeholder="Leave blank to keep current password">
-              </div>
-              <button type="submit" class="btn btn-primary">Update Settings</button>
-            </form>
-          </div>
-        </div>
-      </div></div>
-    </div>"""
-    return base_layout("Account Settings", content)
-
+def billing_debug():
+    ok_monthly = bool(STRIPE_MONTHLY_PRICE_ID)
+    ok_sixmo   = bool(STRIPE_SIXMONTH_PRICE_ID)
+    return jsonify({
+        "monthly_configured": ok_monthly,
+        "sixmonth_configured": ok_sixmo,
+        "publishable_key_present": bool(STRIPE_PUBLISHABLE_KEY),
+    })
 # ====== Study (alias) ======
 @app.get("/study", strict_slashes=False)
 @login_required
 def study_page():
     """
-    Alias route: the UI links to /study. For now, direct users to the Tutor page
-    to avoid 404s while keeping the existing layout untouched.
+    Alias route: UI links to /study. Redirect to Tutor page
+    to avoid 404s while keeping layout untouched.
     """
     return redirect(url_for("tutor_page"))
 
-# ====== Tutor Routes (fixes 404; integrates AI; no UI changes) ======
-# IMPORTANT: Ensure this is the ONLY Tutor block in the file.
+# ====== Tutor Routes (always returns a page) ======
 @app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
 @app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
 @login_required
@@ -1461,7 +1281,7 @@ def tutor_page():
         else:
             ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
             if ok:
-                tutor_answer = answer
+                tutor_answer = answer or ""
                 item = {
                     "ts": datetime.utcnow().isoformat() + "Z",
                     "q": user_query,
@@ -1472,17 +1292,19 @@ def tutor_page():
                 _log_event(user_id, "tutor.ask", {
                     "q_len": len(user_query),
                     "ok": True,
-                    "model": meta.get("model")
+                    "provider": meta.get("provider"),
+                    "model": meta.get("model") or meta.get("deployment")
                 })
             else:
-                tutor_error = answer
+                tutor_error = answer or "The tutor could not respond. Please try again."
                 _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": False})
 
     recent = _get_user_history(user_id, "tutor", limit=5)
-    
-    # --- Pre-format HTML to avoid backslashes inside f-string expressions ---
+
+    # --- Pre-format HTML blocks (no backslashes in f-expressions) ---
     tutor_block = ""
     if tutor_answer:
+        # Render plain text safely (preserves newlines)
         safe_answer = html.escape(tutor_answer).replace("\n", "<br>")
         tutor_block = (
             "<div class='alert alert-success'>"
@@ -1545,9 +1367,283 @@ def tutor_page():
     """
     return base_layout("Tutor", content)
 
-# ====== Quiz / Mock Exam Engine (file-backed; preserves layout) ======
+# ====== Tracking Utils (file-backed, small) ======
+def _log_event(user_id, event_type, payload):
+    """Append an event for analytics/progress. Non-fatal on error."""
+    try:
+        data = _load_json("events.json", [])
+        data.append({
+            "id": str(uuid.uuid4()),
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "user_id": user_id,
+            "type": event_type,   # e.g., 'tutor.ask', 'page.view'
+            "payload": payload    # dict
+        })
+        _save_json("events.json", data)
+    except Exception as e:
+        logger.warning("log_event failed: %s", e)
 
-# ---------- Helpers ----------
+def _append_user_history(user_id, channel, item):
+    """Store a small rolling history per user/channel (e.g., tutor)."""
+    try:
+        key = f"history_{channel}_{user_id}.json"
+        history = _load_json(key, [])
+        history.append(item)
+        # Keep last 20 entries to avoid unbounded growth
+        history = history[-20:]
+        _save_json(key, history)
+    except Exception as e:
+        logger.warning("append_user_history failed: %s", e)
+
+def _get_user_history(user_id, channel, limit=10):
+    try:
+        key = f"history_{channel}_{user_id}.json"
+        hist = _load_json(key, [])
+        return hist[-limit:]
+    except Exception:
+        return []
+
+# ====== AI Client (uses existing env keys) ======
+def _call_tutor_agent(user_query, meta=None):
+    """
+    Calls your Tutor agent using env configuration.
+    Supports:
+      - OpenAI (OPENAI_API_KEY, OPENAI_API_BASE?, MODEL_TUTOR?)
+      - Azure OpenAI (AZURE_OPENAI_* envs)
+    Adds: retries, clearer errors, and timeouts.
+    """
+    meta = meta or {}
+    timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
+    temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
+    max_tokens = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
+    system_msg = os.environ.get("TUTOR_SYSTEM_PROMPT",
+        "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step, "
+        "cite domain numbers when relevant, and ask a short follow-up check for understanding."
+    )
+
+    # Detect provider: Azure OpenAI vs OpenAI-compatible
+    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
+    azure_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
+    azure_deploy = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
+
+    if azure_endpoint and azure_key and azure_deploy:
+        # Azure OpenAI
+        url = f"{azure_endpoint}/openai/deployments/{azure_deploy}/chat/completions?api-version=2024-06-01"
+        headers = {"api-key": azure_key, "Content-Type": "application/json"}
+        payload = {
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_query}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        provider_meta = {"provider": "azure", "deployment": azure_deploy}
+    else:
+        # OpenAI / compatible
+        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not api_key:
+            return False, "Tutor is not configured: missing API key.", {}
+        base_url = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+        model = os.environ.get("MODEL_TUTOR", OPENAI_CHAT_MODEL).strip()  # reuse your chat model by default
+        url = f"{base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        org = os.environ.get("OPENAI_ORG", "").strip()
+        if org:
+            headers["OpenAI-Organization"] = org
+        payload = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_msg},
+                {"role": "user", "content": user_query}
+            ],
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        provider_meta = {"provider": "openai", "model": model}
+
+    # Simple retry with backoff for transient errors
+    backoffs = [0, 1.5, 3.0]  # seconds
+    last_err = None
+    for wait_s in backoffs:
+        if wait_s:
+            time.sleep(wait_s)
+        try:
+            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout_s)
+            status = resp.status_code
+            if status in (429, 500, 502, 503, 504):
+                last_err = f"{status} {resp.text[:300]}"
+                continue
+            if status >= 400:
+                try:
+                    j = resp.json()
+                    msg = (j.get("error") or {}).get("message") or resp.text[:300]
+                except Exception:
+                    msg = resp.text[:300]
+                return False, f"Agent error {status}: {msg}", {"status": status, **provider_meta}
+            data = resp.json()
+            answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            usage = data.get("usage", {})
+            meta_out = {"usage": usage, **provider_meta}
+            return True, answer, meta_out
+        except Exception as e:
+            last_err = str(e)
+            continue
+
+    return False, f"Network/agent error: {last_err or 'unknown'}", provider_meta
+
+# ====== Page Views Tracking ======
+@app.before_request
+def _track_page_views():
+    try:
+        uid = session.get("user_id") or session.get("email") or "anon"
+        _log_event(uid, "page.view", {"path": request.path, "method": request.method})
+    except Exception:
+        pass
+
+# Lightweight ping to verify Tutor path and config
+@app.route("/tutor/ping", methods=["GET"])
+@login_required
+def tutor_ping():
+    """
+    Quick sanity check for Tutor config from the browser.
+    Does a tiny roundtrip with the agent and returns JSON (no UI).
+    """
+    ok, answer, meta = _call_tutor_agent("Reply 'pong' only.", meta={"ping": True})
+    short = (answer or "")[:200]
+    return jsonify({
+        "ok": bool(ok),
+        "answer_preview": short,
+        "meta": meta
+    }), (200 if ok else 502)
+# ====== Questions & Domains (light base set kept; merged earlier via BANK_*) ======
+BASE_QUESTIONS = [
+    {
+        "question": "What is the primary purpose of a security risk assessment?",
+        "options": {"A": "Identify all threats", "B": "Determine cost-effective mitigation", "C": "Eliminate all risks", "D": "Satisfy compliance"},
+        "correct": "B",
+        "explanation": "Risk assessments balance risk, cost, and operational impact to choose practical controls.",
+        "domain": "security-principles", "difficulty": "medium"
+    },
+    {
+        "question": "In CPTED, natural surveillance primarily accomplishes what?",
+        "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
+        "correct": "B",
+        "explanation": "Design that increases visibility makes misconduct more likely to be observed and deterred.",
+        "domain": "physical-security", "difficulty": "medium"
+    },
+    {
+        "question": "Which concept applies multiple layers so if one fails others still protect?",
+        "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
+        "correct": "B",
+        "explanation": "Layered controls maintain protection despite single-point failures.",
+        "domain": "security-principles", "difficulty": "medium"
+    },
+    {
+        "question": "In incident response, what is usually the FIRST priority?",
+        "options": {"A": "Notify law enforcement", "B": "Contain the incident", "C": "Eradicate malware", "D": "Lessons learned"},
+        "correct": "B",
+        "explanation": "Containment stops the bleeding before eradication and recovery.",
+        "domain": "information-security", "difficulty": "medium"
+    },
+    {
+        "question": "Background investigations primarily support which objective?",
+        "options": {"A": "Regulatory compliance only", "B": "Marketing outcomes", "C": "Reduce insider risk", "D": "Disaster response"},
+        "correct": "C",
+        "explanation": "They help verify suitability and reduce personnel security risks.",
+        "domain": "personnel-security", "difficulty": "medium"
+    },
+    {
+        "question": "What is the primary goal of business continuity planning?",
+        "options": {"A": "Prevent all disasters", "B": "Maintain critical operations during disruption", "C": "Reduce insurance costs", "D": "Only satisfy regulators"},
+        "correct": "B",
+        "explanation": "BCP ensures critical functions continue during and after a disruption.",
+        "domain": "crisis-management", "difficulty": "medium"
+    },
+    {
+        "question": "What establishes legal admissibility of evidence in investigations?",
+        "options": {"A": "Chain of custody", "B": "Digital timestamps", "C": "Witness statements only", "D": "Management approval"},
+        "correct": "A",
+        "explanation": "Chain of custody proves integrity of evidence handling.",
+        "domain": "investigations", "difficulty": "medium"
+    },
+    {
+        "question": "Best approach to security budgeting?",
+        "options": {"A": "Historical spend", "B": "Risk-based allocation", "C": "Industry averages", "D": "Spend remaining funds"},
+        "correct": "B",
+        "explanation": "Direct funds to the highest-impact, risk-reducing controls.",
+        "domain": "business-principles", "difficulty": "medium"
+    },
+]
+
+DOMAINS = {
+    "security-principles": "Security Principles & Practices",
+    "business-principles": "Business Principles & Practices",
+    "investigations": "Investigations",
+    "personnel-security": "Personnel Security",
+    "physical-security": "Physical Security",
+    "information-security": "Information Security",
+    "crisis-management": "Crisis Management",
+}
+
+def _normalize_question_v1(q: dict):
+    """Normalize older/bank shape (BASE_QUESTIONS/QUESTIONS) to a consistent 4-option MCQ."""
+    if not q or not q.get("question"):
+        return None
+    nq = {
+        "question": q.get("question", "").strip(),
+        "explanation": q.get("explanation", "").strip(),
+        "domain": q.get("domain", "security-principles"),
+        "difficulty": q.get("difficulty", "medium"),
+    }
+    opts = q.get("options")
+    correct_letter = q.get("correct")
+    if isinstance(opts, dict):
+        letters = ["A", "B", "C", "D"]
+        clean = {}
+        for i, L in enumerate(letters):
+            if L in opts:
+                clean[L] = str(opts[L])
+            elif str(i+1) in opts:
+                clean[L] = str(opts[str(i+1)])
+        if len(clean) != 4:
+            return None
+        nq["options"] = clean
+        if isinstance(correct_letter, str) and correct_letter.upper() in ("A","B","C","D"):
+            nq["correct"] = correct_letter.upper()
+        else:
+            try:
+                idx = int(correct_letter)
+                nq["correct"] = ["A","B","C","D"][idx-1]
+            except Exception:
+                return None
+    else:
+        return None
+    if nq.get("correct") not in ("A","B","C","D"):
+        return None
+    return nq
+
+def _build_all_questions():
+    """Merge QUESTIONS (incl. bank) with BASE_QUESTIONS, dedupe by (text, domain, correct)."""
+    merged = []
+    seen = set()
+    def add_many(src):
+        for q in src:
+            nq = _normalize_question_v1(q)
+            if not nq:
+                continue
+            key = (nq["question"], nq["domain"], nq["correct"])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(nq)
+    add_many(QUESTIONS or [])
+    add_many(BASE_QUESTIONS)
+    return merged
+
+ALL_QUESTIONS = _build_all_questions()
+
+# ====== Quiz/Mock Helpers ======
 def _user_id():
     return (session.get("user_id")
             or session.get("email")
@@ -1555,15 +1651,14 @@ def _user_id():
 
 def _normalize_question(q, idx=None):
     """
-    Normalize heterogeneous question shapes into a common structure:
-
+    Normalize heterogeneous shapes into a renderable structure:
     Returns:
       {
         "id": str,
         "text": "Question text",
         "domain": "Domain string or None",
         "choices": [{"key":"A","text":"..."}, ...],
-        "correct_key": "A" (optional; stored server-side only)
+        "correct_key": "A" (optional; server-side only)
       }
     """
     if q is None:
@@ -1614,12 +1709,9 @@ def _normalize_question(q, idx=None):
     }
 
 def _all_normalized_questions():
-    try:
-        qs = ALL_QUESTIONS  # must exist in your app
-    except Exception:
-        qs = []
+    pool = ALL_QUESTIONS or []
     out = []
-    for i, q in enumerate(qs):
+    for i, q in enumerate(pool):
         nq = _normalize_question(q, idx=i)
         if nq and nq.get("text") and nq.get("choices"):
             out.append(nq)
@@ -1630,11 +1722,10 @@ def _pick_questions(count, domain=None):
     if domain:
         pool = [q for q in pool if str(q.get("domain") or "").lower() == str(domain).lower()]
     random.shuffle(pool)
-    # Guarantee at least 1 if any exist; caller will handle empty pool.
     return pool[:max(0, min(count, len(pool)))]
-# ---------- Run persistence ----------
+
+# ----- Run persistence (per-user temp run) -----
 def _run_key(mode, user_id):
-    # mode in {"quiz","mock"}
     return f"{mode}_run_{user_id}.json"
 
 def _load_run(mode, user_id):
@@ -1649,7 +1740,7 @@ def _finish_run(mode, user_id):
     except Exception:
         pass
 
-# ---------- Grading & analytics ----------
+# ----- Grading & analytics -----
 def _grade(run):
     """
     run = {
@@ -1657,7 +1748,7 @@ def _grade(run):
       "qset": [{"id","text","domain","choices","correct_key"}...],
       "answers": {"qid":"A"...}
     }
-    Returns (score, total, details_by_qid, domain_breakdown)
+    Returns (correct_count, total, details_by_qid, domain_breakdown)
     """
     answers = run.get("answers", {})
     qset = run.get("qset", [])
@@ -1707,30 +1798,30 @@ def _record_attempt(user_id, mode, run, results):
     except Exception as e:
         logger.warning("record_attempt failed: %s", e)
 
-# ---------- Shared rendering (safe for empty sets) ----------
+# ----- Shared renderers (safe for empty sets) -----
 def _render_question_card(title, route, run, index, error_msg=""):
     qset = run.get("qset", []) or []
     total = len(qset)
 
-    # Handle empty question set safely
+    # Empty question set safe page
     if total == 0:
-        msg = """
+        msg = f"""
         <div class="container">
           <div class="row justify-content-center"><div class="col-lg-8">
             <div class="card">
               <div class="card-header bg-warning text-dark">
-                <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>{title}</h3>
+                <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>{html.escape(title)}</h3>
               </div>
               <div class="card-body">
                 <div class="alert alert-info">
-                  No questions are available yet. Please seed the question bank (questions.json) or try again later.
+                  No questions are available yet. Please seed the question bank (questions.json or data/bank/cpp_*_v1.json) and try again.
                 </div>
                 <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
               </div>
             </div>
           </div></div>
         </div>
-        """.replace("{title}", html.escape(title))
+        """
         return base_layout(title, msg)
 
     i = max(0, min(index, total - 1))
@@ -1892,7 +1983,7 @@ def _render_results_card(title, route, run, results):
     """
     return base_layout(f"{title} Results", content)
 
-# ---------- QUIZ ----------
+# ====== QUIZ ======
 @app.route("/quiz", methods=["GET", "POST"])
 @login_required
 def quiz_page():
@@ -1916,7 +2007,6 @@ def quiz_page():
         domain = request.args.get("domain")
         qset = _pick_questions(count, domain=domain)
         if not qset:
-            # Safe empty-state page (prevents IndexError)
             msg = """
             <div class="container">
               <div class="row justify-content-center"><div class="col-lg-8">
@@ -1926,7 +2016,8 @@ def quiz_page():
                   </div>
                   <div class="card-body">
                     <div class="alert alert-info">
-                      No questions available to build a quiz. Please add items to questions.json (or enable the bank) and try again.
+                      No questions available to build a quiz. Please add items to questions.json
+                      or data/bank/cpp_questions_v1.json and try again.
                     </div>
                     <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
                   </div>
@@ -1953,7 +2044,6 @@ def quiz_page():
 
         qset = run.get("qset") or []
         if not qset:
-            # If somehow empty mid-run, reset with a safe message.
             _finish_run("quiz", user_id)
             return redirect(url_for("quiz_page"))
 
@@ -1994,7 +2084,7 @@ def quiz_page():
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Quiz", "/quiz", run, curr_idx, error_msg)
 
-# ---------- MOCK EXAM ----------
+# ====== MOCK EXAM ======
 @app.route("/mock-exam", methods=["GET", "POST"])
 @app.route("/mock", methods=["GET", "POST"])
 @login_required
@@ -2028,7 +2118,8 @@ def mock_exam_page():
                   </div>
                   <div class="card-body">
                     <div class="alert alert-info">
-                      No questions available to build a mock exam. Please add items to questions.json (or enable the bank) and try again.
+                      No questions available to build a mock exam. Please add items to questions.json
+                      or data/bank/cpp_questions_v1.json and try again.
                     </div>
                     <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
                   </div>
@@ -2095,7 +2186,7 @@ def mock_exam_page():
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
 
-# ----- Flashcards & Progress (placeholders; no layout change) -----
+# ====== Flashcards & Progress (placeholders; wired later) ======
 @app.route("/flashcards", methods=["GET", "POST"])
 @login_required
 def flashcards_page():
@@ -2135,202 +2226,60 @@ def progress_page():
     </div>
     """
     return base_layout("Progress", content)
-# ====== Tracking Utils (non-breaking, file-backed) ======
-def _log_event(user_id, event_type, payload):
-    """Append an event for analytics/progress. Non-fatal on error."""
-    try:
-        data = _load_json("events.json", [])
-        data.append({
-            "id": str(uuid.uuid4()),
-            "ts": datetime.utcnow().isoformat() + "Z",
-            "user_id": user_id,
-            "type": event_type,   # e.g., 'tutor.ask', 'page.view'
-            "payload": payload    # dict
-        })
-        _save_json("events.json", data)
-    except Exception as e:
-        logger.warning("log_event failed: %s", e)
-
-def _append_user_history(user_id, channel, item):
-    """Store a small rolling history per user/channel (e.g., tutor)."""
-    try:
-        key = f"history_{channel}_{user_id}.json"
-        history = _load_json(key, [])
-        history.append(item)
-        # Keep last 20 entries to avoid unbounded growth
-        history = history[-20:]
-        _save_json(key, history)
-    except Exception as e:
-        logger.warning("append_user_history failed: %s", e)
-
-def _get_user_history(user_id, channel, limit=10):
-    try:
-        key = f"history_{channel}_{user_id}.json"
-        hist = _load_json(key, [])
-        return hist[-limit:]
-    except Exception:
-        return []
-
-
-# ====== AI Client (uses existing env keys) ======
-def _call_tutor_agent(user_query, meta=None):
-    """
-    Calls your Tutor agent using env configuration.
-    Supports:
-      - OpenAI (OPENAI_API_KEY, OPENAI_API_BASE?, MODEL_TUTOR?)
-      - Azure OpenAI (AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT)
-    Adds: retries, richer errors, and small timeouts.
-    """
-    meta = meta or {}
-    timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
-    temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
-    max_tokens = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
-    system_msg = os.environ.get("TUTOR_SYSTEM_PROMPT",
-        "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step, "
-        "cite domain numbers when relevant, and ask a short follow-up check for understanding."
-    )
-
-    # --- Detect provider: Azure OpenAI vs OpenAI-compatible ---
-    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
-    azure_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
-    azure_deploy = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
-
-    if azure_endpoint and azure_key and azure_deploy:
-        # Azure OpenAI
-        url = f"{azure_endpoint}/openai/deployments/{azure_deploy}/chat/completions?api-version=2024-06-01"
-        headers = {
-            "api-key": azure_key,
-            "Content-Type": "application/json",
-        }
-        payload = {
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_query}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            # Azure ignores "model" here; it's tied to the deployment
-        }
-    else:
-        # OpenAI / compatible
-        api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-        if not api_key:
-            return False, "Tutor is not configured: missing API key.", {}
-        base_url = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-        model = os.environ.get("MODEL_TUTOR", "gpt-4o-mini").strip()
-        url = f"{base_url}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        org = os.environ.get("OPENAI_ORG", "").strip()
-        if org:
-            headers["OpenAI-Organization"] = org
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_query}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-
-    # --- Simple retry with backoff for transient errors ---
-    backoffs = [0, 1.5, 3.0]  # seconds
-    last_err = None
-    for wait_s in backoffs:
-        if wait_s:
-            time.sleep(wait_s)
-        try:
-            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout_s)
-            status = resp.status_code
-            # Soft-handle rate limits/transients with another retry
-            if status in (429, 500, 502, 503, 504):
-                last_err = f"{status} {resp.text[:300]}"
-                continue
-            if status >= 400:
-                # Try to surface a readable message from JSON error
-                try:
-                    j = resp.json()
-                    msg = (j.get("error") or {}).get("message") or resp.text[:300]
-                except Exception:
-                    msg = resp.text[:300]
-                return False, f"Agent error {status}: {msg}", {"status": status}
-            data = resp.json()
-            answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            usage = data.get("usage", {})
-            # Normalize meta for analytics
-            meta_out = {"usage": usage}
-            if azure_endpoint:
-                meta_out.update({"provider": "azure", "deployment": azure_deploy})
-            else:
-                meta_out.update({"provider": "openai", "model": payload.get("model")})
-            return True, answer, meta_out
-        except Exception as e:
-            last_err = str(e)
-            continue
-
-    return False, f"Network/agent error: {last_err or 'unknown'}", {}
-
-
-# ====== Page Views Tracking (no UI change) ======
-@app.before_request
-def _track_page_views():
-    try:
-        uid = session.get("user_id") or session.get("email") or "anon"
-        _log_event(uid, "page.view", {"path": request.path, "method": request.method})
-    except Exception:
-        pass
-
-@app.route("/tutor/ping", methods=["GET"])
-@login_required
-def tutor_ping():
-    """
-    Quick sanity check for Tutor config from the browser.
-    Does a tiny roundtrip with the agent and returns JSON (no UI).
-    """
-    ok, answer, meta = _call_tutor_agent("Reply 'pong' only.", meta={"ping": True})
-    # Trim long answers defensively
-    short = (answer or "")[:200]
-    return jsonify({
-        "ok": bool(ok),
-        "answer_preview": short,
-        "meta": meta
-    }), (200 if ok else 502)
-
-# ====== Analytics Hooks ======
+# ====== Analytics API (for lightweight client-side event logging) ======
 @app.route("/api/track", methods=["POST"])
 @login_required
 def api_track():
+    """
+    Accepts small analytics events from the UI.
+    Example form fields:
+      - type: string (e.g., 'page.view', 'quiz.answer')
+      - payload: JSON string (optional)
+      - csrf_token: required if CSRF is enabled
+    """
     try:
         if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
             abort(403)
+
         event_type = (request.form.get("type") or "").strip()
         payload_raw = request.form.get("payload") or "{}"
-        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else {}
+
+        try:
+            payload = json.loads(payload_raw) if isinstance(payload_raw, str) else {}
+        except Exception:
+            payload = {"_parse_error": True, "raw": payload_raw}
+
         uid = session.get("user_id") or session.get("email") or "unknown"
         if not event_type:
             return jsonify({"ok": False, "error": "Missing type"}), 400
+
         _log_event(uid, event_type, payload)
         return jsonify({"ok": True})
     except Exception as e:
         logger.error("api/track failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": "server-error"}), 500
 
-# ====== App Factory & Main ======
+
+# ====== App Factory ======
 def create_app():
-    init_sample_data()
-    logger.info("CPP Test Prep v%s starting up", APP_VERSION)
-    logger.info("Debug mode: %s", DEBUG)
-    logger.info("Staging mode: %s", IS_STAGING)
-    logger.info("CSRF protection: %s", "enabled" if HAS_CSRF else "disabled")
+    """
+    Flask app factory (compatible with gunicorn/uvicorn).
+    Keeps side effects minimal (no network calls here).
+    """
+    # Ensure DATA_DIR exists
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+    except Exception as e:
+        logger.warning("Could not ensure DATA_DIR %s exists: %s", DATA_DIR, e)
+
+    logger.info("CPP Test Prep starting")
+    logger.info("Version: %s | Debug: %s | Staging: %s | CSRF: %s",
+                APP_VERSION, DEBUG, IS_STAGING, ("enabled" if HAS_CSRF else "disabled"))
     return app
+
 
 # ====== Entrypoint ======
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    logger.info("Running app on port %s", port)
+    port = int(os.environ.get("PORT", "5000"))
+    logger.info("Running app on 0.0.0.0:%s (debug=%s)", port, DEBUG)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
-
