@@ -1663,106 +1663,6 @@ def _track_page_views():
         pass
 
 
-# ====== Tutor Routes (fixes 404; integrates AI; no layout changes) ======
-@app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
-@app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
-@login_required
-def tutor_page():
-    user = _find_user(session.get("email","")) or {}
-    user_id = user.get("id") or session.get("email") or "unknown"
-
-    tutor_error = ""
-    tutor_answer = ""
-    user_query = (request.form.get("query") or "").strip() if request.method == "POST" else ""
-
-    if request.method == "POST":
-        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
-            abort(403)
-
-        if not user_query:
-            tutor_error = "Please enter a question."
-        else:
-            ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
-            if ok:
-                tutor_answer = answer
-                item = {
-                    "ts": datetime.utcnow().isoformat() + "Z",
-                    "q": user_query,
-                    "a": tutor_answer,
-                    "meta": meta
-                }
-                _append_user_history(user_id, "tutor", item)
-                _log_event(user_id, "tutor.ask", {
-                    "q_len": len(user_query),
-                    "ok": True,
-                    "model": meta.get("model")
-                })
-            else:
-                tutor_error = answer
-                _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": False})
-
-    recent = _get_user_history(user_id, "tutor", limit=5)
-
-    # Pre-format tutor response and history to avoid f-string + backslash issue
-    tutor_block = ""
-    if tutor_answer:
-        safe_answer = html.escape(tutor_answer).replace("\n", "<br>")
-        tutor_block = f"<div class='alert alert-success'><div class='fw-semibold mb-1'>Tutor:</div>{safe_answer}</div>"
-
-    error_block = ""
-    if tutor_error:
-        error_block = f"<div class='alert alert-danger'>{html.escape(tutor_error)}</div>"
-
-    if recent:
-        history_html = ""
-        for item in recent:
-            q_html = html.escape(item.get("q","")).replace("\n","<br>")
-            a_html = html.escape(item.get("a","")).replace("\n","<br>")
-            ts = html.escape(item.get("ts",""))
-            history_html += f"""
-            <div class='mb-3'>
-              <div class='small text-muted'>{ts}</div>
-              <div class='fw-semibold'>You</div>
-              <div class='mb-2'>{q_html}</div>
-              <div class='fw-semibold'>Tutor</div>
-              <div>{a_html}</div>
-            </div>
-            """
-    else:
-        history_html = "<div class='text-muted'>No history yet.</div>"
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8">
-        <div class="card">
-          <div class="card-header bg-primary text-white">
-            <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3>
-          </div>
-          <div class="card-body">
-            <form method="POST" class="mb-4">
-              <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
-              <label class="form-label fw-semibold">Ask the Tutor</label>
-              <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
-              <div class="d-flex gap-2 mt-3">
-                <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
-                <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
-              </div>
-            </form>
-            {error_block}
-            {tutor_block}
-            <div class="border-top pt-3">
-              <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
-              {history_html}
-            </div>
-            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Tutor", content)
-
-
 # ====== Analytics Hooks ======
 @app.route("/api/track", methods=["POST"])
 @login_required
@@ -1796,6 +1696,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
