@@ -1,13 +1,13 @@
 # app.py
 
 # ====== Imports & Basic Config ======
-from flask import Flask, request, jsonify, session, redirect, url_for, Response, abort
+from flask import Flask, request, jsonify, session, redirect, url_for, Response
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 from datetime import datetime, timedelta
 from contextlib import contextmanager
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any
 
 import os, json, random, requests, html, csv, uuid, logging, time, hashlib, re
 import sqlite3
@@ -75,25 +75,34 @@ def _load_json(name, default):
     except Exception:
         return default
 
-def _atomic_write_json(path: str, data: Any):
-    """Atomic JSON write (POSIX-safe)."""
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
-
 def _save_json(name, data):
     """
-    Robust, atomic JSON save with fallback.
+    Robust, atomic JSON save:
+    - Writes to a unique temp file per process (avoids collisions across workers)
+    - fsyncs and then os.replace(...) to be atomic on POSIX
+    - Falls back to simple write if something unexpected happens
     """
     path = os.path.join(DATA_DIR, name)
     try:
-        _atomic_write_json(path, data)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic replace
+        os.replace(tmp_path, path)
     except Exception as e:
+        # Clean up stray temp (best effort)
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
         logger.warning("Atomic _save_json failed for %s: %s; attempting simple write", name, e)
+        # Fallback: non-atomic write (last writer wins)
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
@@ -284,305 +293,7 @@ def increment_usage(user_email, action_type, count=1):
     month_usage[action_type] = month_usage.get(action_type, 0) + count
     usage['last_active'] = today.isoformat(timespec="seconds") + "Z"
     _save_json("users.json", USERS)
-
-# ====== CPP Content Bank — Paths, Whitelist, Targets, Index ======
-BANK_DIR = os.path.join(DATA_DIR, "bank")
-os.makedirs(BANK_DIR, exist_ok=True)
-
-BANK_FLASHCARDS_PATH = os.path.join(BANK_DIR, "cpp_flashcards_v1.json")
-BANK_QUESTIONS_PATH  = os.path.join(BANK_DIR, "cpp_questions_v1.json")
-CONTENT_INDEX_PATH   = os.path.join(DATA_DIR, "content_index.json")
-
-ALLOWED_HOSTS = {
-    "nist.gov", "cisa.gov", "fema.gov", "osha.gov", "gao.gov",
-    "popcenter.asu.edu", "ncpc.org", "fbi.gov", "rand.org",
-    "hsdl.org", "nfpa.org", "iso.org", "justice.gov",
-    "house.texas.gov"
-    # city/state official domains are allowed; validated by suffix '.gov' check below
-}
-
-# Exact inventory targets
-FLASHCARD_TARGETS = {
-    "Principles": 60,
-    "Business": 39,
-    "Investigations": 27,
-    "Personnel": 36,
-    "Physical": 54,
-    "InfoSec": 42,
-    "Crisis": 42
-}
-QUESTION_TARGETS = {
-    # domain: total, with per-type splits in QUESTION_SPLITS
-    "Principles": 192,
-    "Business": 125,
-    "Investigations": 87,
-    "Personnel": 115,
-    "Physical": 173,
-    "InfoSec": 134,
-    "Crisis": 134
-}
-QUESTION_SPLITS = {
-    # domain: (T/F, MCQ, Scenario)
-    "Principles": (48, 115, 29),
-    "Business": (31, 75, 19),
-    "Investigations": (22, 52, 13),
-    "Personnel": (29, 69, 17),
-    "Physical": (43, 104, 26),
-    "InfoSec": (34, 80, 20),
-    "Crisis": (34, 80, 20),
-}
-QUESTION_TYPE_MAP = {"tf": "mcq", "mcq": "mcq", "scenario_mcq": "scenario_mcq"}
-
-DOMAINS = {
-    "security-principles": "Security Principles & Practices",
-    "business-principles": "Business Principles & Practices",
-    "investigations": "Investigations",
-    "personnel-security": "Personnel Security",
-    "physical-security": "Physical Security",
-    "information-security": "Information Security",
-    "crisis-management": "Crisis Management",
-}
-CPP_DOMAIN_CANON = ["Principles","Business","Investigations","Personnel","Physical","InfoSec","Crisis"]
-
-# ====== Content Index (hashes for dedup) ======
-def _load_content_index():
-    idx = _load_json("content_index.json", None)
-    if not idx or not isinstance(idx, dict):
-        idx = {"seen_hashes": [], "items": {}}
-    idx.setdefault("seen_hashes", [])
-    idx.setdefault("items", {})
-    return idx
-
-def _save_content_index(index: dict):
-    _atomic_write_json(CONTENT_INDEX_PATH, index)
-
-CONTENT_INDEX = _load_content_index()
-
-# ====== Hashing & Signatures ======
-def _norm_spaces(s: str) -> str:
-    return re.sub(r"\s+", " ", (s or "")).strip()
-
-def _flashcard_hash(front: str, back: str, domain: str) -> str:
-    sig = (_norm_spaces(front).lower() + "||" +
-           _norm_spaces(back).lower() + "||" +
-           (domain or "").lower())
-    return hashlib.sha256(sig.encode("utf-8")).hexdigest()
-
-def _question_hash(stem: str, choices: List[str], correct_index: int, domain: str) -> str:
-    stem_clean = _norm_spaces(stem).lower()
-    choices_clean = "||".join(_norm_spaces(c).lower() for c in choices)
-    sig = f"{stem_clean}||{choices_clean}||{correct_index}||{(domain or '').lower()}"
-    return hashlib.sha256(sig.encode("utf-8")).hexdigest()
-
-def _near_dup(a: str, b: str, threshold: float = 0.92) -> bool:
-    try:
-        import difflib
-        return difflib.SequenceMatcher(None, _norm_spaces(a).lower(), _norm_spaces(b).lower()).ratio() > threshold
-    except Exception:
-        return False
-
-# ====== Source Whitelist Enforcement ======
-def _is_allowed_url(url: str) -> bool:
-    if not url or not isinstance(url, str):
-        return False
-    url = url.strip()
-    m = re.match(r'^https?://([^/]+)/', url)
-    if not m:
-        return False
-    host = m.group(1).lower()
-    # allow *.gov and listed hosts
-    if host.endswith(".gov") or host in ALLOWED_HOSTS:
-        return True
-    # allow specific subdomains of allowed hosts
-    for ah in ALLOWED_HOSTS:
-        if host.endswith("." + ah):
-            return True
-    return False
-
-def _filter_sources(sources: List[dict]) -> List[dict]:
-    out = []
-    for s in (sources or []):
-        title = (s.get("title") or "").strip()
-        url = (s.get("url") or "").strip()
-        if title and url and _is_allowed_url(url) and not re.match(r"^https?://[^/]+/?$", url):
-            out.append({"title": title, "url": url})
-            if len(out) >= 3:
-                break
-    return out
-
-# ====== Schema Validators (strict) ======
-def _valid_flashcard(item: dict) -> Tuple[bool, str]:
-    req_keys = {"id","type","question","answer","rationale","sources","domain","difficulty"}
-    if not isinstance(item, dict) or not req_keys.issubset(item.keys()):
-        return False, "missing keys"
-    if item.get("type") != "flashcard":
-        return False, "type not flashcard"
-    if item.get("difficulty") not in {"easy","medium","hard"}:
-        return False, "bad difficulty"
-    if item.get("domain") not in CPP_DOMAIN_CANON:
-        return False, "bad domain"
-    srcs = _filter_sources(item.get("sources") or [])
-    if not srcs:
-        return False, "no allowed sources"
-    item["sources"] = srcs
-    if not item.get("question") or not item.get("answer"):
-        return False, "empty sides"
-    if len(_norm_spaces(item.get("rationale") or "")) < 5:
-        return False, "rationale too short"
-    return True, ""
-
-def _valid_question(item: dict) -> Tuple[bool, str]:
-    req = {"id","type","question","choices","correct_index","answer","rationale","sources","domain","difficulty"}
-    if not isinstance(item, dict) or not req.issubset(item.keys()):
-        return False, "missing keys"
-    if item.get("type") not in {"mcq","scenario_mcq"}:
-        return False, "bad type"
-    if item.get("difficulty") not in {"easy","medium","hard"}:
-        return False, "bad difficulty"
-    if item.get("domain") not in CPP_DOMAIN_CANON:
-        return False, "bad domain"
-    # choices
-    choices = item.get("choices")
-    if not isinstance(choices, list):
-        return False, "choices not list"
-    if choices == ["True","False"]:
-        # T/F strict requirement
-        if len(choices) != 2 or choices[0] != "True" or choices[1] != "False":
-            return False, "bad TF order"
-    else:
-        if len(choices) < 4 or len(choices) > 5:
-            return False, "mcq choices 4-5"
-        if len(set(choices)) != len(choices):
-            return False, "duplicate choices"
-    # correct
-    try:
-        ci = int(item.get("correct_index"))
-    except Exception:
-        return False, "correct_index not int"
-    if ci < 0 or ci >= len(choices):
-        return False, "correct_index out of range"
-    if item.get("answer") != choices[ci]:
-        return False, "answer mismatch"
-    # rationale
-    if len(_norm_spaces(item.get("rationale") or "")) < 5:
-        return False, "rationale too short"
-    # sources
-    srcs = _filter_sources(item.get("sources") or [])
-    if not srcs:
-        return False, "no allowed sources"
-    item["sources"] = srcs
-    # language checks
-    stem = _norm_spaces(item.get("question") or "")
-    if re.search(r"\balways\b|\bnever\b", stem.lower()):
-        # allow only if clearly sourced as universal; safer to reject automatically (will regenerate)
-        return False, "overly absolute claim"
-    return True, ""
-
-# ====== CPP Bank Loaders & Normalizers into Engine ======
-def _load_bank_file(path: str) -> list:
-    if not os.path.exists(path):
-        return []
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            return data if isinstance(data, list) else []
-    except Exception as e:
-        logger.warning("Failed to load bank file %s: %s", path, e)
-        return []
-
-def _ensure_content_index_in_memory():
-    global CONTENT_INDEX
-    CONTENT_INDEX = _load_content_index()
-
-def _save_bank_atomic(flashcards: list, questions: list):
-    _atomic_write_json(BANK_FLASHCARDS_PATH, flashcards)
-    _atomic_write_json(BANK_QUESTIONS_PATH, questions)
-
-# Transform bank questions into quiz engine format (choices dict with A-D keys)
-def _bank_q_to_engine(q: dict) -> dict:
-    letters = ["A","B","C","D","E"]
-    choices = q.get("choices") or []
-    opts = {letters[i]: str(choices[i]) for i in range(min(len(choices),5))}
-    correct_key = None
-    try:
-        ci = int(q.get("correct_index"))
-        if 0 <= ci < len(choices):
-            correct_key = letters[ci]
-    except Exception:
-        pass
-    # Map CPP domain back to engine domain slugs for existing UI labels
-    domain_slug_map = {
-        "Principles": "security-principles",
-        "Business": "business-principles",
-        "Investigations": "investigations",
-        "Personnel": "personnel-security",
-        "Physical": "physical-security",
-        "InfoSec": "information-security",
-        "Crisis": "crisis-management",
-    }
-    return {
-        "id": q.get("id") or str(uuid.uuid4()),
-        "question": q.get("question") or "",
-        "options": opts,
-        "correct": correct_key or "A",
-        "explanation": q.get("rationale") or "",
-        "domain": domain_slug_map.get(q.get("domain"), "security-principles"),
-        "difficulty": q.get("difficulty") or "medium"
-    }
-
-def _flashcard_minimal(card: dict) -> dict:
-    # Keep only what the cards feature needs; sources kept for API access
-    return {
-        "id": card.get("id") or str(uuid.uuid4()),
-        "type": "flashcard",
-        "question": card.get("question") or "",
-        "answer": card.get("answer") or "",
-        "rationale": card.get("rationale") or "",
-        "sources": card.get("sources") or [],
-        "domain": card.get("domain") or "",
-        "difficulty": card.get("difficulty") or "easy"
-    }
-
-# ====== Banks in memory ======
-BANK_FLASHCARDS = []
-BANK_QUESTIONS = []
-
-def _reload_banks_into_memory():
-    global BANK_FLASHCARDS, BANK_QUESTIONS
-
-    raw_cards = _load_bank_file(BANK_FLASHCARDS_PATH)
-    raw_qs    = _load_bank_file(BANK_QUESTIONS_PATH)
-
-    # Hard-validate loaded items and drop anything invalid
-    good_cards = []
-    seen_fc_hashes = set()
-    for c in raw_cards:
-        ok, _msg = _valid_flashcard(c)
-        if not ok:
-            continue
-        h = _flashcard_hash(c.get("question",""), c.get("answer",""), c.get("domain",""))
-        if h in seen_fc_hashes:
-            continue
-        seen_fc_hashes.add(h)
-        good_cards.append(_flashcard_minimal(c))
-
-    good_qs = []
-    seen_q_hashes = set()
-    for q in raw_qs:
-        ok, _msg = _valid_question(q)
-        if not ok:
-            continue
-        h = _question_hash(q.get("question",""), q.get("choices") or [], int(q.get("correct_index",0)), q.get("domain",""))
-        if h in seen_q_hashes:
-            continue
-        seen_q_hashes.add(h)
-        good_qs.append(q)
-
-    BANK_FLASHCARDS = good_cards
-    BANK_QUESTIONS  = good_qs
-    logger.info("Loaded banks: flashcards=%d, questions=%d", len(BANK_FLASHCARDS), len(BANK_QUESTIONS))
-
-# ====== Legacy Sample Questions (kept for fallback) ======
+# ====== Questions & Domains ======
 BASE_QUESTIONS = [
     {
         "question": "What is the primary purpose of a security risk assessment?",
@@ -642,8 +353,17 @@ BASE_QUESTIONS = [
     },
 ]
 
-# ====== Build legacy ALL_QUESTIONS + Bank Merge ======
-def _normalize_question_legacy(q: dict):
+DOMAINS = {
+    "security-principles": "Security Principles & Practices",
+    "business-principles": "Business Principles & Practices", 
+    "investigations": "Investigations",
+    "personnel-security": "Personnel Security",
+    "physical-security": "Physical Security",
+    "information-security": "Information Security",
+    "crisis-management": "Crisis Management",
+}
+
+def _normalize_question(q: dict):
     if not q or not q.get("question"):
         return None
     nq = {
@@ -673,18 +393,28 @@ def _normalize_question_legacy(q: dict):
                 nq["correct"] = ["A","B","C","D"][idx-1]
             except Exception:
                 return None
+    elif isinstance(opts, list) and q.get("answer"):
+        letters = ["A", "B", "C", "D"]
+        if len(opts) < 4:
+            return None
+        nq["options"] = {letters[i]: str(opts[i]) for i in range(4)}
+        try:
+            ans_idx = int(q.get("answer"))
+            nq["correct"] = letters[ans_idx - 1]
+        except Exception:
+            return None
     else:
         return None
     if nq.get("correct") not in ("A","B","C","D"):
         return None
     return nq
 
-def _build_all_questions_fallback():
+def _build_all_questions():
     merged = []
     seen = set()
     def add_many(src):
         for q in src:
-            nq = _normalize_question_legacy(q)
+            nq = _normalize_question(q)
             if not nq:
                 continue
             key = (nq["question"], nq["domain"], nq["correct"])
@@ -696,28 +426,7 @@ def _build_all_questions_fallback():
     add_many(BASE_QUESTIONS)
     return merged
 
-# Initialize banks and engine pools
-_reload_banks_into_memory()
-
-def _engine_pool_from_banks():
-    """Convert bank questions to engine legacy shape used by quiz/mock."""
-    pool = []
-    for q in BANK_QUESTIONS:
-        pool.append(_bank_q_to_engine(q))
-    if not pool:
-        # Fallback to legacy pool if bank not yet built
-        for x in _build_all_questions_fallback():
-            pool.append({
-                "question": x["question"],
-                "options": x["options"],
-                "correct": x["correct"],
-                "explanation": x.get("explanation",""),
-                "domain": x.get("domain","security-principles"),
-                "difficulty": x.get("difficulty","medium")
-            })
-    return pool
-
-ALL_QUESTIONS_ENGINE = _engine_pool_from_banks()
+ALL_QUESTIONS = _build_all_questions()
 
 # ====== Misc Helpers ======
 def safe_json_response(data, status_code=200):
@@ -728,7 +437,7 @@ def safe_json_response(data, status_code=200):
         return jsonify({"error": "Internal server error"}), 500
 
 def filter_questions(domain_key: str | None):
-    pool = ALL_QUESTIONS_ENGINE
+    pool = ALL_QUESTIONS
     if not domain_key or domain_key == "random":
         return pool[:]
     return [q for q in pool if q.get("domain") == domain_key]
@@ -737,24 +446,16 @@ def build_quiz(num: int, domain_key: str | None):
     pool = filter_questions(domain_key)
     out = []
     if not pool:
-        pool = ALL_QUESTIONS_ENGINE[:]
+        pool = ALL_QUESTIONS[:]
     while len(out) < num:
         random.shuffle(pool)
         for q in pool:
             if len(out) >= num:
                 break
-            # remap to legacy expected structure for renderer
-            out.append({
-                "id": str(uuid.uuid4()),
-                "text": q.get("question",""),
-                "domain": q.get("domain"),
-                "choices": [{"key": k, "text": v} for k, v in (q.get("options") or {}).items()],
-                "correct_key": q.get("correct")
-            })
+            out.append(q.copy())
     title = f"Practice ({num} questions)"
     return {"title": title, "domain": domain_key or "random", "questions": out[:num]}
 
-# ====== Tutor (unchanged prompt for now; leave UI unchanged) ======
 def chat_with_ai(msgs: list[str]) -> str:
     try:
         if not OPENAI_API_KEY:
@@ -880,7 +581,7 @@ def base_layout(title: str, body_html: str) -> str:
     </footer>
     """
 
-    # Precompute staging banner
+    # Precompute staging banner to avoid f-string traps
     stage_banner = (
         """
         <div class="alert alert-warning alert-dismissible fade show m-0" role="alert">
@@ -991,7 +692,6 @@ def csrf_token():
         from flask_wtf.csrf import generate_csrf
         return generate_csrf()
     return ""
-
 # ====== Health ======
 @app.get("/healthz")
 def healthz():
@@ -1000,42 +700,43 @@ def healthz():
 # ====== Auth (Login/Signup/Logout) ======
 @app.get("/login")
 def login_page():
-    if 'user_id' not in session:
-        body = """
-        <div class="container">
-          <div class="row justify-content-center">
-            <div class="col-md-6 col-lg-4">
-              <div class="card shadow-lg">
-                <div class="card-body p-4">
-                  <div class="text-center mb-4">
-                    <i class="bi bi-shield-check text-primary display-4 mb-3"></i>
-                    <h2 class="card-title fw-bold text-primary">Welcome Back</h2>
-                    <p class="text-muted">Sign in to continue your CPP journey</p>
-                  </div>
-                  <form method="POST" action="/login">
-                    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                    <div class="mb-3">
-                      <label for="email" class="form-label fw-semibold">Email</label>
-                      <input type="email" class="form-control" name="email" required placeholder="your.email@example.com">
-                    </div>
-                    <div class="mb-4">
-                      <label for="password" class="form-label fw-semibold">Password</label>
-                      <input type="password" class="form-control" name="password" required placeholder="Enter your password">
-                    </div>
-                    <button type="submit" class="btn btn-primary w-100 mb-3">Sign In</button>
-                  </form>
-                  <div class="text-center">
-                    <p class="text-muted mb-2">Don't have an account?</p>
-                    <a href="/signup" class="btn btn-outline-primary">Create Account</a>
-                  </div>
+    if 'user_id' in session:
+        return redirect(url_for('home'))
+
+    body = """
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-6 col-lg-4">
+          <div class="card shadow-lg">
+            <div class="card-body p-4">
+              <div class="text-center mb-4">
+                <i class="bi bi-shield-check text-primary display-4 mb-3"></i>
+                <h2 class="card-title fw-bold text-primary">Welcome Back</h2>
+                <p class="text-muted">Sign in to continue your CPP journey</p>
+              </div>
+              <form method="POST" action="/login">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="mb-3">
+                  <label for="email" class="form-label fw-semibold">Email</label>
+                  <input type="email" class="form-control" name="email" required placeholder="your.email@example.com">
                 </div>
+                <div class="mb-4">
+                  <label for="password" class="form-label fw-semibold">Password</label>
+                  <input type="password" class="form-control" name="password" required placeholder="Enter your password">
+                </div>
+                <button type="submit" class="btn btn-primary w-100 mb-3">Sign In</button>
+              </form>
+              <div class="text-center">
+                <p class="text-muted mb-2">Don't have an account?</p>
+                <a href="/signup" class="btn btn-outline-primary">Create Account</a>
               </div>
             </div>
           </div>
         </div>
-        """
-        return base_layout("Sign In", body)
-    return redirect(url_for('home'))
+      </div>
+    </div>
+    """
+    return base_layout("Sign In", body)
 
 @app.post("/login")
 def login_post():
@@ -1164,11 +865,13 @@ def signup_page():
         selectedPlanType = plan;
         var el = document.getElementById('selectedPlan');
         if (el) { el.value = plan; }
+        // simple visual feedback
         var cards = document.querySelectorAll('.card.h-100');
         for (var i = 0; i < cards.length; i++) {
           cards[i].style.transform = 'none';
           cards[i].classList.remove('shadow-lg');
         }
+        // find the clicked button by selector using normal strings (no backticks)
         var selector = '[onclick="selectPlan(\\'' + plan + '\\')"]';
         var btn = document.querySelector(selector);
         if (btn) {
@@ -1179,6 +882,7 @@ def signup_page():
           }
         }
       }
+      // Pre-select monthly plan
       selectPlan('monthly');
     </script>
     """
@@ -1493,7 +1197,6 @@ def home():
     </style>
     """
     return base_layout("Dashboard", body)
-
 # ====== Billing & Stripe ======
 def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
     try:
@@ -1538,6 +1241,7 @@ def billing_page():
     sub = user.get("subscription","inactive") if user else "inactive"
     names = {"monthly":"Monthly Plan","sixmonth":"6-Month Plan","inactive":"Free Plan"}
 
+    # Build the plans section OUTSIDE the f-string to avoid f-string parser issues
     if sub == 'inactive':
         plans_html = """
           <div class="row g-3">
@@ -1585,7 +1289,7 @@ def billing_page():
 
         {plans_html}
       </div></div>
-    </div></div>
+    </div></div></div>
     """
     return base_layout("Billing", body)
 
@@ -1725,58 +1429,121 @@ def settings_page():
     </div>"""
     return base_layout("Account Settings", content)
 
-# ====== Error Handlers ======
-@app.errorhandler(403)
-def forbidden(e):
-    return base_layout("Access Denied", """
-    <div class="container"><div class="row justify-content-center"><div class="col-md-6 text-center">
-      <div class="mb-4"><i class="bi bi-shield-x text-danger display-1"></i></div>
-      <h1 class="display-4 text-muted mb-3">403</h1><h3 class="mb-3">Access Denied</h3>
-      <p class="text-muted mb-4">You don't have permission to access this resource.</p>
-      <a href="/" class="btn btn-primary"><i class="bi bi-house me-1"></i>Go Home</a>
-    </div></div></div>
-    """), 403
+# ====== Study (alias) ======
+@app.get("/study", strict_slashes=False)
+@login_required
+def study_page():
+    """
+    Alias route: the UI links to /study. For now, direct users to the Tutor page
+    to avoid 404s while keeping the existing layout untouched.
+    """
+    return redirect(url_for("tutor_page"))
 
-@app.errorhandler(404)
-def not_found(e):
-    return base_layout("Not Found", """
-    <div class="container"><div class="row justify-content-center"><div class="col-md-6 text-center">
-      <div class="mb-4"><i class="bi bi-compass text-warning display-1"></i></div>
-      <h1 class="display-4 text-muted mb-3">404</h1><h3 class="mb-3">Page Not Found</h3>
-      <p class="text-muted mb-4">The page you're looking for doesn't exist or has been moved.</p>
-      <a href="/" class="btn btn-primary"><i class="bi bi-house me-1"></i>Go Home</a>
-    </div></div></div>
-    """), 404
+# ====== Tutor Routes (fixes 404; integrates AI; no UI changes) ======
+# IMPORTANT: Ensure this is the ONLY Tutor block in the file.
+@app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
+@app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
+@login_required
+def tutor_page():
+    user = _find_user(session.get("email","")) or {}
+    user_id = user.get("id") or session.get("email") or "unknown"
 
-@app.errorhandler(413)
-def request_too_large(e):
-    return base_layout("Request Too Large", """
-    <div class="container"><div class="row justify-content-center"><div class="col-md-6 text-center">
-      <div class="mb-4"><i class="bi bi-file-earmark-x text-warning display-1"></i></div>
-      <h1 class="display-4 text-muted mb-3">413</h1><h3 class="mb-3">Request Too Large</h3>
-      <p class="text-muted mb-4">The request is too large to process.</p>
-      <a href="/" class="btn btn-primary"><i class="bi bi-house me-1"></i>Go Home</a>
-    </div></div></div>
-    """), 413
+    tutor_error = ""
+    tutor_answer = ""
+    user_query = (request.form.get("query") or "").strip() if request.method == "POST" else ""
 
-@app.errorhandler(500)
-def server_error(e):
-    logger.error("Server error: %s", e, exc_info=True)
-    return base_layout("Server Error", """
-    <div class="container"><div class="row justify-content-center"><div class="col-md-6 text-center">
-      <div class="mb-4"><i class="bi bi-exclamation-triangle text-danger display-1"></i></div>
-      <h1 class="display-4 text-muted mb-3">500</h1><h3 class="mb-3">Something Went Wrong</h3>
-      <p class="text-muted mb-4">We're working to fix this issue. Please try again later.</p>
-      <a href="/" class="btn btn-primary"><i class="bi bi-house me-1"></i>Go Home</a>
-    </div></div></div>
-    """), 500
+    if request.method == "POST":
+        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            abort(403)
 
-# ====== Sample Data Init ======
-def init_sample_data():
-    try:
-        logger.info("Sample data initialized (engine questions loaded: %d, bank cards: %d)", len(ALL_QUESTIONS_ENGINE), len(BANK_FLASHCARDS))
-    except Exception as e:
-        logger.error("Failed to initialize sample data: %s", e)
+        if not user_query:
+            tutor_error = "Please enter a question."
+        else:
+            ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
+            if ok:
+                tutor_answer = answer
+                item = {
+                    "ts": datetime.utcnow().isoformat() + "Z",
+                    "q": user_query,
+                    "a": tutor_answer,
+                    "meta": meta
+                }
+                _append_user_history(user_id, "tutor", item)
+                _log_event(user_id, "tutor.ask", {
+                    "q_len": len(user_query),
+                    "ok": True,
+                    "model": meta.get("model")
+                })
+            else:
+                tutor_error = answer
+                _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": False})
+
+    recent = _get_user_history(user_id, "tutor", limit=5)
+
+    # --- Pre-format HTML to avoid backslashes inside f-string expressions ---
+    tutor_block = ""
+    if tutor_answer:
+        safe_answer = html.escape(tutor_answer).replace("\n", "<br>")
+        tutor_block = (
+            "<div class='alert alert-success'>"
+            "<div class='fw-semibold mb-1'>Tutor:</div>"
+            + safe_answer +
+            "</div>"
+        )
+
+    error_block = ""
+    if tutor_error:
+        error_block = "<div class='alert alert-danger'>" + html.escape(tutor_error) + "</div>"
+
+    if recent:
+        pieces = []
+        for item in recent:
+            ts = html.escape(item.get("ts",""))
+            q_html = html.escape(item.get("q","")).replace("\n","<br>")
+            a_html = html.escape(item.get("a","")).replace("\n","<br>")
+            pieces.append(
+                "<div class='mb-3'>"
+                "<div class='small text-muted'>" + ts + "</div>"
+                "<div class='fw-semibold'>You</div>"
+                "<div class='mb-2'>" + q_html + "</div>"
+                "<div class='fw-semibold'>Tutor</div>"
+                "<div>" + a_html + "</div>"
+                "</div>"
+            )
+        history_html = "".join(pieces)
+    else:
+        history_html = "<div class='text-muted'>No history yet.</div>"
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-primary text-white">
+            <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3>
+          </div>
+          <div class="card-body">
+            <form method="POST" class="mb-4">
+              <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+              <label class="form-label fw-semibold">Ask the Tutor</label>
+              <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
+              <div class="d-flex gap-2 mt-3">
+                <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
+                <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
+              </div>
+            </form>
+            {error_block}
+            {tutor_block}
+            <div class="border-top pt-3">
+              <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
+              {history_html}
+            </div>
+            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Tutor", content)
 
 # ====== Quiz / Mock Exam Engine (file-backed; preserves layout) ======
 
@@ -1789,6 +1556,8 @@ def _user_id():
 def _normalize_question(q, idx=None):
     """
     Normalize heterogeneous question shapes into a common structure:
+
+    Returns:
       {
         "id": str,
         "text": "Question text",
@@ -1845,31 +1614,25 @@ def _normalize_question(q, idx=None):
     }
 
 def _all_normalized_questions():
-    """
-    Use bank-driven engine questions first. Fallback to legacy if bank empty.
-    """
-    pool = []
-    # Prefer bank-backed engine pool
-    if ALL_QUESTIONS_ENGINE:
-        for q in ALL_QUESTIONS_ENGINE:
-            nq = {
-                "id": q.get("id") or str(uuid.uuid4()),
-                "text": q.get("question",""),
-                "domain": q.get("domain"),
-                "choices": [{"key": k, "text": v} for k, v in (q.get("options") or {}).items()],
-                "correct_key": q.get("correct")
-            }
-            if nq["text"] and nq["choices"]:
-                pool.append(nq)
-    return pool
+    try:
+        qs = ALL_QUESTIONS  # must exist in your app
+    except Exception:
+        qs = []
+    out = []
+    for i, q in enumerate(qs):
+        nq = _normalize_question(q, idx=i)
+        if nq and nq.get("text") and nq.get("choices"):
+            out.append(nq)
+    return out
 
 def _pick_questions(count, domain=None):
     pool = _all_normalized_questions()
     if domain:
         pool = [q for q in pool if str(q.get("domain") or "").lower() == str(domain).lower()]
     random.shuffle(pool)
-    return pool[:max(1, min(count, len(pool)))]
-
+    # Guarantee at least 1 if any exist; caller will handle empty pool.
+    return pool[:max(0, min(count, len(pool)))]
+# ---------- Run persistence ----------
 def _run_key(mode, user_id):
     # mode in {"quiz","mock"}
     return f"{mode}_run_{user_id}.json"
@@ -1886,6 +1649,7 @@ def _finish_run(mode, user_id):
     except Exception:
         pass
 
+# ---------- Grading & analytics ----------
 def _grade(run):
     """
     run = {
@@ -1943,10 +1707,32 @@ def _record_attempt(user_id, mode, run, results):
     except Exception as e:
         logger.warning("record_attempt failed: %s", e)
 
-# ---------- Shared rendering (no backslashes inside f-string expressions) ----------
+# ---------- Shared rendering (safe for empty sets) ----------
 def _render_question_card(title, route, run, index, error_msg=""):
-    qset = run.get("qset", [])
+    qset = run.get("qset", []) or []
     total = len(qset)
+
+    # Handle empty question set safely
+    if total == 0:
+        msg = """
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8">
+            <div class="card">
+              <div class="card-header bg-warning text-dark">
+                <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>{title}</h3>
+              </div>
+              <div class="card-body">
+                <div class="alert alert-info">
+                  No questions are available yet. Please seed the question bank (questions.json) or try again later.
+                </div>
+                <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """.replace("{title}", html.escape(title))
+        return base_layout(title, msg)
+
     i = max(0, min(index, total - 1))
     q = qset[i]
     qnum = i + 1
@@ -2129,6 +1915,26 @@ def quiz_page():
         count = max(5, min(count, 50))
         domain = request.args.get("domain")
         qset = _pick_questions(count, domain=domain)
+        if not qset:
+            # Safe empty-state page (prevents IndexError)
+            msg = """
+            <div class="container">
+              <div class="row justify-content-center"><div class="col-lg-8">
+                <div class="card">
+                  <div class="card-header bg-warning text-dark">
+                    <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
+                  </div>
+                  <div class="card-body">
+                    <div class="alert alert-info">
+                      No questions available to build a quiz. Please add items to questions.json (or enable the bank) and try again.
+                    </div>
+                    <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
+                  </div>
+                </div>
+              </div></div>
+            </div>
+            """
+            return base_layout("Quiz", msg)
         run = {
             "mode": "quiz",
             "created": datetime.utcnow().isoformat() + "Z",
@@ -2144,15 +1950,22 @@ def quiz_page():
     if request.method == "POST":
         if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
             abort(403)
+
+        qset = run.get("qset") or []
+        if not qset:
+            # If somehow empty mid-run, reset with a safe message.
+            _finish_run("quiz", user_id)
+            return redirect(url_for("quiz_page"))
+
         try:
             idx = int(request.form.get("index") or run.get("index", 0))
         except Exception:
             idx = run.get("index", 0)
-        idx = max(0, min(idx, len(run["qset"]) - 1))
+        idx = max(0, min(idx, len(qset) - 1))
 
         choice = (request.form.get("choice") or "").strip()
         nav = (request.form.get("nav") or "next").strip()
-        qid = run["qset"][idx]["id"]
+        qid = qset[idx]["id"]
 
         if nav == "prev":
             if choice:
@@ -2164,12 +1977,13 @@ def quiz_page():
             else:
                 if choice:
                     run["answers"][qid] = choice
-                if idx == len(run["qset"]) - 1:
+                if idx == len(qset) - 1:
                     run["finished"] = True
                 else:
                     run["index"] = idx + 1
 
         _save_run("quiz", user_id, run)
+        _log_event(user_id, "quiz.answer", {"idx": idx, "chosen": choice or run["answers"].get(qid)})
 
     if run.get("finished"):
         results = _grade(run)
@@ -2204,6 +2018,25 @@ def mock_exam_page():
         count = max(25, min(count, 150))
         domain = request.args.get("domain")
         qset = _pick_questions(count, domain=domain)
+        if not qset:
+            msg = """
+            <div class="container">
+              <div class="row justify-content-center"><div class="col-lg-8">
+                <div class="card">
+                  <div class="card-header bg-warning text-dark">
+                    <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Mock Exam</h3>
+                  </div>
+                  <div class="card-body">
+                    <div class="alert alert-info">
+                      No questions available to build a mock exam. Please add items to questions.json (or enable the bank) and try again.
+                    </div>
+                    <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
+                  </div>
+                </div>
+              </div></div>
+            </div>
+            """
+            return base_layout("Mock Exam", msg)
         run = {
             "mode": "mock",
             "created": datetime.utcnow().isoformat() + "Z",
@@ -2219,15 +2052,21 @@ def mock_exam_page():
     if request.method == "POST":
         if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
             abort(403)
+
+        qset = run.get("qset") or []
+        if not qset:
+            _finish_run("mock", user_id)
+            return redirect(url_for("mock_exam_page"))
+
         try:
             idx = int(request.form.get("index") or run.get("index", 0))
         except Exception:
             idx = run.get("index", 0)
-        idx = max(0, min(idx, len(run["qset"]) - 1))
+        idx = max(0, min(idx, len(qset) - 1))
 
         choice = (request.form.get("choice") or "").strip()
         nav = (request.form.get("nav") or "next").strip()
-        qid = run["qset"][idx]["id"]
+        qid = qset[idx]["id"]
 
         if nav == "prev":
             if choice:
@@ -2239,12 +2078,13 @@ def mock_exam_page():
             else:
                 if choice:
                     run["answers"][qid] = choice
-                if idx == len(run["qset"]) - 1:
+                if idx == len(qset) - 1:
                     run["finished"] = True
                 else:
                     run["index"] = idx + 1
 
         _save_run("mock", user_id, run)
+        _log_event(user_id, "mock.answer", {"idx": idx, "chosen": choice or run["answers"].get(qid)})
 
     if run.get("finished"):
         results = _grade(run)
@@ -2255,7 +2095,7 @@ def mock_exam_page():
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
 
-# ====== Flashcards Placeholder (UI unchanged; wired in Section 4) ======
+# ----- Flashcards & Progress (placeholders; no layout change) -----
 @app.route("/flashcards", methods=["GET", "POST"])
 @login_required
 def flashcards_page():
@@ -2332,7 +2172,7 @@ def _get_user_history(user_id, channel, limit=10):
         return []
 
 
-# ====== AI Client (uses your existing env keys) ======
+# ====== AI Client (uses existing env keys) ======
 def _call_tutor_agent(user_query, meta=None):
     """
     Calls your Tutor agent using env configuration.
@@ -2443,120 +2283,6 @@ def _track_page_views():
     except Exception:
         pass
 
-
-# ====== Tutor Routes (verbatim UI preserved) ======
-# IMPORTANT: Ensure this is the ONLY Tutor block in the file.
-@app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
-@app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
-@login_required
-def tutor_page():
-    return tutor_page()
-# --- Alias: keep existing UI link "/study" working without changing markup ---
-@app.route("/study", methods=["GET", "POST"], strict_slashes=False)
-@app.route("/study/", methods=["GET", "POST"], strict_slashes=False)
-@login_required
-def study_alias():
-    user = _find_user(session.get("email","")) or {}
-    user_id = user.get("id") or session.get("email") or "unknown"
-
-    tutor_error = ""
-    tutor_answer = ""
-    user_query = (request.form.get("query") or "").strip() if request.method == "POST" else ""
-
-    if request.method == "POST":
-        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
-            abort(403)
-
-        if not user_query:
-            tutor_error = "Please enter a question."
-        else:
-            ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
-            if ok:
-                tutor_answer = answer
-                item = {
-                    "ts": datetime.utcnow().isoformat() + "Z",
-                    "q": user_query,
-                    "a": tutor_answer,
-                    "meta": meta
-                }
-                _append_user_history(user_id, "tutor", item)
-                _log_event(user_id, "tutor.ask", {
-                    "q_len": len(user_query),
-                    "ok": True,
-                    "model": meta.get("model") or meta.get("deployment") or ""
-                })
-            else:
-                tutor_error = answer
-                _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": False})
-
-    recent = _get_user_history(user_id, "tutor", limit=5)
-
-    # --- Pre-format HTML to avoid backslashes inside f-string expressions ---
-    tutor_block = ""
-    if tutor_answer:
-        safe_answer = html.escape(tutor_answer).replace("\n", "<br>")
-        tutor_block = (
-            "<div class='alert alert-success'>"
-            "<div class='fw-semibold mb-1'>Tutor:</div>"
-            + safe_answer +
-            "</div>"
-        )
-
-    error_block = ""
-    if tutor_error:
-        error_block = "<div class='alert alert-danger'>" + html.escape(tutor_error) + "</div>"
-
-    if recent:
-        pieces = []
-        for item in recent:
-            ts = html.escape(item.get("ts",""))
-            q_html = html.escape(item.get("q","")).replace("\n","<br>")
-            a_html = html.escape(item.get("a","")).replace("\n","<br>")
-            pieces.append(
-                "<div class='mb-3'>"
-                "<div class='small text-muted'>" + ts + "</div>"
-                "<div class='fw-semibold'>You</div>"
-                "<div class='mb-2'>" + q_html + "</div>"
-                "<div class='fw-semibold'>Tutor</div>"
-                "<div>" + a_html + "</div>"
-                "</div>"
-            )
-        history_html = "".join(pieces)
-    else:
-        history_html = "<div class='text-muted'>No history yet.</div>"
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8">
-        <div class="card">
-          <div class="card-header bg-primary text-white">
-            <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3>
-          </div>
-          <div class="card-body">
-            <form method="POST" class="mb-4">
-              <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
-              <label class="form-label fw-semibold">Ask the Tutor</label>
-              <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
-              <div class="d-flex gap-2 mt-3">
-                <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
-                <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
-              </div>
-            </form>
-            {error_block}
-            {tutor_block}
-            <div class="border-top pt-3">
-              <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
-              {history_html}
-            </div>
-            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Tutor", content)
-
-
 @app.route("/tutor/ping", methods=["GET"])
 @login_required
 def tutor_ping():
@@ -2573,8 +2299,7 @@ def tutor_ping():
         "meta": meta
     }), (200 if ok else 502)
 
-
-# ====== Analytics Endpoint ======
+# ====== Analytics Hooks ======
 @app.route("/api/track", methods=["POST"])
 @login_required
 def api_track():
@@ -2592,892 +2317,18 @@ def api_track():
     except Exception as e:
         logger.error("api/track failed: %s", e, exc_info=True)
         return jsonify({"ok": False, "error": "server-error"}), 500
-# ====== Content Banks: Validation, Whitelist, Dedup, Persistence ======
-import difflib
-from urllib.parse import urlparse
 
-# ---- Whitelist (hard gate) ----
-ALLOWED_HOSTS = {
-    "nist.gov", "cisa.gov", "fema.gov", "osha.gov", "gao.gov",
-    "popcenter.asu.edu", "ncpc.org", "fbi.gov", "rand.org", "hsdl.org",
-    "nfpa.org", "iso.org", "justice.gov"  # includes official public AARs
-    # (city/state *.gov are covered by their exact hosts at runtime)
-}
-
-BANK_DIR = os.path.join(DATA_DIR, "bank")
-os.makedirs(BANK_DIR, exist_ok=True)
-
-FLASHCARDS_BANK_PATH = os.path.join(BANK_DIR, "cpp_flashcards_v1.json")
-QUESTIONS_BANK_PATH  = os.path.join(BANK_DIR, "cpp_questions_v1.json")
-INDEX_PATH           = os.path.join(DATA_DIR, "content_index.json")
-
-# ---- Targets (exact counts) ----
-FLASHCARD_TARGETS = {
-    "Principles": 60,
-    "Business": 39,
-    "Investigations": 27,
-    "Personnel": 36,
-    "Physical": 54,
-    "InfoSec": 42,
-    "Crisis": 42,
-}
-QUESTION_TARGET_TOTAL = 960
-QUESTION_TARGETS = {
-    # domain: (T/F, MCQ, Scenario)
-    "Principles":     (48, 115, 29),
-    "Business":       (31, 75, 19),
-    "Investigations": (22, 52, 13),
-    "Personnel":      (29, 69, 17),
-    "Physical":       (43, 104, 26),
-    "InfoSec":        (34, 80, 20),
-    "Crisis":         (34, 80, 20),
-}
-QUESTION_TYPE_KEYS = ("tf", "mcq", "scenario_mcq")
-
-# ---- Safe loads for banks & index ----
-def _load_bank(path):
-    data = _load_json(os.path.relpath(path, DATA_DIR), [])
-    return data if isinstance(data, list) else []
-
-def _save_bank(path, items):
-    name = os.path.relpath(path, DATA_DIR)
-    _save_json(name, items)
-
-def _load_index():
-    idx = _load_json(os.path.relpath(INDEX_PATH, DATA_DIR), {})
-    if not isinstance(idx, dict):
-        idx = {}
-    idx.setdefault("seen_hashes", [])
-    idx.setdefault("items", {})
-    # normalize to sets/dicts in memory
-    idx["seen_hashes"] = set(idx.get("seen_hashes") or [])
-    idx["items"] = dict(idx.get("items") or {})
-    return idx
-
-def _save_index(idx):
-    out = {
-        "seen_hashes": sorted(list(idx.get("seen_hashes", set()))),
-        "items": idx.get("items", {})
-    }
-    _save_json(os.path.relpath(INDEX_PATH, DATA_DIR), out)
-
-# ---- URL & whitelist helpers ----
-def _is_allowed_source(url: str) -> bool:
-    try:
-        pu = urlparse(url.strip())
-        host = (pu.hostname or "").lower()
-        if not pu.scheme.startswith("http"):
-            return False
-        if host in ALLOWED_HOSTS:
-            return True
-        # Allow official city/state *.gov domains and subdomains of allowed hosts
-        if host.endswith(".gov"):
-            return True
-        for base in ALLOWED_HOSTS:
-            if host == base or host.endswith("." + base):
-                return True
-        return False
-    except Exception:
-        return False
-
-def _normalize_sources(sources):
-    """Return filtered list of dicts with allowed URLs only; drop generic homepages."""
-    out = []
-    if not isinstance(sources, list):
-        return out
-    for s in sources:
-        if not isinstance(s, dict):
-            continue
-        title = str(s.get("title", "")).strip()[:160]
-        url = str(s.get("url", "")).strip()
-        if not url or not _is_allowed_source(url):
-            continue
-        # reject generic homepages (e.g., https://www.nist.gov/)
-        try:
-            pu = urlparse(url)
-            if pu.path in ("", "/", None):
-                continue
-        except Exception:
-            continue
-        out.append({"title": title or "Source", "url": url})
-        if len(out) >= 3:
-            break
-    return out
-
-# ---- Schema validators ----
-def _valid_domain(val: str) -> bool:
-    return val in FLASHCARD_TARGETS.keys()
-
-def _valid_difficulty(val: str) -> bool:
-    return val in ("easy", "medium", "hard")
-
-def _validate_flashcard(item: dict) -> tuple[bool, str, dict]:
-    try:
-        req = ["id", "type", "question", "answer", "rationale", "sources", "domain", "difficulty"]
-        if not all(k in item for k in req):
-            return False, "missing-keys", {}
-        if item.get("type") != "flashcard":
-            return False, "wrong-type", {}
-        q = str(item.get("question","")).strip()
-        a = str(item.get("answer","")).strip()
-        r = str(item.get("rationale","")).strip()
-        d = str(item.get("domain","")).strip()
-        diff = str(item.get("difficulty","")).strip()
-        if not q or not a or not r:
-            return False, "empty-fields", {}
-        if not _valid_domain(d):
-            return False, "bad-domain", {}
-        if not _valid_difficulty(diff):
-            return False, "bad-difficulty", {}
-        sources = _normalize_sources(item.get("sources"))
-        if not sources:
-            return False, "no-valid-sources", {}
-        clean = {
-            "id": str(item.get("id")),
-            "type": "flashcard",
-            "question": q,
-            "answer": a,
-            "rationale": r,
-            "sources": sources,
-            "domain": d,
-            "difficulty": diff
-        }
-        return True, "", clean
-    except Exception as e:
-        return False, f"exception:{e}", {}
-
-def _is_tf_choice_set(choices):
-    return isinstance(choices, list) and len(choices) == 2 and choices[0] == "True" and choices[1] == "False"
-
-def _validate_question(item: dict) -> tuple[bool, str, dict, str]:
-    """
-    Returns: ok, reason, clean_item, q_kind ('tf'|'mcq'|'scenario_mcq')
-    """
-    try:
-        req = ["id", "type", "question", "choices", "correct_index", "answer", "rationale", "sources", "domain", "difficulty"]
-        if not all(k in item for k in req):
-            return False, "missing-keys", {}, ""
-        t = item.get("type")
-        if t not in ("mcq", "scenario_mcq"):
-            return False, "wrong-type", {}, ""
-        stem = str(item.get("question","")).strip()
-        if not stem:
-            return False, "empty-stem", {}, ""
-        d = str(item.get("domain","")).strip()
-        if not _valid_domain(d):
-            return False, "bad-domain", {}, ""
-        diff = str(item.get("difficulty","")).strip()
-        if not _valid_difficulty(diff):
-            return False, "bad-difficulty", {}, ""
-
-        choices = item.get("choices")
-        # T/F special case: exactly ["True","False"] in that order
-        if _is_tf_choice_set(choices):
-            q_kind = "tf"
-            correct_index = int(item.get("correct_index"))
-            if correct_index not in (0,1):
-                return False, "bad-correct-index", {}, ""
-            answer = str(item.get("answer",""))
-            if answer not in ("True","False") or answer != choices[correct_index]:
-                return False, "answer-mismatch", {}, ""
-        else:
-            # MCQ / Scenario: 4–5 options, exactly one best answer
-            if not isinstance(choices, list) or len(choices) < 4 or len(choices) > 5:
-                return False, "choices-count", {}, ""
-            if len(set(choices)) != len(choices):
-                return False, "dup-choices", {}, ""
-            correct_index = int(item.get("correct_index"))
-            if correct_index < 0 or correct_index >= len(choices):
-                return False, "bad-correct-index", {}, ""
-            answer = str(item.get("answer",""))
-            if answer != choices[correct_index]:
-                return False, "answer-mismatch", {}, ""
-            q_kind = ("scenario_mcq" if t == "scenario_mcq" else "mcq")
-
-        rationale = str(item.get("rationale","")).strip()
-        if not rationale or rationale.count(" ") < 1:
-            return False, "weak-rationale", {}, ""
-
-        sources = _normalize_sources(item.get("sources"))
-        if not sources:
-            return False, "no-valid-sources", {}, ""
-
-        clean = {
-            "id": str(item.get("id")),
-            "type": t,
-            "question": stem,
-            "choices": choices,
-            "correct_index": correct_index,
-            "answer": answer,
-            "rationale": rationale,
-            "sources": sources,
-            "domain": d,
-            "difficulty": diff
-        }
-        return True, "", clean, q_kind
-    except Exception as e:
-        return False, f"exception:{e}", {}, ""
-
-# ---- Hashing & near-dup rules ----
-def _flashcard_hash(card: dict) -> str:
-    front = str(card.get("question","")).strip()
-    back  = str(card.get("answer","")).strip()
-    dom   = str(card.get("domain","")).strip()
-    sig = (front + "||" + back + "||" + dom).strip().lower()
-    return hashlib.sha256(sig.encode("utf-8")).hexdigest()
-
-def _question_hash(q: dict) -> str:
-    stem = " ".join(str(q.get("question","")).split()).lower()
-    choices = q.get("choices") or []
-    choices_clean = "||".join([str(c).strip().lower() for c in choices])
-    idx = str(q.get("correct_index"))
-    dom = str(q.get("domain","")).strip()
-    sig = f"{stem}||{choices_clean}||{idx}||{dom}"
-    return hashlib.sha256(sig.encode("utf-8")).hexdigest()
-
-def _is_near_dup(stem_a: str, stem_b: str, threshold: float = 0.92) -> bool:
-    a = " ".join(stem_a.lower().split())
-    b = " ".join(stem_b.lower().split())
-    return difflib.SequenceMatcher(None, a, b).ratio() > threshold
-
-# ---- Bank state in memory (lazy loaded) ----
-_flashcards_bank = None
-_questions_bank  = None
-_index_cache     = None
-
-def _ensure_banks_loaded():
-    global _flashcards_bank, _questions_bank, _index_cache
-    if _flashcards_bank is None:
-        _flashcards_bank = _load_bank(FLASHCARDS_BANK_PATH)
-    if _questions_bank is None:
-        _questions_bank = _load_bank(QUESTIONS_BANK_PATH)
-    if _index_cache is None:
-        _index_cache = _load_index()
-
-def _persist_all():
-    _save_bank(FLASHCARDS_BANK_PATH, _flashcards_bank or [])
-    _save_bank(QUESTIONS_BANK_PATH,  _questions_bank  or [])
-    _save_index(_index_cache or {"seen_hashes": set(), "items": {}})
-
-# ---- Helper: classify question kind for quota tracking ----
-def _q_kind(item: dict) -> str:
-    if _is_tf_choice_set(item.get("choices")):
-        return "tf"
-    return "scenario_mcq" if item.get("type") == "scenario_mcq" else "mcq"
-
-# ---- Quota counters (current counts by domain/type) ----
-def _current_quota():
-    _ensure_banks_loaded()
-    # Flashcards per domain
-    fc_counts = {d: 0 for d in FLASHCARD_TARGETS}
-    for c in _flashcards_bank:
-        d = c.get("domain")
-        if d in fc_counts:
-            fc_counts[d] += 1
-    # Questions per domain/type
-    q_counts = {d: {"tf": 0, "mcq": 0, "scenario_mcq": 0} for d in FLASHCARD_TARGETS}
-    for q in _questions_bank:
-        d = q.get("domain")
-        if d in q_counts:
-            q_counts[d][_q_kind(q)] += 1
-    return fc_counts, q_counts
-
-# ---- Ingest pipeline ----
-def _ingest_items(items: list[dict]):
-    """
-    Applies:
-      - whitelist enforcement
-      - schema validation
-      - dedup (hash & near-dup)
-      - quota-aware acceptance (keeps within targets when finalizing later)
-    Stores valid items into working banks immediately; exact counts enforced by /finalize.
-    """
-    _ensure_banks_loaded()
-    kept, dropped = [], []
-
-    # Prepare existing stems for near-dup checks
-    existing_stems_fc = [c.get("question","") for c in _flashcards_bank]
-    existing_stems_q  = [q.get("question","") for q in _questions_bank]
-
-    for it in (items or []):
-        try:
-            # ---- Flashcard ----
-            if it.get("type") == "flashcard":
-                ok, reason, clean = _validate_flashcard(it)
-                if not ok:
-                    dropped.append({"id": it.get("id"), "reason": reason})
-                    continue
-                # Hash & near-dup
-                h = _flashcard_hash(clean)
-                if h in _index_cache["seen_hashes"]:
-                    dropped.append({"id": clean["id"], "reason": "dup-hash"})
-                    continue
-                if any(_is_near_dup(clean["question"], s) for s in existing_stems_fc):
-                    dropped.append({"id": clean["id"], "reason": "near-dup"})
-                    continue
-                _flashcards_bank.append(clean)
-                _index_cache["seen_hashes"].add(h)
-                _index_cache["items"][clean["id"]] = h
-                existing_stems_fc.append(clean["question"])
-                kept.append({"id": clean["id"], "type": "flashcard"})
-            # ---- Question ----
-            elif it.get("type") in ("mcq", "scenario_mcq"):
-                ok, reason, clean, kind = _validate_question(it)
-                if not ok:
-                    dropped.append({"id": it.get("id"), "reason": reason})
-                    continue
-                h = _question_hash(clean)
-                if h in _index_cache["seen_hashes"]:
-                    dropped.append({"id": clean["id"], "reason": "dup-hash"})
-                    continue
-                if any(_is_near_dup(clean["question"], s) for s in existing_stems_q):
-                    dropped.append({"id": clean["id"], "reason": "near-dup"})
-                    continue
-                _questions_bank.append(clean)
-                _index_cache["seen_hashes"].add(h)
-                _index_cache["items"][clean["id"]] = h
-                existing_stems_q.append(clean["question"])
-                kept.append({"id": clean["id"], "type": kind})
-            else:
-                dropped.append({"id": it.get("id"), "reason": "unknown-type"})
-        except Exception as e:
-            dropped.append({"id": it.get("id"), "reason": f"exception:{e}"})
-
-    _persist_all()
-    # instrumentation
-    domain_summary_fc, domain_summary_q = _current_quota()
-    _log_event(_user_id(), "content.ingest", {
-        "kept": len(kept), "dropped": len(dropped),
-        "flashcards_total": len(_flashcards_bank),
-        "questions_total": len(_questions_bank)
-    })
-    return {
-        "ok": True,
-        "kept": kept,
-        "dropped": dropped,
-        "flashcards_total": len(_flashcards_bank),
-        "questions_total": len(_questions_bank),
-        "flashcards_by_domain": domain_summary_fc,
-        "questions_by_domain": domain_summary_q
-    }
-
-# ---- Finalize: enforce exact targets & write banks ----
-def _finalize_banks():
-    _ensure_banks_loaded()
-
-    # Trim/pack flashcards per domain
-    fc_targeted = []
-    domain_buckets = {d: [] for d in FLASHCARD_TARGETS}
-    for c in _flashcards_bank:
-        d = c.get("domain")
-        if d in domain_buckets:
-            domain_buckets[d].append(c)
-    for d, target in FLASHCARD_TARGETS.items():
-        fc_targeted.extend(domain_buckets[d][:target])
-
-    # Questions per domain/type quotas
-    q_targeted = []
-    bucket_q = {d: {"tf": [], "mcq": [], "scenario_mcq": []} for d in FLASHCARD_TARGETS}
-    for q in _questions_bank:
-        d = q.get("domain")
-        if d in bucket_q:
-            bucket_q[d][_q_kind(q)].append(q)
-
-    for d, (tf_t, mcq_t, sc_t) in QUESTION_TARGETS.items():
-        q_targeted.extend(bucket_q[d]["tf"][:tf_t])
-        q_targeted.extend(bucket_q[d]["mcq"][:mcq_t])
-        q_targeted.extend(bucket_q[d]["scenario_mcq"][:sc_t])
-
-    # Save finalized banks
-    _save_bank(FLASHCARDS_BANK_PATH, fc_targeted)
-    _save_bank(QUESTIONS_BANK_PATH,  q_targeted)
-    _persist_all()
-
-    # Summaries
-    fc_counts = {d: 0 for d in FLASHCARD_TARGETS}
-    for c in fc_targeted:
-        fc_counts[c["domain"]] += 1
-
-    q_counts = {d: {"tf": 0, "mcq": 0, "scenario_mcq": 0} for d in FLASHCARD_TARGETS}
-    for q in q_targeted:
-        q_counts[q["domain"]][_q_kind(q)] += 1
-
-    _log_event(_user_id(), "content.finalize", {
-        "flashcards": len(fc_targeted),
-        "questions": len(q_targeted)
-    })
-
-    return {
-        "ok": True,
-        "flashcards_total": len(fc_targeted),
-        "questions_total": len(q_targeted),
-        "flashcards_by_domain": fc_counts,
-        "questions_by_domain": q_counts
-    }
-
-# ---- Admin guard ----
-def admin_required(f):
-    @wraps(f)
-    def wrapper(*args, **kwargs):
-        if not is_admin():
-            # Fallback: allow with ADMIN_PASSWORD via basic form/header for headless calls
-            pw = request.headers.get("X-Admin-Password", "") or request.args.get("admin_pw","") or ""
-            if not pw or pw != (ADMIN_PASSWORD or ""):
-                abort(403)
-        return f(*args, **kwargs)
-    return wrapper
-
-# ---- Admin endpoints (no UI changes) ----
-@app.get("/admin/content/status")
-@login_required
-@admin_required
-def admin_content_status():
-    _ensure_banks_loaded()
-    fc_counts, q_counts = _current_quota()
-    resp = {
-        "flashcards_total": len(_flashcards_bank),
-        "questions_total": len(_questions_bank),
-        "flashcards_by_domain": fc_counts,
-        "questions_by_domain": q_counts,
-        "targets": {
-            "flashcards": FLASHCARD_TARGETS,
-            "questions": {k: {"tf": v[0], "mcq": v[1], "scenario_mcq": v[2]} for k, v in QUESTION_TARGETS.items()},
-            "questions_total": QUESTION_TARGET_TOTAL
-        }
-    }
-    return safe_json_response(resp)
-
-@app.post("/admin/content/ingest")
-@login_required
-@admin_required
-def admin_content_ingest():
-    try:
-        payload = request.get_json(force=True, silent=True) or {}
-        items = payload if isinstance(payload, list) else payload.get("items", [])
-        result = _ingest_items(items)
-        return safe_json_response(result)
-    except Exception as e:
-        logger.error("ingest error: %s", e, exc_info=True)
-        return safe_json_response({"ok": False, "error": "ingest-failed"}, 500)
-
-@app.post("/admin/content/finalize")
-@login_required
-@admin_required
-def admin_content_finalize():
-    try:
-        result = _finalize_banks()
-        return safe_json_response(result)
-    except Exception as e:
-        logger.error("finalize error: %s", e, exc_info=True)
-        return safe_json_response({"ok": False, "error": "finalize-failed"}, 500)
-
-# ---- Bank usage hooks for existing Quiz/Mock/Flashcards routes (no UI changes yet) ----
-def _get_flashcards_bank():
-    _ensure_banks_loaded()
-    return _flashcards_bank or []
-
-def _get_questions_bank():
-    _ensure_banks_loaded()
-    return _questions_bank or []
-# ====== Bank-backed selection (no UI changes) ======
-def _normalized_bank_questions():
-    """
-    Convert bank-format questions into the quiz engine's normalized structure:
-      {
-        "id": str,
-        "text": "...",
-        "domain": "Principles|Business|...",
-        "choices": [{"key":"A","text":"..."}, ...],
-        "correct_key": "A"
-      }
-    """
-    qs = []
-    letters = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    for q in _get_questions_bank():
-        try:
-            stem = (q.get("question") or "").strip()
-            if not stem:
-                continue
-            raw_choices = q.get("choices") or []
-            # Convert list -> [{"key":"A","text":"..."}]
-            ch = []
-            for i, opt in enumerate(raw_choices):
-                if i >= len(letters):
-                    break
-                key = letters[i]
-                ch.append({"key": key, "text": str(opt)})
-            if len(ch) < 2:
-                continue
-            ci = int(q.get("correct_index", -1))
-            if ci < 0 or ci >= len(ch):
-                continue
-            correct_key = ch[ci]["key"]
-            qs.append({
-                "id": str(q.get("id") or uuid.uuid4()),
-                "text": stem,
-                "domain": q.get("domain"),
-                "choices": ch,
-                "correct_key": correct_key
-            })
-        except Exception:
-            continue
-    return qs
-
-# Override the earlier helper to prefer bank questions when present
-def _all_normalized_questions():
-    bank_qs = _normalized_bank_questions()
-    if bank_qs:
-        return bank_qs
-    # Fallback to legacy in-memory set
-    try:
-        base = ALL_QUESTIONS
-    except Exception:
-        base = []
-    out = []
-    letters = list("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
-    for i, q in enumerate(base):
-        try:
-            qid = str(q.get("id") or i or uuid.uuid4())
-            text = (q.get("question") or q.get("q") or q.get("stem") or q.get("text") or "").strip()
-            domain = (q.get("domain") or q.get("category") or q.get("section") or None)
-            raw_choices = (q.get("choices") or q.get("options") or q.get("answers") or [])
-            choices = []
-            for j, c in enumerate(raw_choices[:5]):
-                if isinstance(c, dict):
-                    k = str(c.get("key") or letters[j])
-                    t = str(c.get("text") or c.get("label") or c.get("value") or "")
-                else:
-                    k = letters[j]
-                    t = str(c)
-                choices.append({"key": k.strip(), "text": t})
-            correct = q.get("correct") or q.get("answer") or q.get("correct_key")
-            correct_key = None
-            if isinstance(correct, (int, float)) and 0 <= int(correct) < len(choices):
-                correct_key = choices[int(correct)]["key"]
-            elif isinstance(correct, str):
-                ck = correct.strip()
-                if ck in {c["key"] for c in choices}:
-                    correct_key = ck
-                else:
-                    for c in choices:
-                        if ck.lower() == c["text"].strip().lower():
-                            correct_key = c["key"]; break
-            if text and choices:
-                out.append({"id": qid, "text": text, "domain": domain, "choices": choices, "correct_key": correct_key})
-        except Exception:
-            continue
-    return out
-
-def _pick_questions(count, domain=None):
-    """
-    Uses bank-backed pool (if present). Domain filter matches bank domains exactly.
-    """
-    pool = _all_normalized_questions()
-    if domain:
-        pool = [q for q in pool if str(q.get("domain") or "").lower() == str(domain).lower()]
-    random.shuffle(pool)
-    return pool[:max(1, min(count, len(pool)))]
-
-# ====== Flashcards: bank-backed API (no UI change to /flashcards page) ======
-def _normalized_bank_flashcards():
-    """Expose flashcards as a simple list of dicts (id, question, answer, rationale, domain, difficulty, sources)."""
-    cards = []
-    for c in _get_flashcards_bank():
-        try:
-            cards.append({
-                "id": str(c.get("id") or uuid.uuid4()),
-                "question": (c.get("question") or "").strip(),
-                "answer": (c.get("answer") or "").strip(),
-                "rationale": (c.get("rationale") or "").strip(),
-                "domain": c.get("domain"),
-                "difficulty": c.get("difficulty"),
-                "sources": c.get("sources") or []
-            })
-        except Exception:
-            continue
-    return cards
-
-@app.get("/api/flashcards")
-@login_required
-def api_flashcards_list():
-    """
-    Lightweight JSON feed to power the existing Flashcards page client-side (no markup change).
-    Query params:
-      - domain: optional exact domain match
-      - count: optional int (default 20)
-      - offset: optional int (default 0)
-    """
-    try:
-        domain = request.args.get("domain")
-        try:
-            count = max(1, min(int(request.args.get("count", 20)), 100))
-        except Exception:
-            count = 20
-        try:
-            offset = max(0, int(request.args.get("offset", 0)))
-        except Exception:
-            offset = 0
-
-        cards = _normalized_bank_flashcards()
-        if domain:
-            cards = [c for c in cards if str(c.get("domain")) == domain]
-        total = len(cards)
-        page = cards[offset: offset + count]
-        _log_event(_user_id(), "flashcards.fetch", {"count": len(page), "offset": offset, "domain": domain or "all"})
-        return safe_json_response({"ok": True, "total": total, "items": page})
-    except Exception as e:
-        logger.error("api/flashcards failed: %s", e, exc_info=True)
-        return safe_json_response({"ok": False, "error": "server-error"}, 500)
-
-@app.get("/api/bank/status")
-@login_required
-def api_bank_status():
-    """
-    Simple status for the frontend or admin to confirm bank availability without UI changes.
-    """
-    try:
-        fc = _get_flashcards_bank()
-        qq = _get_questions_bank()
-        fc_counts, q_counts = _current_quota()
-        return safe_json_response({
-            "ok": True,
-            "flashcards_total": len(fc),
-            "questions_total": len(qq),
-            "flashcards_by_domain": fc_counts,
-            "questions_by_domain": q_counts
-        })
-    except Exception as e:
-        logger.error("api/bank/status failed: %s", e, exc_info=True)
-        return safe_json_response({"ok": False, "error": "server-error"}, 500)
-
-# ====== Answer instrumentation for quiz/mock (already wired via /api/track) ======
-# Nothing else needed here; quiz/mock routes automatically pick from the bank now.
-# ====== Generation Runner (admin-only; no UI changes) ======
-# Purpose:
-# - Report remaining counts by domain/type
-# - Accept generator batches (validates + dedups via the existing ingest)
-# - Finalize banks to exact targets
-# - Reset working banks if you need to start over
-# - Expose the kickoff prompt text for your generator
-
-# ---- Helpers: compute remaining needs ----
-def _count_flashcards_by_domain(cards):
-    counts = {d: 0 for d in FLASHCARD_TARGETS}
-    for c in cards:
-        d = c.get("domain")
-        if d in counts:
-            counts[d] += 1
-    return counts
-
-def _count_questions_by_domain_type(questions):
-    counts = {d: {"tf": 0, "mcq": 0, "scenario_mcq": 0} for d in FLASHCARD_TARGETS}
-    for q in questions:
-        d = q.get("domain")
-        if d in counts:
-            counts[d][_q_kind(q)] += 1
-    return counts
-
-def _remaining_targets():
-    _ensure_banks_loaded()
-    fc_have  = _count_flashcards_by_domain(_flashcards_bank)
-    q_have   = _count_questions_by_domain_type(_questions_bank)
-
-    fc_need = {d: max(0, FLASHCARD_TARGETS[d] - fc_have.get(d, 0)) for d in FLASHCARD_TARGETS}
-
-    q_need = {}
-    for d, (tf_t, mcq_t, sc_t) in QUESTION_TARGETS.items():
-        cur = q_have.get(d, {"tf": 0, "mcq": 0, "scenario_mcq": 0})
-        q_need[d] = {
-            "tf": max(0, tf_t - cur["tf"]),
-            "mcq": max(0, mcq_t - cur["mcq"]),
-            "scenario_mcq": max(0, sc_t - cur["scenario_mcq"]),
-        }
-
-    total_q_have = sum(sum(v.values()) for v in q_have.values())
-    total_q_need = max(0, QUESTION_TARGET_TOTAL - total_q_have)
-
-    return {
-        "flashcards": {"have": fc_have, "need": fc_need, "target": FLASHCARD_TARGETS},
-        "questions":  {"have": q_have, "need": q_need, "target": {
-            d: {"tf": t[0], "mcq": t[1], "scenario_mcq": t[2]}
-            for d, t in QUESTION_TARGETS.items()
-        }, "total_have": total_q_have, "total_need": total_q_need, "total_target": QUESTION_TARGET_TOTAL}
-    }
-
-# ---- Admin endpoints for generation control ----
-@app.get("/admin/generate/needs")
-@login_required
-@admin_required
-def admin_generate_needs():
-    return safe_json_response({"ok": True, "summary": _remaining_targets()})
-
-@app.post("/admin/generate/batch")
-@login_required
-@admin_required
-def admin_generate_batch():
-    """
-    POST JSON:
-      {
-        "items": [ ... array of flashcards/questions per Section 2 schema ... ],
-        "meta": {
-          "domain": "Principles|Business|Investigations|Personnel|Physical|InfoSec|Crisis",
-          "type": "flashcard|tf|mcq|scenario_mcq",
-          "count": <int>,
-          "difficulty": "easy|medium|hard|mixed"
-        }
-      }
-    Behavior:
-      - Runs through _ingest_items (whitelist + schema + de-dup)
-      - Logs generation metrics
-    """
-    try:
-        payload = request.get_json(force=True, silent=True) or {}
-        items = payload.get("items") or []
-        meta  = payload.get("meta") or {}
-        before_fc = len(_get_flashcards_bank())
-        before_q  = len(_get_questions_bank())
-
-        result = _ingest_items(items)
-
-        after_fc = len(_get_flashcards_bank())
-        after_q  = len(_get_questions_bank())
-
-        # Instrumentation for analytics (per the spec)
-        _log_event(_user_id(), "flashcards.generate" if meta.get("type") == "flashcard" else "quiz.generate", {
-            "domain": meta.get("domain"),
-            "count_requested": meta.get("count"),
-            "difficulty": meta.get("difficulty"),
-            "kept": len(result.get("kept", [])),
-            "dropped": len(result.get("dropped", [])),
-            "flashcards_delta": max(0, after_fc - before_fc),
-            "questions_delta": max(0, after_q - before_q),
-        })
-
-        return safe_json_response({"ok": True, "result": result, "needs": _remaining_targets()})
-    except Exception as e:
-        logger.error("generate_batch error: %s", e, exc_info=True)
-        return safe_json_response({"ok": False, "error": "generate-batch-failed"}, 500)
-
-@app.post("/admin/generate/finalize")
-@login_required
-@admin_required
-def admin_generate_finalize():
-    """
-    Enforces exact targets and writes:
-      - data/bank/cpp_flashcards_v1.json  (300)
-      - data/bank/cpp_questions_v1.json   (960)
-      - data/content_index.json           (hashes)
-    """
-    res = _finalize_banks()
-    # Add acceptance-like summary in response for quick audits
-    ok_300 = (res.get("flashcards_total") == 300)
-    ok_960 = (res.get("questions_total")  == 960)
-    res.update({"checks": {"flashcards_300": ok_300, "questions_960": ok_960}})
-    return safe_json_response(res)
-
-@app.post("/admin/generate/reset")
-@login_required
-@admin_required
-def admin_generate_reset():
-    """
-    Clears the working banks and index (does NOT touch finalized files unless they are the working ones).
-    Use carefully.
-    """
-    try:
-        global _flashcards_bank, _questions_bank, _index_cache
-        _flashcards_bank = []
-        _questions_bank  = []
-        _index_cache     = {"seen_hashes": set(), "items": {}}
-        _persist_all()
-        _log_event(_user_id(), "content.reset", {})
-        return safe_json_response({"ok": True})
-    except Exception as e:
-        logger.error("reset error: %s", e, exc_info=True)
-        return safe_json_response({"ok": False, "error": "reset-failed"}, 500)
-
-# ---- Kickoff Prompt (served back for convenience) ----
-KICKOFF_PROMPT = (
-    "Context: You’re continuing a Flask CPP study app. Do not change layout/CSS. We need a CPP-only content bank "
-    "built from open sources. Use the inventory, schema, validation, whitelist, and dedup rules below. Generate "
-    "batches per domain/type until we have 300 flashcards and 960 questions (25% T/F, 60% MCQ, 15% scenario), with "
-    "the exact domain distribution specified. Enforce uniqueness with the hashing/signature rules. Include 1–3 allowed "
-    "citations on every item. When finished, save to: • data/bank/cpp_flashcards_v1.json (300 items) "
-    "• data/bank/cpp_questions_v1.json (960 items) …and a data/content_index.json with hashes. You may regenerate items "
-    "that fail validation or collide. Use atomic file writes. Now ask me for my current app.py so you can wire the app "
-    "to read these banks without changing the UI."
-)
-
-@app.get("/admin/generate/prompt")
-@login_required
-@admin_required
-def admin_generate_prompt():
-    return safe_json_response({"ok": True, "kickoff_prompt": KICKOFF_PROMPT})
-
-# ---- Acceptance Quick Check ----
-@app.get("/admin/content/acceptance")
-@login_required
-@admin_required
-def admin_content_acceptance():
-    """
-    Convenience endpoint to verify Acceptance Test items (Section 10).
-    """
-    _ensure_banks_loaded()
-
-    # 1) Counts
-    fc = _load_bank(FLASHCARDS_BANK_PATH)
-    qq = _load_bank(QUESTIONS_BANK_PATH)
-    counts_ok = (len(fc) == 300 and len(qq) == 960)
-
-    # 2) Source whitelist quick scan
-    def _urls_ok(items):
-        for it in items:
-            for s in (it.get("sources") or []):
-                if not _is_allowed_source(s.get("url","")):
-                    return False
-        return True
-
-    urls_ok = _urls_ok(fc) and _urls_ok(qq)
-
-    # 3) T/F choice rule
-    tf_ok = True
-    for q in qq:
-        if _q_kind(q) == "tf":
-            if not _is_tf_choice_set(q.get("choices")):
-                tf_ok = False
-                break
-
-    # 4) Options count rule
-    opts_ok = True
-    for q in qq:
-        if _q_kind(q) != "tf":
-            ch = q.get("choices") or []
-            if len(ch) < 4 or len(ch) > 5:
-                opts_ok = False
-                break
-
-    # 5) Domain distribution within ±1 only for rounding (we enforce exact in finalize anyway)
-    #    Here, just report the actuals.
-    fc_counts = _count_flashcards_by_domain(fc)
-    q_counts  = _count_questions_by_domain_type(qq)
-
-    return safe_json_response({
-        "ok": counts_ok and urls_ok and tf_ok and opts_ok,
-        "checks": {
-            "counts": counts_ok,
-            "whitelist": urls_ok,
-            "tf_rule": tf_ok,
-            "options_rule": opts_ok
-        },
-        "flashcards_total": len(fc),
-        "questions_total": len(qq),
-        "flashcards_by_domain": fc_counts,
-        "questions_by_domain": q_counts,
-        "targets": {
-            "flashcards": FLASHCARD_TARGETS,
-            "questions": {d: {"tf": t[0], "mcq": t[1], "scenario_mcq": t[2]} for d, t in QUESTION_TARGETS.items()},
-            "questions_total": QUESTION_TARGET_TOTAL
-        }
-    })
-
-
-
+# ====== App Factory & Main ======
+def create_app():
+    init_sample_data()
+    logger.info("CPP Test Prep v%s starting up", APP_VERSION)
+    logger.info("Debug mode: %s", DEBUG)
+    logger.info("Staging mode: %s", IS_STAGING)
+    logger.info("CSRF protection: %s", "enabled" if HAS_CSRF else "disabled")
+    return app
+
+# ====== Entrypoint ======
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    logger.info("Running app on port %s", port)
+    app.run(host="0.0.0.0", port=port, debug=DEBUG)
