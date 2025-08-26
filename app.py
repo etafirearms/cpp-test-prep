@@ -495,16 +495,26 @@ def base_layout(title: str, body_html: str) -> str:
     user_email = session.get('email', '')
     is_logged_in = 'user_id' in session
 
+    # CSRF token value (string) for meta + forms
     if HAS_CSRF:
         try:
             from flask_wtf.csrf import generate_csrf
             csrf_token_value = generate_csrf()
-        except:
+        except Exception:
             csrf_token_value = ""
     else:
         csrf_token_value = ""
 
+    # User menu with plan badge
+    def _plan_badge_text(sub):
+        if sub == 'monthly':
+            return 'Monthly'
+        if sub == 'sixmonth':
+            return '6-Month'
+        return 'Inactive'
+
     if is_logged_in:
+        # NOTE: _find_user must exist already (it does in your merged code)
         user = _find_user(user_email)
         subscription = user.get('subscription', 'inactive') if user else 'inactive'
         badge_text = _plan_badge_text(subscription)
@@ -581,19 +591,87 @@ def base_layout(title: str, body_html: str) -> str:
     </footer>
     """
 
-    stage_banner = ("""
-    <div class="alert alert-warning alert-dismissible fade show" role="alert">
-      <div class="container text-center">
-        <strong>STAGING ENVIRONMENT</strong> - Not for production use.
-        <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-      </div>
-    </div>
-    """ if IS_STAGING else "")
+    # ✅ Compute the staging banner outside the f-string (no inline {("""...""")})
+    stage_banner = (
+        """
+        <div class="alert alert-warning alert-dismissible fade show m-0" role="alert">
+          <div class="container text-center">
+            <strong>STAGING ENVIRONMENT</strong> - Not for production use.
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+          </div>
+        </div>
+        """
+        if IS_STAGING else ""
+    )
 
-    # --- CSS and style omitted here for brevity (included in full in codebase) ---
+    # Big CSS as a normal triple-quoted string (no braces)
+    style_css = """
+    <style>
+      :root {
+        --primary-blue: #2563eb;
+        --success-green: #059669;
+        --warning-orange: #d97706;
+        --danger-red: #dc2626;
+        --purple-accent: #7c3aed;
+        --soft-gray: #f8fafc;
+        --warm-white: #fefefe;
+        --text-dark: #1f2937;
+        --text-light: #6b7280;
+      }
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
+        color: var(--text-dark);
+        line-height: 1.6;
+      }
+      .bg-gradient-primary { background: linear-gradient(135deg, var(--primary-blue) 0%, var(--purple-accent) 100%) !important; }
+      .text-white-75 { color: rgba(255, 255, 255, 0.85) !important; }
+      .text-white-75:hover { color: white !important; }
+      .card {
+        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
+        border: none;
+        border-radius: 16px;
+        background: var(--warm-white);
+        transition: all 0.3s ease;
+        overflow: hidden;
+      }
+      .card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
+      .btn { border-radius: 12px; font-weight: 600; letter-spacing: 0.025em; padding: 0.75rem 1.5rem; transition: all 0.2s ease; }
+      .btn-primary { background: linear-gradient(135deg, var(--primary-blue), var(--purple-accent)); border: none; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25); }
+      .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35); }
+      .btn-success { background: linear-gradient(135deg, var(--success-green), #10b981); border: none; box-shadow: 0 4px 12px rgba(5, 150, 105, 0.25); }
+      .btn-warning { background: linear-gradient(135deg, var(--warning-orange), #f59e0b); border: none; box-shadow: 0 4px 12px rgba(217, 119, 6, 0.25); }
+      .progress { height: 12px; border-radius: 8px; background: #e5e7eb; overflow: hidden; }
+      .progress-bar { border-radius: 8px; transition: width 0.6s ease; }
+      .bg-success { background: linear-gradient(90deg, var(--success-green), #10b981) !important; }
+      .bg-warning { background: linear-gradient(90deg, var(--warning-orange), #f59e0b) !important; }
+      .bg-danger  { background: linear-gradient(90deg, var(--danger-red), #ef4444) !important; }
+      .badge { font-size: 0.8em; padding: 0.5em 0.8em; border-radius: 8px; font-weight: 600; }
+      .plan-monthly { background: linear-gradient(45deg, var(--primary-blue), var(--purple-accent)); color: white; }
+      .plan-sixmonth { background: linear-gradient(45deg, var(--purple-accent), #8b5cf6); color: white; }
+      .plan-inactive { background: #6b7280; color: white; }
+      .alert { border-radius: 12px; border: none; padding: 1.25rem; }
+      .alert-success { background: linear-gradient(135deg, #d1fae5, #a7f3d0); color: #065f46; border-left: 4px solid var(--success-green); }
+      .alert-info { background: linear-gradient(135deg, #dbeafe, #bfdbfe); color: #1e3a8a; border-left: 4px solid var(--primary-blue); }
+      .alert-warning { background: linear-gradient(135deg, #fef3c7, #fed7aa); color: #92400e; border-left: 4px solid var(--warning-orange); }
+      .form-control, .form-select { border-radius: 10px; border: 2px solid #e5e7eb; padding: 0.75rem 1rem; transition: all 0.2s ease; }
+      .form-control:focus, .form-select:focus { border-color: var(--primary-blue); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
+      .navbar-brand { font-size: 1.5rem; font-weight: 700; }
+      @media (max-width: 768px) {
+        .container { padding: 0 20px; }
+        .card { margin-bottom: 1.5rem; border-radius: 12px; }
+        .btn { padding: 0.6rem 1.2rem; }
+      }
+      .text-success { color: var(--success-green) !important; fill: var(--success-green); }
+      .text-warning { color: var(--warning-orange) !important; fill: var(--warning-orange); }
+      .text-danger  { color: var(--danger-red) !important; fill: var(--danger-red); }
+    </style>
+    """
 
+    # Replace any literal {{ csrf_token() }} in body_html with our string value
     body_html = body_html.replace('{{ csrf_token() }}', csrf_token_value)
 
+    # Final HTML
     return f"""<!DOCTYPE html>
     <html lang="en">
     <head>
@@ -606,6 +684,7 @@ def base_layout(title: str, body_html: str) -> str:
       <link rel="preconnect" href="https://fonts.googleapis.com">
       <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+      {style_css}
     </head>
     <body class="d-flex flex-column min-vh-100">
       {nav}
@@ -1498,5 +1577,6 @@ if __name__ == "__main__":
     logger.info("Starting server on %s:%d", host, port)
     # Use a real WSGI server (gunicorn/uvicorn) in production
     application.run(host=host, port=port, debug=DEBUG)
+
 
 
