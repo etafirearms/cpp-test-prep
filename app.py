@@ -1,5 +1,3 @@
-# ========== PART 1/6 ==========
-
 # app.py
 # NOTE: Ensure "stripe" is listed in requirements.txt to avoid ModuleNotFoundError.
 
@@ -1500,4 +1498,5 @@ if __name__ == "__main__":
     logger.info("Starting server on %s:%d", host, port)
     # Use a real WSGI server (gunicorn/uvicorn) in production
     application.run(host=host, port=port, debug=DEBUG)
+
 
