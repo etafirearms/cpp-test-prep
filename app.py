@@ -1671,13 +1671,11 @@ def tutor_page():
     user = _find_user(session.get("email","")) or {}
     user_id = user.get("id") or session.get("email") or "unknown"
 
-    # Handle submit
     tutor_error = ""
     tutor_answer = ""
     user_query = (request.form.get("query") or "").strip() if request.method == "POST" else ""
 
     if request.method == "POST":
-        # Basic CSRF guard if enabled in your app
         if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
             abort(403)
 
@@ -1687,7 +1685,6 @@ def tutor_page():
             ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
             if ok:
                 tutor_answer = answer
-                # Save history + analytics
                 item = {
                     "ts": datetime.utcnow().isoformat() + "Z",
                     "q": user_query,
@@ -1695,16 +1692,45 @@ def tutor_page():
                     "meta": meta
                 }
                 _append_user_history(user_id, "tutor", item)
-                _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": True, "model": meta.get("model")})
+                _log_event(user_id, "tutor.ask", {
+                    "q_len": len(user_query),
+                    "ok": True,
+                    "model": meta.get("model")
+                })
             else:
                 tutor_error = answer
                 _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": False})
 
-    # Last 5 exchanges for quick context
     recent = _get_user_history(user_id, "tutor", limit=5)
 
-    # UI: stays within your existing card layout; same classes, same look
-    # Only adds a form + simple history section inside the card body.
+    # Pre-format tutor response and history to avoid f-string + backslash issue
+    tutor_block = ""
+    if tutor_answer:
+        safe_answer = html.escape(tutor_answer).replace("\n", "<br>")
+        tutor_block = f"<div class='alert alert-success'><div class='fw-semibold mb-1'>Tutor:</div>{safe_answer}</div>"
+
+    error_block = ""
+    if tutor_error:
+        error_block = f"<div class='alert alert-danger'>{html.escape(tutor_error)}</div>"
+
+    if recent:
+        history_html = ""
+        for item in recent:
+            q_html = html.escape(item.get("q","")).replace("\n","<br>")
+            a_html = html.escape(item.get("a","")).replace("\n","<br>")
+            ts = html.escape(item.get("ts",""))
+            history_html += f"""
+            <div class='mb-3'>
+              <div class='small text-muted'>{ts}</div>
+              <div class='fw-semibold'>You</div>
+              <div class='mb-2'>{q_html}</div>
+              <div class='fw-semibold'>Tutor</div>
+              <div>{a_html}</div>
+            </div>
+            """
+    else:
+        history_html = "<div class='text-muted'>No history yet.</div>"
+
     content = f"""
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8">
@@ -1722,21 +1748,12 @@ def tutor_page():
                 <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
               </div>
             </form>
-            {"<div class='alert alert-danger'>" + html.escape(tutor_error) + "</div>" if tutor_error else ""}
-            {"<div class='alert alert-success'><div class='fw-semibold mb-1'>Tutor:</div>" + html.escape(tutor_answer).replace("\\n","<br>") + "</div>" if tutor_answer else ""}
-
+            {error_block}
+            {tutor_block}
             <div class="border-top pt-3">
               <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
-              {"".join([
-                "<div class='mb-3'><div class='small text-muted'>" + html.escape(item.get("ts","")) + "</div>"
-                "<div class='fw-semibold'>You</div>"
-                "<div class='mb-2'>" + html.escape(item.get("q","")).replace("\\n","<br>") + "</div>"
-                "<div class='fw-semibold'>Tutor</div>"
-                "<div>" + html.escape(item.get("a","")).replace("\\n","<br>") + "</div></div>"
-                for item in recent
-              ]) if recent else "<div class='text-muted'>No history yet.</div>"}
+              {history_html}
             </div>
-
             <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
           </div>
         </div>
@@ -1746,9 +1763,7 @@ def tutor_page():
     return base_layout("Tutor", content)
 
 
-# ====== Analytics Hooks for Other Pages (no UI change) ======
-# If you want to track specific actions later (quiz start, answer submit, etc.),
-# you can POST to this endpoint with small JSON payloads.
+# ====== Analytics Hooks ======
 @app.route("/api/track", methods=["POST"])
 @login_required
 def api_track():
@@ -1781,5 +1796,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
