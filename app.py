@@ -1,15 +1,17 @@
 # app.py
-# NOTE: Ensure "stripe" is listed in requirements.txt to avoid ModuleNotFoundError.
 
+# ====== Imports & Basic Config ======
 from flask import Flask, request, jsonify, session, redirect, url_for, Response
 from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 from datetime import datetime, timedelta
-import os, json, random, requests, html, csv, uuid, logging, time, hashlib, re
-import stripe
-import sqlite3
 from contextlib import contextmanager
-from werkzeug.middleware.proxy_fix import ProxyFix
+from typing import Dict, Any
+
+import os, json, random, requests, html, csv, uuid, logging, time, hashlib, re
+import sqlite3
+import stripe
 
 # Optional CSRF import - only if available
 try:
@@ -18,38 +20,34 @@ try:
 except ImportError:
     HAS_CSRF = False
 
-# Add fcntl import for file locking (with fallback for Windows)
+# fcntl for safe file writes (best-effort)
 try:
     import fcntl
     HAS_FCNTL = True
 except ImportError:
     HAS_FCNTL = False
 
-# ------------------------ Logging ------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# ====== Logging ======
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ------------------------ Flask / Config ------------------------
+# ====== Flask App ======
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
 
-# CSRF Protection - only if flask-wtf is available
 if HAS_CSRF:
     csrf = CSRFProtect(app)
 
-OPENAI_API_KEY       = os.environ.get("OPENAI_API_KEY", "")
-OPENAI_CHAT_MODEL    = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
-OPENAI_API_BASE      = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+OPENAI_API_BASE   = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 
-stripe.api_key               = os.environ.get('STRIPE_SECRET_KEY', '')
-STRIPE_WEBHOOK_SECRET        = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
-STRIPE_MONTHLY_PRICE_ID      = os.environ.get('STRIPE_MONTHLY_PRICE_ID', '')
-STRIPE_SIXMONTH_PRICE_ID     = os.environ.get('STRIPE_SIXMONTH_PRICE_ID', '')
-ADMIN_PASSWORD               = os.environ.get("ADMIN_PASSWORD", "").strip()
+stripe.api_key            = os.environ.get('STRIPE_SECRET_KEY', '')
+STRIPE_WEBHOOK_SECRET     = os.environ.get('STRIPE_WEBHOOK_SECRET', '')
+STRIPE_MONTHLY_PRICE_ID   = os.environ.get('STRIPE_MONTHLY_PRICE_ID', '')
+STRIPE_SIXMONTH_PRICE_ID  = os.environ.get('STRIPE_SIXMONTH_PRICE_ID', '')
+ADMIN_PASSWORD            = os.environ.get("ADMIN_PASSWORD", "").strip()
 
 APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 IS_STAGING  = os.environ.get("RENDER_SERVICE_NAME", "").endswith("-staging")
@@ -62,7 +60,7 @@ app.config.update(
     MESSAGE_FLASHING=True
 )
 
-# ------------------------ Data Storage ------------------------
+# ====== Data Storage (JSON + optional SQLite stub) ======
 DATA_DIR = os.environ.get("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DATABASE_PATH = os.path.join(DATA_DIR, "app.db")
@@ -84,16 +82,15 @@ def _save_json(name, data):
         if HAS_FCNTL:
             try:
                 fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            except:
+            except Exception:
                 pass
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
 
-QUESTIONS   = _load_json("questions.json", [])
-FLASHCARDS  = _load_json("flashcards.json", [])
-USERS       = _load_json("users.json", [])
+QUESTIONS  = _load_json("questions.json", [])
+FLASHCARDS = _load_json("flashcards.json", [])
+USERS      = _load_json("users.json", [])
 
-# ------------------------ Optional DB (not required) ------------------------
 @contextmanager
 def get_db_connection():
     conn = sqlite3.connect(DATABASE_PATH)
@@ -124,8 +121,8 @@ def init_database():
 if os.environ.get('USE_DATABASE') == '1':
     init_database()
 
-# ------------------------ Security & Rate Limiting ------------------------
-_RATE_BUCKETS = {}
+# ====== Security Headers & Simple Rate Limiting ======
+_RATE_BUCKETS: Dict[Any, Any] = {}
 
 @app.after_request
 def add_security_headers(resp):
@@ -134,7 +131,6 @@ def add_security_headers(resp):
     resp.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     resp.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
     resp.headers['Strict-Transport-Security'] = 'max-age=31536000; includeSubDomains'
-
     csp = (
         "default-src 'self' https: data: blob:; "
         "img-src 'self' https: data:; "
@@ -163,13 +159,11 @@ def _rate_limited(route: str, limit: int = 10, per_seconds: int = 60) -> bool:
         return True
     window.append(now)
     _RATE_BUCKETS[key] = window
-
     if len(_RATE_BUCKETS) > 1000:
         cutoff = now - (per_seconds * 2)
-        _RATE_BUCKETS = {k: [t for t in v if t > cutoff] 
-                        for k, v in _RATE_BUCKETS.items() 
-                        if any(t > cutoff for t in v)}
-
+        _RATE_BUCKETS = {k: [t for t in v if t > cutoff]
+                         for k, v in _RATE_BUCKETS.items()
+                         if any(t > cutoff for t in v)}
     return False
 
 def _submission_sig(payload: dict) -> str:
@@ -179,7 +173,7 @@ def _submission_sig(payload: dict) -> str:
         blob = str(payload)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-# ------------------------ Auth Helpers ------------------------
+# ====== Auth Helpers ======
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -195,6 +189,7 @@ def validate_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
+# ====== User helpers (replace prior data_store calls) ======
 def _find_user(email: str):
     if not email:
         return None
@@ -204,7 +199,26 @@ def _find_user(email: str):
             return u
     return None
 
-# ------------------------ Usage Management ------------------------
+def _find_user_by_id(user_id: str):
+    for u in USERS:
+        if u.get("id") == user_id:
+            return u
+    return None
+
+def _update_user(user_id: str, updates: Dict[str, Any]) -> bool:
+    for i, u in enumerate(USERS):
+        if u.get("id") == user_id:
+            USERS[i].update(updates)
+            _save_json("users.json", USERS)
+            return True
+    return False
+
+def validate_password(pw: str) -> tuple[bool, str]:
+    if not pw or len(pw) < 8:
+        return False, "Password must be at least 8 characters."
+    return True, ""
+
+# ====== Usage Management ======
 def check_usage_limit(user, action_type):
     if not user:
         return False, "Please log in to continue"
@@ -251,28 +265,13 @@ def increment_usage(user_email, action_type, count=1):
         return
     today = datetime.utcnow()
     month_key = today.strftime('%Y-%m')
-
     usage = user.setdefault('usage', {})
     monthly = usage.setdefault('monthly', {})
     month_usage = monthly.setdefault(month_key, {})
     month_usage[action_type] = month_usage.get(action_type, 0) + count
     usage['last_active'] = today.isoformat(timespec="seconds") + "Z"
     _save_json("users.json", USERS)
-
-def _append_user_history(email: str, entry: dict, cap: int = 200):
-    if not email:
-        return
-    u = _find_user(email)
-    if not u:
-        logger.warning(f"Cannot append history for non-existent user: {email}")
-        return
-    hist = u.setdefault("history", [])
-    hist.append(entry)
-    if len(hist) > cap:
-        del hist[:-cap]
-    _save_json("users.json", USERS)
-
-# ------------------------ Questions & Domains ------------------------
+# ====== Questions & Domains ======
 BASE_QUESTIONS = [
     {
         "question": "What is the primary purpose of a security risk assessment?",
@@ -281,7 +280,6 @@ BASE_QUESTIONS = [
         "explanation": "Risk assessments balance risk, cost, and operational impact to choose practical controls.",
         "domain": "security-principles", "difficulty": "medium"
     },
-    # (Overlap from Part 1)
     {
         "question": "In CPTED, natural surveillance primarily accomplishes what?",
         "options": {"A": "Reduces guard costs", "B": "Increases observation likelihood", "C": "Eliminates cameras", "D": "Provides legal protection"},
@@ -289,7 +287,6 @@ BASE_QUESTIONS = [
         "explanation": "Design that increases visibility makes misconduct more likely to be observed and deterred.",
         "domain": "physical-security", "difficulty": "medium"
     },
-
     {
         "question": "Which concept applies multiple layers so if one fails others still protect?",
         "options": {"A": "Security by Obscurity", "B": "Defense in Depth", "C": "Zero Trust", "D": "Least Privilege"},
@@ -409,33 +406,13 @@ def _build_all_questions():
 
 ALL_QUESTIONS = _build_all_questions()
 
-# ------------------------ Helpers ------------------------
+# ====== Misc Helpers ======
 def safe_json_response(data, status_code=200):
     try:
         return jsonify(data), status_code
     except Exception as e:
         logger.error(f"JSON serialization error: {e}")
         return jsonify({"error": "Internal server error"}), 500
-
-def validate_quiz_submission(data):
-    errors = []
-    if not data:
-        errors.append("No data received")
-        return errors
-    questions = data.get('questions', [])
-    if not questions:
-        errors.append("No questions provided")
-    if len(questions) > 100:
-        errors.append("Too many questions (max 100)")
-    for i, q in enumerate(questions):
-        if not q.get('question'):
-            errors.append(f"Question {i+1} missing question text")
-        options = q.get('options', {})
-        if not all(options.get(letter) for letter in ['A', 'B', 'C', 'D']):
-            errors.append(f"Question {i+1} missing options")
-        if q.get('correct') not in ['A', 'B', 'C', 'D']:
-            errors.append(f"Question {i+1} has invalid correct answer")
-    return errors
 
 def filter_questions(domain_key: str | None):
     pool = ALL_QUESTIONS
@@ -488,8 +465,7 @@ def _plan_badge_text(sub):
     if sub == 'sixmonth':
         return '6-Month'
     return 'Inactive'
-
-# ------------------------ Base Layout ------------------------
+# ====== Base Layout ======
 def base_layout(title: str, body_html: str) -> str:
     user_name = session.get('name', '')
     user_email = session.get('email', '')
@@ -505,16 +481,8 @@ def base_layout(title: str, body_html: str) -> str:
     else:
         csrf_token_value = ""
 
-    # User menu with plan badge
-    def _plan_badge_text(sub):
-        if sub == 'monthly':
-            return 'Monthly'
-        if sub == 'sixmonth':
-            return '6-Month'
-        return 'Inactive'
-
+    # user menu
     if is_logged_in:
-        # NOTE: _find_user must exist already (it does in your merged code)
         user = _find_user(user_email)
         subscription = user.get('subscription', 'inactive') if user else 'inactive'
         badge_text = _plan_badge_text(subscription)
@@ -591,7 +559,7 @@ def base_layout(title: str, body_html: str) -> str:
     </footer>
     """
 
-    # ✅ Compute the staging banner outside the f-string (no inline {("""...""")})
+    # Precompute staging banner to avoid f-string traps
     stage_banner = (
         """
         <div class="alert alert-warning alert-dismissible fade show m-0" role="alert">
@@ -604,7 +572,6 @@ def base_layout(title: str, body_html: str) -> str:
         if IS_STAGING else ""
     )
 
-    # Big CSS as a normal triple-quoted string (no braces)
     style_css = """
     <style>
       :root {
@@ -668,7 +635,7 @@ def base_layout(title: str, body_html: str) -> str:
     </style>
     """
 
-    # Replace any literal {{ csrf_token() }} in body_html with our string value
+    # Replace literal Jinja token in body_html
     body_html = body_html.replace('{{ csrf_token() }}', csrf_token_value)
 
     # Final HTML
@@ -703,62 +670,12 @@ def csrf_token():
         from flask_wtf.csrf import generate_csrf
         return generate_csrf()
     return ""
-
-# ------------------------ Stripe ------------------------
-def create_stripe_checkout_session(user_email: str, plan: str = 'monthly') -> Optional[str]:
-    """
-    Create a Stripe Checkout Session for either:
-      - plan='monthly' (subscription mode)
-      - plan='sixmonth' (one-time payment for 180 days access)
-    Returns the hosted checkout URL or None on failure.
-    """
-    if not HAS_STRIPE:
-        logger.error("Stripe not available: module not installed")
-        return None
-
-    try:
-        # Basic sanity checks
-        if plan == 'monthly':
-            if not STRIPE_MONTHLY_PRICE_ID:
-                logger.error("Monthly price ID not configured")
-                return None
-            checkout_session = stripe.checkout.Session.create(
-                payment_method_types=['card'],
-                line_items=[{'price': STRIPE_MONTHLY_PRICE_ID, 'quantity': 1}],
-                mode='subscription',
-                customer_email=user_email,
-                success_url=request.url_root.rstrip('/') + '/billing/success?session_id={CHECKOUT_SESSION_ID}&plan=monthly',
-                cancel_url=request.url_root.rstrip('/') + '/billing',
-                metadata={'user_email': user_email, 'plan': 'monthly'}
-            )
-        elif plan == 'sixmonth':
-            if not STRIPE_SIXMONTH_PRICE_ID:
-                logger.error("Six-month price ID not configured")
-                return None
-            checkout_session = stripe.checkout.Session.create(
-                payment_method_types=['card'],
-                line_items=[{'price': STRIPE_SIXMONTH_PRICE_ID, 'quantity': 1}],
-                mode='payment',
-                customer_email=user_email,
-                success_url=request.url_root.rstrip('/') + '/billing/success?session_id={CHECKOUT_SESSION_ID}&plan=sixmonth',
-                cancel_url=request.url_root.rstrip('/') + '/billing',
-                metadata={'user_email': user_email, 'plan': 'sixmonth', 'duration_days': 180}
-            )
-        else:
-            logger.error(f"Unknown plan: {plan}")
-            return None
-
-        return checkout_session.url
-    except Exception as e:
-        logger.error(f"Stripe session creation failed: {e}")
-        return None
-
-# ------------------------ Routes: Health ------------------------
+# ====== Health ======
 @app.get("/healthz")
 def healthz():
     return {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "version": APP_VERSION}
 
-# ------------------------ Auth (Login/Signup/Logout) ------------------------
+# ====== Auth (Login/Signup/Logout) ======
 @app.get("/login")
 def login_page():
     if 'user_id' in session:
@@ -801,7 +718,6 @@ def login_page():
 
 @app.post("/login")
 def login_post():
-    # Simple rate limit on login attempts
     if _rate_limited("login", limit=5, per_seconds=300):
         return redirect(url_for('login_page'))
 
@@ -811,17 +727,13 @@ def login_post():
     if not email or not password:
         return redirect(url_for('login_page'))
 
-    # Users may be stored in JSON or DB depending on config; we use JSON helpers here
     user = _find_user(email)
     if user and check_password_hash(user.get('password_hash', ''), password):
-        # Regenerate session (flask >=2.3) or emulate
         try:
             session.regenerate()
         except AttributeError:
-            old_data = dict(session)
             session.clear()
             session.permanent = True
-            # (We don't need old_data; cleared for safety)
 
         session['user_id'] = user['id']
         session['email'] = user['email']
@@ -926,26 +838,28 @@ def signup_page():
     </div>
 
     <script>
-      let selectedPlanType = 'monthly';
-      function selectPlan(plan) {{
+      var selectedPlanType = 'monthly';
+      function selectPlan(plan) {
         selectedPlanType = plan;
-        document.getElementById('selectedPlan').value = plan;
-        // Visual feedback (lightweight)
-        document.querySelectorAll('.card').forEach(card => {{
-          if (card.classList.contains('h-100')) {{
-            card.style.transform = 'none';
-            card.classList.remove('shadow-lg');
-          }}
-        }});
-        const btn = document.querySelector(`[onclick="selectPlan('${{plan}}')"]`);
-        if (btn) {{
-          const card = btn.closest('.card');
-          if (card) {{
+        var el = document.getElementById('selectedPlan');
+        if (el) { el.value = plan; }
+        // simple visual feedback
+        var cards = document.querySelectorAll('.card.h-100');
+        for (var i = 0; i < cards.length; i++) {
+          cards[i].style.transform = 'none';
+          cards[i].classList.remove('shadow-lg');
+        }
+        // find the clicked button by selector using normal strings (no backticks)
+        var selector = '[onclick="selectPlan(\\'' + plan + '\\')"]';
+        var btn = document.querySelector(selector);
+        if (btn) {
+          var card = btn.closest('.card');
+          if (card) {
             card.classList.add('shadow-lg');
             card.style.transform = 'translateY(-6px)';
-          }}
-        }}
-      }}
+          }
+        }
+      }
       // Pre-select monthly plan
       selectPlan('monthly');
     </script>
@@ -959,7 +873,6 @@ def signup_post():
     password = request.form.get('password', '')
     plan = (request.form.get('plan') or 'monthly').strip()
 
-    # Validation
     if not name or not email or not password:
         return redirect(url_for('signup_page'))
     if not validate_email(email):
@@ -969,7 +882,6 @@ def signup_post():
     if _find_user(email):
         return redirect(url_for('signup_page'))
 
-    # Create user (JSON storage path)
     user = {
         "id": str(uuid.uuid4()),
         "name": name,
@@ -983,7 +895,6 @@ def signup_post():
     USERS.append(user)
     _save_json("users.json", USERS)
 
-    # Login user
     try:
         session.regenerate()
     except AttributeError:
@@ -994,11 +905,9 @@ def signup_post():
     session['email'] = user['email']
     session['name'] = user['name']
 
-    # Send to real Stripe checkout if configured; otherwise fallback to in-app activation page
     checkout_url = create_stripe_checkout_session(user_email=email, plan=plan)
     if checkout_url:
         return redirect(checkout_url)
-    # Fallback (no Stripe configured) — use app-native activation route
     return redirect(url_for('billing_checkout', plan=plan))
 
 @app.post("/logout")
@@ -1006,7 +915,7 @@ def logout():
     session.clear()
     return redirect(url_for('login_page'))
 
-# ------------------------ Home / Dashboard ------------------------
+# ====== Home / Dashboard ======
 @app.get("/")
 def home():
     if 'user_id' not in session:
@@ -1112,7 +1021,6 @@ def home():
     hist = session.get("quiz_history", [])
     avg = round(sum(h.get("score", 0.0) for h in hist) / len(hist), 1) if hist else 0.0
 
-    # Progress dial color
     if avg >= 80:
         dial_color = "success"
         dial_bg = "#059669"
@@ -1267,13 +1175,8 @@ def home():
     </style>
     """
     return base_layout("Dashboard", body)
-# === OVERLAP: next part continues immediately below ===
-# === OVERLAP: next part continues immediately below ===
-
-# =========================
-# Billing & Stripe
-# =========================
-def create_stripe_checkout_session(user_email: str, plan: str = "monthly") -> Optional[str]:
+# ====== Billing & Stripe ======
+def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
     try:
         if plan == "monthly":
             if not STRIPE_MONTHLY_PRICE_ID:
@@ -1284,8 +1187,8 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly") -> Op
                 mode="subscription",
                 line_items=[{"price": STRIPE_MONTHLY_PRICE_ID, "quantity": 1}],
                 customer_email=user_email,
-                success_url=request.url_root + "billing/success?session_id={CHECKOUT_SESSION_ID}&plan=monthly",
-                cancel_url=request.url_root + "billing",
+                success_url=request.url_root.rstrip('/') + "/billing/success?session_id={CHECKOUT_SESSION_ID}&plan=monthly",
+                cancel_url=request.url_root.rstrip('/') + "/billing",
                 metadata={"user_email": user_email, "plan": "monthly"},
             )
             return sess.url
@@ -1298,8 +1201,8 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly") -> Op
                 mode="payment",
                 line_items=[{"price": STRIPE_SIXMONTH_PRICE_ID, "quantity": 1}],
                 customer_email=user_email,
-                success_url=request.url_root + "billing/success?session_id={CHECKOUT_SESSION_ID}&plan=sixmonth",
-                cancel_url=request.url_root + "billing",
+                success_url=request.url_root.rstrip('/') + "/billing/success?session_id={CHECKOUT_SESSION_ID}&plan=sixmonth",
+                cancel_url=request.url_root.rstrip('/') + "/billing",
                 metadata={"user_email": user_email, "plan": "sixmonth", "duration_days": 180},
             )
             return sess.url
@@ -1312,25 +1215,13 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly") -> Op
 @app.get("/billing")
 @login_required
 def billing_page():
-    user = data_store.find_user_by_email(session.get("email",""))
+    user = _find_user(session.get("email",""))
     sub = user.get("subscription","inactive") if user else "inactive"
     names = {"monthly":"Monthly Plan","sixmonth":"6-Month Plan","inactive":"Free Plan"}
-    body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-8">
-      <div class="card"><div class="card-header bg-warning text-dark">
-        <h3 class="mb-0"><i class="bi bi-credit-card me-2"></i>Billing & Subscription</h3>
-      </div>
-      <div class="card-body">
-        <div class="alert {'alert-success' if sub!='inactive' else 'alert-info'} border-0 mb-4">
-          <div class="d-flex align-items-center">
-            <i class="bi bi-{'check-circle' if sub!='inactive' else 'info-circle'} fs-4 me-3"></i>
-            <div><h6 class="alert-heading mb-1">Current Plan: {names.get(sub,'Unknown')}</h6>
-              <p class="mb-0">{'You have unlimited access to all features.' if sub!='inactive' else 'Limited access — upgrade for unlimited features.'}</p>
-            </div>
-          </div>
-        </div>
 
-        {("""
+    # Build the plans section OUTSIDE the f-string to avoid f-string parser issues
+    if sub == 'inactive':
+        plans_html = """
           <div class="row g-3">
             <div class="col-md-6">
               <div class="card border-primary">
@@ -1351,11 +1242,30 @@ def billing_page():
               </div>
             </div>
           </div>
-        """ if sub == 'inactive' else """
+        """
+    else:
+        plans_html = """
           <div class="alert alert-info border-0">
             <i class="bi bi-info-circle me-2"></i>Your subscription is active. Use support to manage changes.
           </div>
-        """)}
+        """
+
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-lg-8">
+      <div class="card"><div class="card-header bg-warning text-dark">
+        <h3 class="mb-0"><i class="bi bi-credit-card me-2"></i>Billing & Subscription</h3>
+      </div>
+      <div class="card-body">
+        <div class="alert {'alert-success' if sub!='inactive' else 'alert-info'} border-0 mb-4">
+          <div class="d-flex align-items-center">
+            <i class="bi bi-{'check-circle' if sub!='inactive' else 'info-circle'} fs-4 me-3"></i>
+            <div><h6 class="alert-heading mb-1">Current Plan: {names.get(sub,'Unknown')}</h6>
+              <p class="mb-0">{'You have unlimited access to all features.' if sub!='inactive' else 'Limited access — upgrade for unlimited features.'}</p>
+            </div>
+          </div>
+        </div>
+
+        {plans_html}
       </div></div>
     </div></div></div>
     """
@@ -1371,13 +1281,11 @@ def billing_checkout():
     url = create_stripe_checkout_session(user_email, plan=plan)
     if url:
         return redirect(url)
-    # Fallback if Stripe not configured
     return redirect(url_for("billing_page"))
 
 @app.get("/billing/success")
 @login_required
 def billing_success():
-    # Attempt to verify session and set subscription eagerly (webhook still authoritative)
     session_id = request.args.get("session_id")
     plan = request.args.get("plan","monthly")
     if session_id:
@@ -1385,19 +1293,21 @@ def billing_success():
             cs = stripe.checkout.Session.retrieve(session_id, expand=["customer","subscription"])
             meta = cs.get("metadata", {}) if isinstance(cs, dict) else getattr(cs, "metadata", {}) or {}
             email = meta.get("user_email") or session.get("email")
-            u = data_store.find_user_by_email(email or "")
+            u = _find_user(email or "")
             if u:
-                updates = {}
+                updates: Dict[str, Any] = {}
                 if plan == "monthly":
                     updates["subscription"] = "monthly"
-                    updates["stripe_customer_id"] = (cs.get("customer") if isinstance(cs, dict) else getattr(cs,"customer", None)) or u.get("stripe_customer_id")
+                    cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs,"customer", None)) or u.get("stripe_customer_id")
+                    updates["stripe_customer_id"] = cid
                 elif plan == "sixmonth":
                     updates["subscription"] = "sixmonth"
                     expiry = datetime.utcnow() + timedelta(days=int(meta.get("duration_days", 180) or 180))
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
-                    updates["stripe_customer_id"] = (cs.get("customer") if isinstance(cs, dict) else getattr(cs,"customer", None)) or u.get("stripe_customer_id")
+                    cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs,"customer", None)) or u.get("stripe_customer_id")
+                    updates["stripe_customer_id"] = cid
                 if updates:
-                    data_store.update_user(u["id"], updates)
+                    _update_user(u["id"], updates)
         except Exception as e:
             logger.warning("Could not finalize success update from session: %s", e)
 
@@ -1423,35 +1333,33 @@ def stripe_webhook():
         logger.error("Stripe webhook signature verification failed: %s", e)
         return "", 400
 
-    if event["type"] == "checkout.session.completed":
+    if event.get("type") == "checkout.session.completed":
         cs = event["data"]["object"]
-        email = (cs.get("metadata", {}) or {}).get("user_email")
-        plan  = (cs.get("metadata", {}) or {}).get("plan", "")
+        meta = cs.get("metadata", {}) or {}
+        email = meta.get("user_email")
+        plan  = meta.get("plan", "")
         customer_id = cs.get("customer")
 
         if email:
-            u = data_store.find_user_by_email(email)
+            u = _find_user(email)
             if u:
                 updates: Dict[str, Any] = {"stripe_customer_id": customer_id}
                 if plan == "monthly":
                     updates["subscription"] = "monthly"
                 elif plan == "sixmonth":
                     updates["subscription"] = "sixmonth"
-                    duration = int((cs.get("metadata", {}) or {}).get("duration_days", 180) or 180)
+                    duration = int(meta.get("duration_days", 180) or 180)
                     expiry = datetime.utcnow() + timedelta(days=duration)
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
-                data_store.update_user(u["id"], updates)
+                _update_user(u["id"], updates)
                 logger.info("Updated subscription via webhook: %s -> %s", email, plan)
 
     return "", 200
-
-# =========================
-# Settings
-# =========================
+# ====== Settings ======
 @app.route("/settings", methods=["GET","POST"])
 @login_required
 def settings_page():
-    user = data_store.find_user_by_email(session.get("email",""))
+    user = _find_user(session.get("email",""))
     if not user:
         return redirect(url_for("login_page"))
 
@@ -1460,13 +1368,14 @@ def settings_page():
         password = (request.form.get("password") or "").strip()
         updates = {}
         if name and name != user.get("name"):
-            updates["name"] = name; session["name"] = name
+            updates["name"] = name
+            session["name"] = name
         if password:
-            ok, _ = validate_password(password)
+            ok, _msg = validate_password(password)
             if ok:
                 updates["password_hash"] = generate_password_hash(password)
         if updates:
-            data_store.update_user(user["id"], updates)
+            _update_user(user["id"], updates)
         return redirect(url_for("settings_page"))
 
     content = f"""
@@ -1497,9 +1406,7 @@ def settings_page():
     </div>"""
     return base_layout("Account Settings", content)
 
-# =========================
-# Error Handlers
-# =========================
+# ====== Error Handlers ======
 @app.errorhandler(403)
 def forbidden(e):
     return base_layout("Access Denied", """
@@ -1545,38 +1452,24 @@ def server_error(e):
     </div></div></div>
     """), 500
 
-# === OVERLAP: next part continues immediately below ===
-# === OVERLAP: next part continues immediately below ===
-
-# =========================
-# Sample Data Init (placeholder hooks)
-# =========================
+# ====== Sample Data Init ======
 def init_sample_data():
     try:
-        logger.info("Sample data initialized (questions loaded: %d)", len(data_store.load_questions()))
+        logger.info("Sample data initialized (questions loaded: %d)", len(ALL_QUESTIONS))
     except Exception as e:
         logger.error("Failed to initialize sample data: %s", e)
 
-# =========================
-# App Factory & Main
-# =========================
+# ====== App Factory & Main ======
 def create_app():
     init_sample_data()
     logger.info("CPP Test Prep v%s starting up", APP_VERSION)
     logger.info("Debug mode: %s", DEBUG)
     logger.info("Staging mode: %s", IS_STAGING)
     logger.info("CSRF protection: %s", "enabled" if HAS_CSRF else "disabled")
-    logger.info("Stripe integration: %s", "enabled" if stripe.api_key else "disabled")
-    logger.info("OpenAI integration: %s", "enabled" if OPENAI_API_KEY else "disabled")
     return app
 
+# ====== Entrypoint ======
 if __name__ == "__main__":
-    application = create_app()
     port = int(os.environ.get("PORT", 5000))
-    host = os.environ.get("HOST", "0.0.0.0")
-    logger.info("Starting server on %s:%d", host, port)
-    # Use a real WSGI server (gunicorn/uvicorn) in production
-    application.run(host=host, port=port, debug=DEBUG)
-
-
-
+    logger.info("Running app on port %s", port)
+    app.run(host="0.0.0.0", port=port, debug=DEBUG)
