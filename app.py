@@ -1565,6 +1565,207 @@ def progress_page():
     </div>
     """
     return base_layout("Progress", content)
+# ====== Tracking Utils (non-breaking, file-backed) ======
+def _log_event(user_id, event_type, payload):
+    """Append an event for analytics/progress. Non-fatal on error."""
+    try:
+        data = _load_json("events.json", [])
+        data.append({
+            "id": str(uuid.uuid4()),
+            "ts": datetime.utcnow().isoformat() + "Z",
+            "user_id": user_id,
+            "type": event_type,   # e.g., 'tutor.ask', 'page.view'
+            "payload": payload    # dict
+        })
+        _save_json("events.json", data)
+    except Exception as e:
+        logger.warning("log_event failed: %s", e)
+
+def _append_user_history(user_id, channel, item):
+    """Store a small rolling history per user/channel (e.g., tutor)."""
+    try:
+        key = f"history_{channel}_{user_id}.json"
+        history = _load_json(key, [])
+        history.append(item)
+        # Keep last 20 entries to avoid unbounded growth
+        history = history[-20:]
+        _save_json(key, history)
+    except Exception as e:
+        logger.warning("append_user_history failed: %s", e)
+
+def _get_user_history(user_id, channel, limit=10):
+    try:
+        key = f"history_{channel}_{user_id}.json"
+        hist = _load_json(key, [])
+        return hist[-limit:]
+    except Exception:
+        return []
+
+
+# ====== AI Client (uses your existing env keys) ======
+def _call_tutor_agent(user_query, meta=None):
+    """
+    Calls your AI agent using environment configuration.
+    Supports either:
+      - OPENAI_API_KEY + MODEL_TUTOR (chat.completions)
+      - Or a custom base via OPENAI_API_BASE (compatible with OpenAI spec)
+    """
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    base_url = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
+    model = os.environ.get("MODEL_TUTOR", "gpt-4o-mini")
+
+    if not api_key:
+        return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
+
+    # Chat Completions (widely compatible)
+    url = f"{base_url}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    system_msg = os.environ.get("TUTOR_SYSTEM_PROMPT",
+        "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step, "
+        "cite domain numbers when relevant, and ask a short follow-up check for understanding."
+    )
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_query}
+        ],
+        "temperature": float(os.environ.get("TUTOR_TEMP", "0.3")),
+        "max_tokens": int(os.environ.get("TUTOR_MAX_TOKENS", "800")),
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=60)
+        if resp.status_code >= 400:
+            return False, f"Agent error {resp.status_code}: {resp.text[:300]}", {"status": resp.status_code}
+        data = resp.json()
+        # OpenAI-format extraction
+        answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+        usage = data.get("usage", {})
+        return True, answer, {"usage": usage, "model": model}
+    except Exception as e:
+        logger.error("Tutor agent call failed: %s", e, exc_info=True)
+        return False, "Network error talking to the tutor agent.", {}
+
+
+# ====== Page Views Tracking (no UI change) ======
+@app.before_request
+def _track_page_views():
+    try:
+        uid = session.get("user_id") or session.get("email") or "anon"
+        _log_event(uid, "page.view", {"path": request.path, "method": request.method})
+    except Exception:
+        pass
+
+
+# ====== Tutor Routes (fixes 404; integrates AI; no layout changes) ======
+@app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
+@app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
+@login_required
+def tutor_page():
+    user = _find_user(session.get("email","")) or {}
+    user_id = user.get("id") or session.get("email") or "unknown"
+
+    # Handle submit
+    tutor_error = ""
+    tutor_answer = ""
+    user_query = (request.form.get("query") or "").strip() if request.method == "POST" else ""
+
+    if request.method == "POST":
+        # Basic CSRF guard if enabled in your app
+        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            abort(403)
+
+        if not user_query:
+            tutor_error = "Please enter a question."
+        else:
+            ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
+            if ok:
+                tutor_answer = answer
+                # Save history + analytics
+                item = {
+                    "ts": datetime.utcnow().isoformat() + "Z",
+                    "q": user_query,
+                    "a": tutor_answer,
+                    "meta": meta
+                }
+                _append_user_history(user_id, "tutor", item)
+                _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": True, "model": meta.get("model")})
+            else:
+                tutor_error = answer
+                _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": False})
+
+    # Last 5 exchanges for quick context
+    recent = _get_user_history(user_id, "tutor", limit=5)
+
+    # UI: stays within your existing card layout; same classes, same look
+    # Only adds a form + simple history section inside the card body.
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-primary text-white">
+            <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3>
+          </div>
+          <div class="card-body">
+            <form method="POST" class="mb-4">
+              <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+              <label class="form-label fw-semibold">Ask the Tutor</label>
+              <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
+              <div class="d-flex gap-2 mt-3">
+                <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
+                <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
+              </div>
+            </form>
+            {"<div class='alert alert-danger'>" + html.escape(tutor_error) + "</div>" if tutor_error else ""}
+            {"<div class='alert alert-success'><div class='fw-semibold mb-1'>Tutor:</div>" + html.escape(tutor_answer).replace("\\n","<br>") + "</div>" if tutor_answer else ""}
+
+            <div class="border-top pt-3">
+              <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
+              {"".join([
+                "<div class='mb-3'><div class='small text-muted'>" + html.escape(item.get("ts","")) + "</div>"
+                "<div class='fw-semibold'>You</div>"
+                "<div class='mb-2'>" + html.escape(item.get("q","")).replace("\\n","<br>") + "</div>"
+                "<div class='fw-semibold'>Tutor</div>"
+                "<div>" + html.escape(item.get("a","")).replace("\\n","<br>") + "</div></div>"
+                for item in recent
+              ]) if recent else "<div class='text-muted'>No history yet.</div>"}
+            </div>
+
+            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Tutor", content)
+
+
+# ====== Analytics Hooks for Other Pages (no UI change) ======
+# If you want to track specific actions later (quiz start, answer submit, etc.),
+# you can POST to this endpoint with small JSON payloads.
+@app.route("/api/track", methods=["POST"])
+@login_required
+def api_track():
+    try:
+        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            abort(403)
+        event_type = (request.form.get("type") or "").strip()
+        payload_raw = request.form.get("payload") or "{}"
+        payload = json.loads(payload_raw) if isinstance(payload_raw, str) else {}
+        uid = session.get("user_id") or session.get("email") or "unknown"
+        if not event_type:
+            return jsonify({"ok": False, "error": "Missing type"}), 400
+        _log_event(uid, event_type, payload)
+        return jsonify({"ok": True})
+    except Exception as e:
+        logger.error("api/track failed: %s", e, exc_info=True)
+        return jsonify({"ok": False, "error": "server-error"}), 500
 
 # ====== App Factory & Main ======
 def create_app():
@@ -1580,4 +1781,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
