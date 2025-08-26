@@ -1480,12 +1480,6 @@ def tutor_page():
 
     recent = _get_user_history(user_id, "tutor", limit=5)
     
-# Simple wrapper so existing links to /study keep working
-@app.route("/study", methods=["GET"], strict_slashes=False)
-@login_required
-def study_redirect():
-    return redirect(url_for("tutor_page"))
-
     # --- Pre-format HTML to avoid backslashes inside f-string expressions ---
     tutor_block = ""
     if tutor_answer:
@@ -2338,4 +2332,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
