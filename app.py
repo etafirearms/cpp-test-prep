@@ -76,16 +76,38 @@ def _load_json(name, default):
         return default
 
 def _save_json(name, data):
+    """
+    Robust, atomic JSON save:
+    - Writes to a unique temp file per process (avoids collisions across workers)
+    - fsyncs and then os.replace(...) to be atomic on POSIX
+    - Falls back to simple write if something unexpected happens
+    """
     path = os.path.join(DATA_DIR, name)
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        if HAS_FCNTL:
-            try:
-                fcntl.flock(f.fileno(), fcntl.LOCK_EX)
-            except Exception:
-                pass
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp, path)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp_path = f"{path}.tmp.{os.getpid()}.{uuid.uuid4().hex}"
+
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Atomic replace
+        os.replace(tmp_path, path)
+    except Exception as e:
+        # Clean up stray temp (best effort)
+        try:
+            if 'tmp_path' in locals() and os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        logger.warning("Atomic _save_json failed for %s: %s; attempting simple write", name, e)
+        # Fallback: non-atomic write (last writer wins)
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception as e2:
+            logger.error("Fallback _save_json failed for %s: %s", name, e2)
 
 QUESTIONS  = _load_json("questions.json", [])
 FLASHCARDS = _load_json("flashcards.json", [])
@@ -2210,6 +2232,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
