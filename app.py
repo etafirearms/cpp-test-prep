@@ -1145,6 +1145,7 @@ def tutor_page():
     tutor_error = ""
     tutor_answer = ""
     user_query = (request.form.get("query") or "").strip() if request.method == "POST" else ""
+    selected_domain = (request.form.get("domain") or "random").strip().lower()
 
     if request.method == "POST":
         if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
@@ -1152,7 +1153,12 @@ def tutor_page():
         if not user_query:
             tutor_error = "Please enter a question."
         else:
-            ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id})
+            # If a domain is selected, gently cue the tutor
+            if selected_domain and selected_domain != "random":
+                domain_label = DOMAINS.get(selected_domain, selected_domain)
+                user_query = f"[Domain: {domain_label}] {user_query}"
+
+            ok, answer, meta = _call_tutor_agent(user_query, meta={"user_id": user_id, "domain": selected_domain})
             if ok:
                 tutor_answer = answer
                 item = {"ts": datetime.utcnow().isoformat() + "Z", "q": user_query, "a": tutor_answer, "meta": meta}
@@ -1164,7 +1170,6 @@ def tutor_page():
 
     recent = _get_user_history(user_id, "tutor", limit=5)
 
-    # Render
     csrf_val = csrf_token()
     def _fmt(txt): return html.escape(txt).replace("\n","<br>")
     history_html = ""
@@ -1180,6 +1185,9 @@ def tutor_page():
     else:
         history_html = "<div class='text-muted'>No history yet.</div>"
 
+    # Domain button block
+    domain_buttons = domain_buttons_html(selected_key=selected_domain, field_name="domain")
+
     content = f"""
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8">
@@ -1188,7 +1196,9 @@ def tutor_page():
           <div class="card-body">
             <form method="POST" class="mb-3">
               <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              <label class="form-label fw-semibold">Ask the Tutor</label>
+              <label class="form-label fw-semibold">Select a domain (optional)</label>
+              {domain_buttons}
+              <label class="form-label fw-semibold mt-3">Ask the Tutor</label>
               <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
               <div class="d-flex gap-2 mt-3">
                 <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
@@ -1208,6 +1218,21 @@ def tutor_page():
         </div>
       </div></div>
     </div>
+
+    <script>
+      // Make the domain buttons click set the hidden input + toggle active
+      (function(){{
+        var container = document.currentScript.closest('.card-body');
+        var hidden = container.querySelector('#domain_val');
+        container.querySelectorAll('.domain-btn').forEach(function(btn){{
+          btn.addEventListener('click', function(){{
+            container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+            btn.classList.add('active');
+            if (hidden) hidden.value = btn.getAttribute('data-value');
+          }});
+        }});
+      }})();
+    </script>
     """
     return base_layout("Tutor", content)
 
@@ -3134,6 +3159,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
