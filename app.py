@@ -1,5 +1,6 @@
 # =========================
 # CPP Test Prep - app.py
+# =========================
 # SECTION 1/8: Imports, Config, Data IO, Security, Base Data
 # =========================
 
@@ -18,12 +19,17 @@ import os, json, random, requests, html, uuid, logging, time, hashlib, re
 import sqlite3
 import stripe
 
-# Optional CSRF import
+# CSRF imports (robust: provide safe fallbacks)
 try:
-    from flask_wtf.csrf import CSRFProtect
+    from flask_wtf.csrf import CSRFProtect, validate_csrf, generate_csrf
     HAS_CSRF = True
-except ImportError:
+except Exception:
     HAS_CSRF = False
+    CSRFProtect = None
+    def validate_csrf(_token: str) -> None:
+        return None  # no-op fallback
+    def generate_csrf() -> str:
+        return ""
 
 # fcntl for safe file writes (best-effort)
 try:
@@ -41,7 +47,7 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
 
-if HAS_CSRF:
+if HAS_CSRF and CSRFProtect:
     csrf = CSRFProtect(app)
 
 # ----- Environment / Providers -----
@@ -194,7 +200,9 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            return redirect(url_for('login_page'))
+            # upgrade: remember destination safely
+            nxt = request.path if request.path.startswith("/") and not request.path.startswith("//") else "/"
+            return redirect(url_for('login_page', next=nxt))
         return f(*args, **kwargs)
     return decorated_function
 
@@ -205,7 +213,9 @@ def validate_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-# ----- Users (file-backed) -----
+def _is_safe_next(n: str | None) -> bool:
+    return bool(n) and n.startswith("/") and not n.startswith("//")
+
 # ----- Users (file-backed) -----
 def _load_users():
     # Always read fresh from disk to avoid multi-process staleness
@@ -257,9 +267,9 @@ def check_usage_limit(user, action_type):
         try:
             expires_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
             if expires_dt.replace(tzinfo=None) < datetime.utcnow():
+                # mark inactive in-memory; persistence handled elsewhere
                 user['subscription'] = 'inactive'
                 user.pop('subscription_expires_at', None)
-                _save_json("users.json", USERS)
                 subscription = 'inactive'
         except Exception:
             pass
@@ -364,6 +374,17 @@ BASE_QUESTIONS = [
     },
 ]
 
+# --- FIX: define labels for domain buttons (was missing, caused 500s) ---
+DOMAINS = {
+    "security-principles":  "Security Principles",
+    "business-principles":  "Business Principles",
+    "investigations":       "Investigations",
+    "personnel-security":   "Personnel Security",
+    "physical-security":    "Physical Security",
+    "information-security": "Information Security",
+    "crisis-management":    "Crisis & Continuity",
+}
+
 # Simple color tags for domain buttons
 DOMAIN_STYLES = {
     "security-principles":  "primary",
@@ -461,12 +482,21 @@ def _percent(num, den):
 def _user_id():
     return (session.get("user_id") or session.get("email") or "unknown")
 
-def init_sample_data():
-    # Placeholder to match create_app() call
-    return
 # =========================
 # SECTION 2/8: Layout, CSRF, Health, Auth (Login/Signup/Logout)
 # =========================
+
+# ---- CSRF helpers (uniform, no false 403s) ----
+def _csrf_ok() -> bool:
+    if not HAS_CSRF:
+        return True
+    try:
+        # validate_csrf was imported in Section 1 when available
+        from flask_wtf.csrf import validate_csrf  # safe import even if already loaded
+        validate_csrf(request.form.get("csrf_token") or "")
+        return True
+    except Exception:
+        return False
 
 @app.template_global()
 def csrf_token():
@@ -479,21 +509,14 @@ def csrf_token():
     return ""
 
 def _plan_badge_text(sub):
-    if sub == 'monthly':
-        return 'Monthly'
-    if sub == 'sixmonth':
-        return '6-Month'
-    return 'Inactive'
+    return {"monthly": "Monthly", "sixmonth": "6-Month"}.get(sub, "Inactive")
 
 def base_layout(title: str, body_html: str) -> str:
     user_name = session.get('name', '')
     user_email = session.get('email', '')
     is_logged_in = 'user_id' in session
-
-    # fresh CSRF value for forms
     csrf_value = csrf_token()
 
-    # top-right user menu
     if is_logged_in:
         user = _find_user(user_email)
         subscription = user.get('subscription', 'inactive') if user else 'inactive'
@@ -520,21 +543,14 @@ def base_layout(title: str, body_html: str) -> str:
         """
     else:
         user_menu = """
-        <li class="nav-item">
-          <a class="nav-link" href="/login">Login</a>
-        </li>
-        <li class="nav-item">
-          <a class="nav-link btn btn-outline-primary ms-2" href="/signup">Create Account</a>
-        </li>
+        <li class="nav-item"><a class="nav-link" href="/login">Login</a></li>
+        <li class="nav-item"><a class="nav-link btn btn-outline-primary ms-2" href="/signup">Create Account</a></li>
         """
 
-    # main navbar
     nav = f"""
     <nav class="navbar navbar-expand-lg navbar-light bg-gradient-primary sticky-top shadow-sm">
       <div class="container">
-        <a class="navbar-brand fw-bold text-white" href="/">
-          <i class="bi bi-shield-check text-warning"></i> CPP Test Prep
-        </a>
+        <a class="navbar-brand fw-bold text-white" href="/"><i class="bi bi-shield-check text-warning"></i> CPP Test Prep</a>
         <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
           <span class="navbar-toggler-icon"></span>
         </button>
@@ -546,15 +562,12 @@ def base_layout(title: str, body_html: str) -> str:
             {'<li class="nav-item"><a class="nav-link text-white-75" href="/mock-exam"><i class="bi bi-clipboard-check me-1"></i>Mock Exam</a></li>' if is_logged_in else ''}
             {'<li class="nav-item"><a class="nav-link text-white-75" href="/progress"><i class="bi bi-graph-up me-1"></i>Progress</a></li>' if is_logged_in else ''}
           </ul>
-          <ul class="navbar-nav">
-            {user_menu}
-          </ul>
+          <ul class="navbar-nav">{user_menu}</ul>
         </div>
       </div>
     </nav>
     """
 
-    # footer & staging banner
     disclaimer = f"""
     <footer class="bg-light py-4 mt-5 border-top">
       <div class="container">
@@ -572,145 +585,109 @@ def base_layout(title: str, body_html: str) -> str:
       </div>
     </footer>
     """
-    stage_banner = (
-        """
-        <div class="alert alert-warning alert-dismissible fade show m-0" role="alert">
-          <div class="container text-center">
-            <strong>STAGING ENVIRONMENT</strong> - Not for production use.
-            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
-          </div>
+    stage_banner = ("""
+      <div class="alert alert-warning alert-dismissible fade show m-0" role="alert">
+        <div class="container text-center">
+          <strong>STAGING ENVIRONMENT</strong> - Not for production use.
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
         </div>
-        """ if IS_STAGING else ""
-    )
+      </div>
+    """ if IS_STAGING else "")
 
-    # styles
     style_css = """
     <style>
       :root {
-        --primary-blue: #2563eb;
-        --success-green: #059669;
-        --warning-orange: #d97706;
-        --danger-red: #dc2626;
-        --purple-accent: #7c3aed;
-        --soft-gray: #f8fafc;
-        --warm-white: #fefefe;
-        --text-dark: #1f2937;
-        --text-light: #6b7280;
+        --primary-blue:#2563eb; --success-green:#059669; --warning-orange:#d97706;
+        --danger-red:#dc2626; --purple-accent:#7c3aed; --soft-gray:#f8fafc;
+        --warm-white:#fefefe; --text-dark:#1f2937; --text-light:#6b7280;
       }
-      body {
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-        background: linear-gradient(135deg, #f8fafc 0%, #e2e8f0 100%);
-        color: var(--text-dark);
-        line-height: 1.6;
-      }
-      .bg-gradient-primary { background: linear-gradient(135deg, var(--primary-blue) 0%, var(--purple-accent) 100%) !important; }
-      .text-white-75 { color: rgba(255, 255, 255, 0.85) !important; }
-      .text-white-75:hover { color: white !important; }
-      .card {
-        box-shadow: 0 4px 12px rgba(0,0,0,0.08);
-        border: none;
-        border-radius: 16px;
-        background: var(--warm-white);
-        transition: all 0.3s ease;
-        overflow: hidden;
-      }
-      .card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
-      .btn { border-radius: 12px; font-weight: 600; letter-spacing: 0.025em; padding: 0.75rem 1.5rem; transition: all 0.2s ease; }
-            /* Domain buttons */
-      .domain-btn { border-radius: 999px; padding: 0.4rem 0.9rem; }
-      .domain-btn.active { outline: 3px solid rgba(0,0,0,0.1); box-shadow: 0 0 0 3px rgba(37,99,235,0.15) inset; }
-      .btn-primary { background: linear-gradient(135deg, var(--primary-blue), var(--purple-accent)); border: none; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25); }
-      .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35); }
-      .plan-monthly { background: linear-gradient(45deg, var(--primary-blue), var(--purple-accent)); color: white; }
-      .plan-sixmonth { background: linear-gradient(45deg, var(--purple-accent), #8b5cf6); color: white; }
-      .plan-inactive { background: #6b7280; color: white; }
-      .alert { border-radius: 12px; border: none; padding: 1.25rem; }
-      .alert-success { background: linear-gradient(135deg, #d1fae5, #a7f3d0); color: #065f46; border-left: 4px solid var(--success-green); }
-      .alert-info { background: linear-gradient(135deg, #dbeafe, #bfdbfe); color: #1e3a8a; border-left: 4px solid var(--primary-blue); }
-      .alert-warning { background: linear-gradient(135deg, #fef3c7, #fed7aa); color: #92400e; border-left: 4px solid var(--warning-orange); }
-      .form-control, .form-select { border-radius: 10px; border: 2px solid #e5e7eb; padding: 0.75rem 1rem; transition: all 0.2s ease; }
-      .form-control:focus, .form-select:focus { border-color: var(--primary-blue); box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1); }
-      .navbar-brand { font-size: 1.5rem; font-weight: 700; }
-      .text-success { color: var(--success-green) !important; fill: var(--success-green); }
-      .text-warning { color: var(--warning-orange) !important; fill: var(--warning-orange); }
-      .text-danger  { color: var(--danger-red) !important; fill: var(--danger-red); }
-      @media (max-width: 768px) {
-        .container { padding: 0 20px; }
-        .card { margin-bottom: 1.5rem; border-radius: 12px; }
-        .btn { padding: 0.6rem 1.2rem; }
-      }
+      body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+           background:linear-gradient(135deg,#f8fafc 0%,#e2e8f0 100%);color:var(--text-dark);line-height:1.6;}
+      .bg-gradient-primary{background:linear-gradient(135deg,var(--primary-blue) 0%,var(--purple-accent) 100%)!important;}
+      .text-white-75{color:rgba(255,255,255,.85)!important}.text-white-75:hover{color:#fff!important}
+      .card{box-shadow:0 4px 12px rgba(0,0,0,.08);border:none;border-radius:16px;background:var(--warm-white);
+            transition:all .3s ease;overflow:hidden}
+      .card:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(0,0,0,.12)}
+      .btn{border-radius:12px;font-weight:600;letter-spacing:.025em;padding:.75rem 1.5rem;transition:all .2s ease}
+      .domain-btn{border-radius:999px;padding:.4rem .9rem}.domain-btn.active{outline:3px solid rgba(0,0,0,.1);
+        box-shadow:0 0 0 3px rgba(37,99,235,.15) inset}
+      .btn-primary{background:linear-gradient(135deg,var(--primary-blue),var(--purple-accent));border:none;
+        box-shadow:0 4px 12px rgba(37,99,235,.25)}
+      .btn-primary:hover{transform:translateY(-1px);box-shadow:0 6px 20px rgba(37,99,235,.35)}
+      .plan-monthly{background:linear-gradient(45deg,var(--primary-blue),var(--purple-accent));color:#fff}
+      .plan-sixmonth{background:linear-gradient(45deg,var(--purple-accent),#8b5cf6);color:#fff}
+      .plan-inactive{background:#6b7280;color:#fff}
+      .alert{border-radius:12px;border:none;padding:1.25rem}
+      .alert-success{background:linear-gradient(135deg,#d1fae5,#a7f3d0);color:#065f46;border-left:4px solid var(--success-green)}
+      .alert-info{background:linear-gradient(135deg,#dbeafe,#bfdbfe);color:#1e3a8a;border-left:4px solid var(--primary-blue)}
+      .alert-warning{background:linear-gradient(135deg,#fef3c7,#fed7aa);color:#92400e;border-left:4px solid var(--warning-orange)}
+      .form-control,.form-select{border-radius:10px;border:2px solid #e5e7eb;padding:.75rem 1rem;transition:all .2s ease}
+      .form-control:focus,.form-select:focus{border-color:var(--primary-blue);box-shadow:0 0 0 3px rgba(37,99,235,.1)}
+      .navbar-brand{font-size:1.5rem;font-weight:700}
+      .text-success{color:var(--success-green)!important;fill:var(--success-green)}
+      .text-warning{color:var(--warning-orange)!important;fill:var(--warning-orange)}
+      .text-danger{color:var(--danger-red)!important;fill:var(--danger-red)}
+      @media (max-width:768px){.container{padding:0 20px}.card{margin-bottom:1.5rem;border-radius:12px}.btn{padding:.6rem 1.2rem}}
     </style>
     """
 
-    # inject CSRF in body templates if {{ csrf_token() }} literal appears
+    # Replace Jinja literal if present in inline templates
     body_html = body_html.replace('{{ csrf_token() }}', csrf_value)
 
     return f"""<!DOCTYPE html>
-    <html lang="en">
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <html lang="en"><head>
+      <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
       <meta name="csrf-token" content="{csrf_value}">
       <title>{html.escape(title)} - CPP Test Prep</title>
       <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
       <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
-      <link rel="preconnect" href="https://fonts.googleapis.com">
-      <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+      <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
       <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
       {style_css}
     </head>
     <body class="d-flex flex-column min-vh-100">
-      {nav}
-      {stage_banner}
-      <main class="flex-grow-1 py-4">
-        {body_html}
-      </main>
+      {nav}{stage_banner}
+      <main class="flex-grow-1 py-4">{body_html}</main>
       {disclaimer}
       <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    </body>
-    </html>"""
+    </body></html>"""
 
-# ----- Health -----
+# ---- Health ----
 @app.get("/healthz")
 def healthz():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat(), "version": APP_VERSION}
+    ok = {"status": "healthy", "timestamp": datetime.utcnow().isoformat() + "Z", "version": APP_VERSION}
+    return ok
 
-# ----- Auth: Login/Signup/Logout -----
+# ---- Auth: Login / Signup / Logout ----
 @app.get("/login")
 def login_page():
     if 'user_id' in session:
         return redirect(url_for('home'))
     body = """
     <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-md-6 col-lg-4">
-          <div class="card shadow-lg">
-            <div class="card-body p-4">
-              <div class="text-center mb-4">
-                <i class="bi bi-shield-check text-primary display-4 mb-3"></i>
-                <h2 class="card-title fw-bold text-primary">Welcome Back</h2>
-                <p class="text-muted">Sign in to continue your CPP journey</p>
-              </div>
-              <form method="POST" action="/login">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <div class="mb-3">
-                  <label class="form-label fw-semibold">Email</label>
-                  <input type="email" class="form-control" name="email" required placeholder="your.email@example.com">
-                </div>
-                <div class="mb-4">
-                  <label class="form-label fw-semibold">Password</label>
-                  <input type="password" class="form-control" name="password" required placeholder="Enter your password">
-                </div>
-                <button type="submit" class="btn btn-primary w-100 mb-3">Sign In</button>
-              </form>
-              <div class="text-center">
-                <p class="text-muted mb-2">Don't have an account?</p>
-                <a href="/signup" class="btn btn-outline-primary">Create Account</a>
-              </div>
-            </div>
+      <div class="row justify-content-center"><div class="col-md-6 col-lg-4">
+        <div class="card shadow-lg"><div class="card-body p-4">
+          <div class="text-center mb-4">
+            <i class="bi bi-shield-check text-primary display-4 mb-3"></i>
+            <h2 class="card-title fw-bold text-primary">Welcome Back</h2>
+            <p class="text-muted">Sign in to continue your CPP journey</p>
           </div>
-        </div>
-      </div>
+          <form method="POST" action="/login">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <div class="mb-3"><label class="form-label fw-semibold">Email</label>
+              <input type="email" class="form-control" name="email" required placeholder="your.email@example.com">
+            </div>
+            <div class="mb-4"><label class="form-label fw-semibold">Password</label>
+              <input type="password" class="form-control" name="password" required placeholder="Enter your password">
+            </div>
+            <button type="submit" class="btn btn-primary w-100 mb-3">Sign In</button>
+          </form>
+          <div class="text-center">
+            <p class="text-muted mb-2">Don't have an account?</p>
+            <a href="/signup" class="btn btn-outline-primary">Create Account</a>
+          </div>
+        </div></div>
+      </div></div>
     </div>
     """
     return base_layout("Sign In", body)
@@ -719,6 +696,8 @@ def login_page():
 def login_post():
     if _rate_limited("login", limit=5, per_seconds=300):
         return redirect(url_for('login_page'))
+    if not _csrf_ok():
+        abort(403)
 
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
@@ -729,7 +708,7 @@ def login_post():
     user = _find_user(email)
     if user and check_password_hash(user.get('password_hash', ''), password):
         try:
-            session.regenerate()
+            session.regenerate()  # Flask 3.x; guard below keeps compatibility
         except AttributeError:
             session.clear()
             session.permanent = True
@@ -746,116 +725,84 @@ def login_post():
 def signup_page():
     body = """
     <div class="container">
-      <div class="row justify-content-center">
-        <div class="col-lg-10">
-          <div class="text-center mb-5">
-            <i class="bi bi-mortarboard text-primary display-4 mb-3"></i>
-            <h1 class="display-5 fw-bold text-primary">Start Your CPP Journey</h1>
-            <p class="lead text-muted">Choose your path to certification success</p>
-          </div>
-
-          <div class="row mb-5">
-            <div class="col-md-6 mb-4">
-              <div class="card h-100 border-primary position-relative">
-                <div class="card-header bg-primary text-white text-center">
-                  <h4 class="mb-0">Monthly Plan</h4>
-                </div>
-                <div class="card-body text-center p-4">
-                  <div class="mb-3">
-                    <span class="display-4 fw-bold text-primary">$39.99</span>
-                    <span class="text-muted fs-5">/month</span>
-                  </div>
-                  <p class="text-muted mb-4">Perfect for focused study periods</p>
-                  <ul class="list-unstyled mb-4">
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Unlimited practice quizzes</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>AI tutor with instant help</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Progress tracking & analytics</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Mobile-friendly study</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Cancel anytime</li>
-                  </ul>
-                  <button class="btn btn-primary btn-lg w-100" onclick="selectPlan('monthly')">Choose Monthly</button>
-                </div>
-              </div>
-            </div>
-            <div class="col-md-6 mb-4">
-              <div class="card h-100 border-success position-relative">
-                <div class="badge bg-warning text-dark position-absolute top-0 start-50 translate-middle px-3 py-2 fw-bold">
-                  <i class="bi bi-star-fill me-1"></i>Best Value
-                </div>
-                <div class="card-header bg-success text-white text-center pt-4">
-                  <h4 class="mb-0">6-Month Plan</h4>
-                </div>
-                <div class="card-body text-center p-4">
-                  <div class="mb-3">
-                    <div class="display-4 fw-bold text-success mb-1">$99.00</div>
-                    <span class="text-muted fs-6">One-time payment</span>
-                  </div>
-                  <p class="text-muted mb-4">Complete preparation program</p>
-                  <ul class="list-unstyled mb-4">
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Everything in Monthly</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>6 full months of access</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>No auto-renewal</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Save $140+ vs monthly</li>
-                    <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Extended study time</li>
-                  </ul>
-                  <button class="btn btn-success btn-lg w-100" onclick="selectPlan('sixmonth')">Choose 6-Month</button>
-                </div>
+      <div class="row justify-content-center"><div class="col-lg-10">
+        <div class="text-center mb-5">
+          <i class="bi bi-mortarboard text-primary display-4 mb-3"></i>
+          <h1 class="display-5 fw-bold text-primary">Start Your CPP Journey</h1>
+          <p class="lead text-muted">Choose your path to certification success</p>
+        </div>
+        <div class="row mb-5">
+          <div class="col-md-6 mb-4">
+            <div class="card h-100 border-primary">
+              <div class="card-header bg-primary text-white text-center"><h4 class="mb-0">Monthly Plan</h4></div>
+              <div class="card-body text-center p-4">
+                <div class="mb-3"><span class="display-4 fw-bold text-primary">$39.99</span><span class="text-muted fs-5">/month</span></div>
+                <p class="text-muted mb-4">Perfect for focused study periods</p>
+                <ul class="list-unstyled mb-4">
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Unlimited practice quizzes</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>AI tutor with instant help</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Progress tracking & analytics</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Mobile-friendly study</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Cancel anytime</li>
+                </ul>
+                <button class="btn btn-primary btn-lg w-100" onclick="selectPlan('monthly')">Choose Monthly</button>
               </div>
             </div>
           </div>
-
-          <div class="card shadow-lg">
-            <div class="card-body p-4">
-              <h3 class="card-title text-center mb-4">Create Your Account</h3>
-              <form method="POST" action="/signup" id="signupForm">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <input type="hidden" name="plan" id="selectedPlan" value="monthly">
-                <div class="row">
-                  <div class="col-md-6 mb-3">
-                    <label class="form-label fw-semibold">Full Name</label>
-                    <input type="text" class="form-control" name="name" required placeholder="John Doe">
-                  </div>
-                  <div class="col-md-6 mb-3">
-                    <label class="form-label fw-semibold">Email</label>
-                    <input type="email" class="form-control" name="email" required placeholder="john@example.com">
-                  </div>
-                </div>
-                <div class="mb-4">
-                  <label class="form-label fw-semibold">Password</label>
-                  <input type="password" class="form-control" name="password" required minlength="8" placeholder="At least 8 characters">
-                  <div class="form-text">Choose a strong password with at least 8 characters</div>
-                </div>
-                <button type="submit" class="btn btn-success btn-lg w-100">
-                  <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Start Learning
-                </button>
-              </form>
+          <div class="col-md-6 mb-4">
+            <div class="card h-100 border-success position-relative">
+              <div class="badge bg-warning text-dark position-absolute top-0 start-50 translate-middle px-3 py-2 fw-bold">
+                <i class="bi bi-star-fill me-1"></i>Best Value
+              </div>
+              <div class="card-header bg-success text-white text-center pt-4"><h4 class="mb-0">6-Month Plan</h4></div>
+              <div class="card-body text-center p-4">
+                <div class="mb-3"><div class="display-4 fw-bold text-success mb-1">$99.00</div><span class="text-muted fs-6">One-time payment</span></div>
+                <p class="text-muted mb-4">Complete preparation program</p>
+                <ul class="list-unstyled mb-4">
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Everything in Monthly</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>6 full months of access</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>No auto-renewal</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Save $140+ vs monthly</li>
+                  <li class="mb-2"><i class="bi bi-check-circle-fill text-success me-2"></i>Extended study time</li>
+                </ul>
+                <button class="btn btn-success btn-lg w-100" onclick="selectPlan('sixmonth')">Choose 6-Month</button>
+              </div>
             </div>
           </div>
         </div>
-      </div>
-    </div>
 
+        <div class="card shadow-lg"><div class="card-body p-4">
+          <h3 class="card-title text-center mb-4">Create Your Account</h3>
+          <form method="POST" action="/signup" id="signupForm">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+            <input type="hidden" name="plan" id="selectedPlan" value="monthly">
+            <div class="row">
+              <div class="col-md-6 mb-3"><label class="form-label fw-semibold">Full Name</label>
+                <input type="text" class="form-control" name="name" required placeholder="John Doe"></div>
+              <div class="col-md-6 mb-3"><label class="form-label fw-semibold">Email</label>
+                <input type="email" class="form-control" name="email" required placeholder="john@example.com"></div>
+            </div>
+            <div class="mb-4"><label class="form-label fw-semibold">Password</label>
+              <input type="password" class="form-control" name="password" required minlength="8" placeholder="At least 8 characters">
+              <div class="form-text">Choose a strong password with at least 8 characters</div>
+            </div>
+            <button type="submit" class="btn btn-success btn-lg w-100">
+              <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Start Learning
+            </button>
+          </form>
+        </div></div>
+      </div></div>
+    </div>
     <script>
       var selectedPlanType = 'monthly';
-      function selectPlan(plan) {
+      function selectPlan(plan) {{
         selectedPlanType = plan;
-        var el = document.getElementById('selectedPlan');
-        if (el) { el.value = plan; }
+        var el = document.getElementById('selectedPlan'); if (el) el.value = plan;
         var cards = document.querySelectorAll('.card.h-100');
-        for (var i = 0; i < cards.length; i++) {
-          cards[i].style.transform = 'none';
-          cards[i].classList.remove('shadow-lg');
-        }
-        var selector = '[onclick="selectPlan(\\'' + plan + '\\')"]';
-        var btn = document.querySelector(selector);
-        if (btn) {
-          var card = btn.closest('.card');
-          if (card) {
-            card.classList.add('shadow-lg');
-            card.style.transform = 'translateY(-6px)';
-          }
-        }
-      }
+        cards.forEach(function(c){{ c.style.transform='none'; c.classList.remove('shadow-lg'); }});
+        var btn = document.querySelector('[onclick="selectPlan(\\''+plan+'\\')"]');
+        if (btn) {{ var card = btn.closest('.card'); if (card) {{ card.classList.add('shadow-lg'); card.style.transform='translateY(-6px)'; }} }}
+      }}
       selectPlan('monthly');
     </script>
     """
@@ -863,6 +810,9 @@ def signup_page():
 
 @app.post("/signup")
 def signup_post():
+    if not _csrf_ok():
+        abort(403)
+
     name = request.form.get('name', '').strip()
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
@@ -878,29 +828,19 @@ def signup_post():
         return redirect(url_for('signup_page'))
 
     user = {
-        "id": str(uuid.uuid4()),
-        "name": name,
-        "email": email,
+        "id": str(uuid.uuid4()), "name": name, "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "inactive",
-        "usage": {"monthly": {}, "last_active": ""},
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "history": []
+        "subscription": "inactive", "usage": {"monthly": {}, "last_active": ""},
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z", "history": []
     }
-    USERS.append(user)
-    _save_json("users.json", USERS)
+    USERS.append(user); _save_json("users.json", USERS)
 
     try:
         session.regenerate()
     except AttributeError:
-        session.clear()
-        session.permanent = True
+        session.clear(); session.permanent = True
+    session['user_id'] = user['id']; session['email'] = user['email']; session['name'] = user['name']
 
-    session['user_id'] = user['id']
-    session['email'] = user['email']
-    session['name'] = user['name']
-
-    # This function is defined later in the Billing section (safe to call here).
     checkout_url = create_stripe_checkout_session(user_email=email, plan=plan) if 'create_stripe_checkout_session' in globals() else None
     if checkout_url:
         return redirect(checkout_url)
@@ -908,17 +848,31 @@ def signup_post():
 
 @app.post("/logout")
 def logout():
+    if not _csrf_ok():
+        abort(403)
     session.clear()
     return redirect(url_for('login_page'))
+
 # =========================
 # SECTION 3/8: Home, Study Alias, Tutor (AI), Minimal Analytics
 # =========================
+
+# Provide DOMAINS mapping if not already defined (used by domain buttons)
+if 'DOMAINS' not in globals():
+    DOMAINS = {
+        "security-principles":  "Security Principles",
+        "business-principles":  "Business Principles",
+        "investigations":       "Investigations",
+        "personnel-security":   "Personnel Security",
+        "physical-security":    "Physical Security",
+        "information-security": "Information Security",
+        "crisis-management":    "Crisis & Continuity",
+    }
 
 # ---------- Home / Dashboard ----------
 @app.get("/")
 def home():
     if 'user_id' not in session:
-        # Public landing (concise but keeps your design tone)
         body = """
         <div class="container text-center">
           <div class="mb-5">
@@ -954,7 +908,6 @@ def home():
         """
         return base_layout("CPP Test Prep", body)
 
-    # Minimal logged-in dashboard
     first_name = (session.get('name') or '').split(' ')[0] or 'there'
     body = f"""
     <div class="container">
@@ -1051,55 +1004,37 @@ def _track_page_views():
 # ---------- Tutor (AI) ----------
 def _call_tutor_agent(user_query, meta=None):
     """
-    Calls your AI provider using env config.
-    - OpenAI-compatible: OPENAI_API_KEY, OPENAI_API_BASE, OPENAI_CHAT_MODEL
-    - Azure OpenAI: AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_API_KEY, AZURE_OPENAI_DEPLOYMENT
-    Returns: (ok: bool, answer: str, meta: dict)
+    Baseline agent caller. This function is intentionally simple here and
+    will be *extended/overridden* in Section 7 to support web-aware citations.
     """
     meta = meta or {}
     timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
     temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
     max_tokens = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
     system_msg = os.environ.get("TUTOR_SYSTEM_PROMPT",
-        "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step, "
-        "and include 1–3 citations (title + URL) from allowed public sources when relevant."
+        "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step."
     )
 
-    azure_endpoint = os.environ.get("AZURE_OPENAI_ENDPOINT", "").rstrip("/")
-    azure_key = os.environ.get("AZURE_OPENAI_API_KEY", "").strip()
-    azure_deploy = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "").strip()
+    if not OPENAI_API_KEY:
+        return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
 
-    if azure_endpoint and azure_key and azure_deploy:
-        url = f"{azure_endpoint}/openai/deployments/{azure_deploy}/chat/completions?api-version=2024-06-01"
-        headers = {"api-key": azure_key, "Content-Type": "application/json"}
-        payload = {
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_query}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
-    else:
-        if not OPENAI_API_KEY:
-            return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
-        url = f"{OPENAI_API_BASE}/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        }
-        org = os.environ.get("OPENAI_ORG", "").strip()
-        if org:
-            headers["OpenAI-Organization"] = org
-        payload = {
-            "model": OPENAI_CHAT_MODEL,
-            "messages": [
-                {"role": "system", "content": system_msg},
-                {"role": "user", "content": user_query}
-            ],
-            "temperature": temperature,
-            "max_tokens": max_tokens
-        }
+    url = f"{OPENAI_API_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    org = os.environ.get("OPENAI_ORG", "").strip()
+    if org:
+        headers["OpenAI-Organization"] = org
+    payload = {
+        "model": OPENAI_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_query}
+        ],
+        "temperature": temperature,
+        "max_tokens": max_tokens
+    }
 
     backoffs = [0, 1.5, 3.0]
     last_err = None
@@ -1121,11 +1056,7 @@ def _call_tutor_agent(user_query, meta=None):
             data = resp.json()
             answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             usage = data.get("usage", {})
-            meta_out = {"usage": usage}
-            meta_out.update({"provider": "azure" if azure_endpoint else "openai"})
-            if not azure_endpoint:
-                meta_out["model"] = payload.get("model")
-            return True, answer, meta_out
+            return True, answer, {"usage": usage, "model": OPENAI_CHAT_MODEL}
         except Exception as e:
             last_err = str(e)
             continue
@@ -1144,12 +1075,12 @@ def tutor_page():
     selected_domain = (request.form.get("domain") or "random").strip().lower()
 
     if request.method == "POST":
-        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+        if not _csrf_ok():
             abort(403)
         if not user_query:
             tutor_error = "Please enter a question."
         else:
-            # If a domain is selected, gently cue the tutor
+            # Inject domain cue for the agent when selected
             if selected_domain and selected_domain != "random":
                 domain_label = DOMAINS.get(selected_domain, selected_domain)
                 user_query = f"[Domain: {domain_label}] {user_query}"
@@ -1237,6 +1168,7 @@ def tutor_page():
 def tutor_ping():
     ok, answer, meta = _call_tutor_agent("Reply 'pong' only.", meta={"ping": True})
     return jsonify({"ok": bool(ok), "answer_preview": (answer or "")[:200], "meta": meta}), (200 if ok else 502)
+
 # =========================
 # SECTION 4/8: Quiz & Mock Exam (domain & count pickers, safe handling)
 # =========================
@@ -1284,7 +1216,7 @@ def _normalize_question_runtime(q, idx=None):
 
 def _all_normalized_questions():
     """Merge legacy QUESTIONS + BASE_QUESTIONS into normalized runtime items."""
-    src = (ALL_QUESTIONS or [])  # ALL_QUESTIONS is built in Section 1
+    src = (ALL_QUESTIONS or [])
     out = []
     for i, q in enumerate(src):
         nq = _normalize_question_runtime(q, idx=i)
@@ -1608,6 +1540,7 @@ def _render_results_card(title, route, run, results):
 @login_required
 def quiz_page():
     user_id = _user_id()
+    user = _find_user(session.get("email",""))
 
     # Handle resets / new run
     if request.method == "GET":
@@ -1622,13 +1555,32 @@ def quiz_page():
     # If no active run: show picker or start from POST
     if not run:
         if request.method == "POST":
-            if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            if not _csrf_ok():
                 abort(403)
+            # plan/usage gate (one quiz per attempt)
+            ok_limit, msg_limit = check_usage_limit(user, "quizzes")
+            if not ok_limit:
+                # Friendly soft-block
+                content = f"""
+                <div class="container">
+                  <div class="row justify-content-center"><div class="col-lg-8">
+                    <div class="card">
+                      <div class="card-header bg-warning text-dark"><h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3></div>
+                      <div class="card-body">
+                        <div class="alert alert-warning">{html.escape(msg_limit)}</div>
+                        <a class="btn btn-primary" href="/billing"><i class="bi bi-credit-card me-1"></i>Upgrade Plan</a>
+                        <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+                      </div>
+                    </div>
+                  </div></div>
+                </div>
+                """
+                return base_layout("Quiz", content)
+
             try:
                 count = int(request.form.get("count") or 10)
             except Exception:
                 count = 10
-            # Allowed quiz sizes
             if count not in (5, 10, 15, 20):
                 count = 10
             domain = request.form.get("domain") or "random"
@@ -1672,7 +1624,7 @@ def quiz_page():
     # Progress existing run
     error_msg = ""
     if request.method == "POST" and run:
-        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+        if not _csrf_ok():
             abort(403)
         qset = run.get("qset") or []
         if not qset:
@@ -1710,6 +1662,16 @@ def quiz_page():
     if run.get("finished"):
         results = _grade(run)
         _record_attempt(user_id, "quiz", run, results)
+        # usage increments after completion (1 quiz + N questions)
+        email = session.get("email","")
+        if email:
+            try:
+                increment_usage(email, "quizzes", 1)
+                qcount = len(run.get("qset") or [])
+                if qcount:
+                    increment_usage(email, "questions", qcount)
+            except Exception as _e:
+                logger.warning("usage increment failed: %s", _e)
         _finish_run("quiz", user_id)
         return _render_results_card("Quiz", "/quiz", run, results)
 
@@ -1722,6 +1684,7 @@ def quiz_page():
 @login_required
 def mock_exam_page():
     user_id = _user_id()
+    user = _find_user(session.get("email",""))
 
     if request.method == "GET":
         if request.args.get("reset") == "1":
@@ -1734,8 +1697,27 @@ def mock_exam_page():
 
     if not run:
         if request.method == "POST":
-            if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+            if not _csrf_ok():
                 abort(403)
+            # usage/plan gate
+            ok_limit, msg_limit = check_usage_limit(user, "quizzes")
+            if not ok_limit:
+                content = f"""
+                <div class="container">
+                  <div class="row justify-content-center"><div class="col-lg-8">
+                    <div class="card">
+                      <div class="card-header bg-warning text-dark"><h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Mock Exam</h3></div>
+                      <div class="card-body">
+                        <div class="alert alert-warning">{html.escape(msg_limit)}</div>
+                        <a class="btn btn-primary" href="/billing"><i class="bi bi-credit-card me-1"></i>Upgrade Plan</a>
+                        <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+                      </div>
+                    </div>
+                  </div></div>
+                </div>
+                """
+                return base_layout("Mock Exam", content)
+
             try:
                 count = int(request.form.get("count") or 50)
             except Exception:
@@ -1780,7 +1762,7 @@ def mock_exam_page():
 
     error_msg = ""
     if request.method == "POST" and run:
-        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+        if not _csrf_ok():
             abort(403)
 
         qset = run.get("qset") or []
@@ -1819,11 +1801,22 @@ def mock_exam_page():
     if run.get("finished"):
         results = _grade(run)
         _record_attempt(user_id, "mock", run, results)
+        # usage increments after completion
+        email = session.get("email","")
+        if email:
+            try:
+                increment_usage(email, "quizzes", 1)
+                qcount = len(run.get("qset") or [])
+                if qcount:
+                    increment_usage(email, "questions", qcount)
+            except Exception as _e:
+                logger.warning("usage increment failed: %s", _e)
         _finish_run("mock", user_id)
         return _render_results_card("Mock Exam", "/mock-exam", run, results)
 
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
+
 # =========================
 # SECTION 5/8: Flashcards, Progress, Billing/Stripe (+ debug)
 # =========================
@@ -1845,7 +1838,6 @@ def _normalize_flashcard(item):
         return None
     domain = (item.get("domain") or item.get("category") or "Unspecified").strip()
     sources = item.get("sources") or []
-    # keep 0-3 structured sources
     cleaned_sources = []
     for s in sources[:3]:
         t = (s.get("title") or "").strip()
@@ -1900,54 +1892,57 @@ def _filter_flashcards_domain(cards, domain_key: str | None):
 @login_required
 def flashcards_page():
     # Picker (count + domain)
-   if request.method == "GET":
-    csrf_val = csrf_token()
-    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
+    if request.method == "GET":
+        csrf_val = csrf_token()
+        domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
 
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-        <div class="card">
-          <div class="card-header bg-success text-white">
-            <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
-          </div>
-          <div class="card-body">
-            <form method="POST" class="mb-3">
-              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              <label class="form-label fw-semibold">Domain</label>
-              {domain_buttons}
-              <div class="mt-3 mb-2 fw-semibold">How many cards?</div>
-              <div class="d-flex flex-wrap gap-2">
-                <button class="btn btn-outline-success" name="count" value="10">10</button>
-                <button class="btn btn-outline-success" name="count" value="20">20</button>
-                <button class="btn btn-outline-success" name="count" value="30">30</button>
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+            <div class="card">
+              <div class="card-header bg-success text-white">
+                <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
               </div>
-            </form>
-            <div class="text-muted small">Tip: Choose a domain to focus, or Random to mix all.</div>
-          </div>
+              <div class="card-body">
+                <form method="POST" class="mb-3">
+                  <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+                  <label class="form-label fw-semibold">Domain</label>
+                  {domain_buttons}
+                  <div class="mt-3 mb-2 fw-semibold">How many cards?</div>
+                  <div class="d-flex flex-wrap gap-2">
+                    <button class="btn btn-outline-success" name="count" value="10">10</button>
+                    <button class="btn btn-outline-success" name="count" value="20">20</button>
+                    <button class="btn btn-outline-success" name="count" value="30">30</button>
+                  </div>
+                </form>
+                <div class="text-muted small">Tip: Choose a domain to focus, or Random to mix all.</div>
+              </div>
+            </div>
+          </div></div>
         </div>
-      </div></div>
-    </div>
 
-    <script>
-      (function(){{
-        var container = document.currentScript.closest('.card').querySelector('.card-body');
-        var hidden = container.querySelector('#domain_val');
-        container.querySelectorAll('.domain-btn').forEach(function(btn){{
-          btn.addEventListener('click', function(){{
-            container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
-            btn.classList.add('active');
-            if (hidden) hidden.value = btn.getAttribute('data-value');
-          }});
-        }});
-      }})();
-    </script>
-    """
-    return base_layout("Flashcards", content)
+        <script>
+          (function(){{
+            var container = document.currentScript.closest('.card').querySelector('.card-body');
+            var hidden = container.querySelector('#domain_val');
+            container.querySelectorAll('.domain-btn').forEach(function(btn){{
+              btn.addEventListener('click', function(){{
+                container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+                btn.classList.add('active');
+                if (hidden) hidden.value = btn.getAttribute('data-value');
+              }});
+            }});
+          }})();
+        </script>
+        """
+        return base_layout("Flashcards", content)
 
     # POST -> start session client-side (no server state needed)
-    if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
-        abort(403)
+    # CSRF: when Flask-WTF CSRFProtect is enabled, it validates automatically. Only check manually if disabled.
+    if not HAS_CSRF:
+        if request.form.get("csrf_token") != csrf_token():
+            abort(403)
+
     try:
         count = int(request.form.get("count") or 20)
     except Exception:
@@ -1961,8 +1956,6 @@ def flashcards_page():
     random.shuffle(pool)
     cards = pool[:max(0, min(count, len(pool)))]
 
-    # Render with a tiny JS controller (flip/next/prev, progress)
-    # (No secrets; all in-page)
     def _card_div(c):
         src_bits = ""
         if c.get("sources"):
@@ -2010,7 +2003,6 @@ def flashcards_page():
       function show(idx) {{
         cards.forEach(function(el, j) {{
           el.style.display = (j===idx) ? '' : 'none';
-          // always start on front when changing card
           if (j===idx) {{
             el.querySelector('.front').classList.remove('d-none');
             el.querySelector('.back').classList.add('d-none');
@@ -2038,6 +2030,37 @@ def flashcards_page():
     _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
     return base_layout("Flashcards", content)
 
+# ---------- USAGE (upgrade #1) ----------
+@app.get("/usage")
+@login_required
+def usage_dashboard():
+    user = _find_user(session.get("email",""))
+    usage = (user or {}).get("usage") or {}
+    month = datetime.utcnow().strftime("%Y-%m")
+    m = (usage.get("monthly") or {}).get(month, {})
+    rows = []
+    for k in ("tutor_msgs","questions","quizzes","flashcards"):
+        rows.append(f"<tr><td class='fw-semibold'>{html.escape(k)}</td><td class='text-end'>{int(m.get(k,0))}</td></tr>")
+    tbl = "".join(rows) or "<tr><td colspan='2' class='text-center text-muted'>No usage yet.</td></tr>"
+    content = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-md-7">
+      <div class="card">
+        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-speedometer me-2"></i>Usage Dashboard</h3></div>
+        <div class="card-body">
+          <div class="small text-muted mb-2">Month: {html.escape(month)}</div>
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead><tr><th>Metric</th><th class="text-end">Count</th></tr></thead>
+              <tbody>{tbl}</tbody>
+            </table>
+          </div>
+          <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Usage", content)
+
 # ---------- PROGRESS ----------
 @app.get("/progress")
 @login_required
@@ -2046,13 +2069,11 @@ def progress_page():
     attempts = [a for a in _load_json("attempts.json", []) if a.get("user_id") == uid]
     attempts.sort(key=lambda x: x.get("ts",""), reverse=True)
 
-    # Overall aggregates
     total_q = sum(a.get("count", 0) for a in attempts)
     total_ok = sum(a.get("correct", 0) for a in attempts)
     best = max([a.get("score_pct", 0.0) for a in attempts], default=0.0)
     avg = round(sum([a.get("score_pct", 0.0) for a in attempts]) / len(attempts), 1) if attempts else 0.0
 
-    # By domain
     dom = {}
     for a in attempts:
         for dname, stats in (a.get("domains") or {}).items():
@@ -2062,7 +2083,6 @@ def progress_page():
 
     def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
 
-    # attempts table
     rows = []
     for a in attempts[:100]:
         rows.append(f"""
@@ -2075,7 +2095,6 @@ def progress_page():
         """)
     attempts_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No attempts yet.</td></tr>"
 
-    # domain table
     drows = []
     for dname in sorted(dom.keys()):
         c = dom[dname]["correct"]; t = dom[dname]["total"]
@@ -2327,7 +2346,6 @@ def stripe_webhook():
 @login_required
 def billing_debug():
     if not is_admin():
-        # Simple admin gate: visit /admin/login?pw=... once per session
         return redirect(url_for("admin_login_page", next=request.path))
 
     data = {
@@ -2337,7 +2355,6 @@ def billing_debug():
         "OPENAI_CHAT_MODEL": OPENAI_CHAT_MODEL,
         "DATA_DIR": DATA_DIR,
     }
-    # NOTE: do NOT display secrets; only booleans/ids
     rows = []
     for k, v in data.items():
         val = html.escape(str(v if not isinstance(v, bool) else ("yes" if v else "no")))
@@ -2361,7 +2378,7 @@ def billing_debug():
     """
     return base_layout("Billing Debug", content)
 
-# Simple admin login to flip session.admin_ok True
+# ---------- ADMIN LOGIN & PASSWORD RESET ----------
 @app.get("/admin/login")
 def admin_login_page():
     nxt = request.args.get("next") or "/"
@@ -2387,17 +2404,9 @@ def admin_login_page():
 
 @app.post("/admin/login")
 def admin_login_post():
-    # Robust CSRF validation: use validate_csrf if available; otherwise compare tokens
-    if HAS_CSRF:
-        try:
-            token = request.form.get("csrf_token") or ""
-            if validate_csrf:
-                validate_csrf(token)
-            else:
-                # Fallback strict compare
-                if token != csrf_token():
-                    abort(403)
-        except Exception:
+    # CSRF: let CSRFProtect enforce when enabled; manual check only if disabled
+    if not HAS_CSRF:
+        if request.form.get("csrf_token") != csrf_token():
             abort(403)
 
     nxt = request.form.get("next") or "/"
@@ -2406,8 +2415,8 @@ def admin_login_post():
         session["admin_ok"] = True
         return redirect(nxt)
     return redirect(url_for("admin_login_page", next=nxt))
-    
-# --- Admin: Reset a user's password (admin-only, minimal UI) ---
+
+# Admin: Reset a user's password (admin-only, minimal UI)
 @app.route("/admin/reset-password", methods=["GET","POST"])
 @login_required
 def admin_reset_password():
@@ -2416,10 +2425,8 @@ def admin_reset_password():
 
     msg = ""
     if request.method == "POST":
-        if HAS_CSRF:
-            try:
-                validate_csrf(request.form.get("csrf_token"))
-            except Exception:
+        if not HAS_CSRF:
+            if request.form.get("csrf_token") != csrf_token():
                 abort(403)
         email = (request.form.get("email") or "").strip().lower()
         new_pw = request.form.get("password") or ""
@@ -2460,7 +2467,7 @@ def admin_reset_password():
     </div></div></div>
     """
     return base_layout("Admin Reset Password", body)
-   
+
 # =========================
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
@@ -2480,7 +2487,7 @@ ALLOWED_SOURCE_DOMAINS = {
     # After Action Reports (public/official postings)
     "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov", "phila.gov", "denvergov.org",
     "boston.gov", "chicago.gov", "seattle.gov", "sandiego.gov", "lacounty.gov",
-    "ready.gov"  # FEMA/ICS public summaries & guidance
+    "ready.gov"           # FEMA/ICS public summaries & guidance
 }
 # NOTE: Wikipedia intentionally NOT allowed.
 
@@ -2514,18 +2521,17 @@ def _validate_sources(sources: list) -> tuple[bool, str]:
 
 # -------- Hash & de-dup index --------
 def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> str:
-    # Canonical string for deterministic hashing
     blob = json.dumps({
         "k": "fc",
         "front": front.strip().lower(),
         "back": back.strip().lower(),
         "domain": (domain or "Unspecified").strip().lower(),
-        "srcs": [{"t": (s.get("title","").strip().lower()), "u": (s.get("url","").strip().lower())} for s in (sources or [])]
+        "srcs": [{"t": (s.get("title","").strip().lower()),
+                  "u": (s.get("url","").strip().lower())} for s in (sources or [])]
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 def _item_hash_question(question: str, options: dict, correct: str, domain: str, sources: list) -> str:
-    # Keep options in A..D order for stable hashing
     ordered = {k: str(options.get(k,"")).strip().lower() for k in ["A","B","C","D"]}
     blob = json.dumps({
         "k": "q",
@@ -2533,7 +2539,8 @@ def _item_hash_question(question: str, options: dict, correct: str, domain: str,
         "opts": ordered,
         "correct": (correct or "").strip().upper(),
         "domain": (domain or "Unspecified").strip().lower(),
-        "srcs": [{"t": (s.get("title","").strip().lower()), "u": (s.get("url","").strip().lower())} for s in (sources or [])]
+        "srcs": [{"t": (s.get("title","").strip().lower()),
+                  "u": (s.get("url","").strip().lower())} for s in (sources or [])]
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
@@ -2573,8 +2580,7 @@ def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
     ok, msg = _validate_sources(sources)
     if not ok:
         return None, msg
-    out = {"front": front, "back": back, "domain": domain, "sources": sources}
-    return out, ""
+    return {"front": front, "back": back, "domain": domain, "sources": sources}, ""
 
 def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
     """
@@ -2592,24 +2598,24 @@ def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
     question = (q_in.get("question") or q_in.get("q") or q_in.get("stem") or "").strip()
     domain   = (q_in.get("domain") or q_in.get("category") or "Unspecified").strip()
     sources  = q_in.get("sources") or []
-    # Options can come as dict or list
+
+    # Options may be dict or list
     raw_opts = q_in.get("options") or q_in.get("choices") or q_in.get("answers")
     opts = {}
     if isinstance(raw_opts, dict):
         for L in ["A","B","C","D"]:
             v = raw_opts.get(L) or raw_opts.get(L.lower())
-            if not v: return None, f"Missing option {L}"
+            if not v:
+                return None, f"Missing option {L}"
             opts[L] = str(v)
     elif isinstance(raw_opts, list) and len(raw_opts) >= 4:
         letters = ["A","B","C","D"]
         for i, L in enumerate(letters):
             v = raw_opts[i]
-            if isinstance(v, dict):
-                opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "")
-            else:
-                opts[L] = str(v)
+            opts[L] = str(v.get("text") if isinstance(v, dict) else v)
     else:
         return None, "Options must provide 4 choices."
+
     # Correct can be letter or 1-based index
     correct = q_in.get("correct") or q_in.get("answer") or q_in.get("correct_key")
     if isinstance(correct, str) and correct.strip().upper() in ("A","B","C","D"):
@@ -2620,21 +2626,31 @@ def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
             correct = ["A","B","C","D"][idx - 1]
         except Exception:
             return None, "Correct must be A/B/C/D or 1..4."
-    # Sources validate
+
     ok, msg = _validate_sources(sources)
     if not ok:
         return None, msg
     if not question:
         return None, "Question text required."
-    return {"question": question, "options": opts, "correct": correct, "domain": domain, "sources": sources}, ""
 
-# -------- Ingestion (admin-only) --------
+    return {"question": question, "options": opts, "correct": correct,
+            "domain": domain, "sources": sources}, ""
+
+# -------- Ingestion (admin-only JSON API) --------
+# NOTE: This endpoint expects application/json and is admin-gated.
+# If CSRF is enabled, exempt this JSON endpoint to avoid 403 on POST without form token.
+if HAS_CSRF:
+    @csrf.exempt
 @app.post("/api/dev/ingest")
 @login_required
 def api_dev_ingest():
     if not is_admin():
         return jsonify({"ok": False, "error": "admin-required"}), 403
 
+    # Accept JSON body; if missing, return helpful error
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "application/json required",
+                        "hint": "In Postman: choose POST + Body: raw + JSON"}), 415
     data = request.get_json(silent=True) or {}
     in_flash = data.get("flashcards") or []
     in_questions = data.get("questions") or []
@@ -2647,15 +2663,20 @@ def api_dev_ingest():
     # Build quick hash sets for existing
     existing_fc_hashes = set()
     for fc in bank_fc:
-        h = _item_hash_flashcard(fc.get("front",""), fc.get("back",""), fc.get("domain","Unspecified"), fc.get("sources") or [])
+        h = _item_hash_flashcard(fc.get("front",""), fc.get("back",""),
+                                 fc.get("domain","Unspecified"), fc.get("sources") or [])
         existing_fc_hashes.add(h)
-        idx.setdefault(h, {"type":"fc","added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
+        idx.setdefault(h, {"type":"fc",
+                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
 
     existing_q_hashes = set()
     for q in bank_q:
-        h = _item_hash_question(q.get("question",""), q.get("options") or {}, q.get("correct",""), q.get("domain","Unspecified"), q.get("sources") or [])
+        h = _item_hash_question(q.get("question",""), q.get("options") or {},
+                                q.get("correct",""), q.get("domain","Unspecified"),
+                                q.get("sources") or [])
         existing_q_hashes.add(h)
-        idx.setdefault(h, {"type":"q","added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
+        idx.setdefault(h, {"type":"q",
+                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
 
     # Process incoming flashcards
     added_fc = 0
@@ -2679,7 +2700,8 @@ def api_dev_ingest():
         norm, msg = _norm_bank_question(raw)
         if not norm:
             rejected_q.append({"item": raw, "error": msg}); continue
-        h = _item_hash_question(norm["question"], norm["options"], norm["correct"], norm["domain"], norm["sources"])
+        h = _item_hash_question(norm["question"], norm["options"], norm["correct"],
+                                norm["domain"], norm["sources"])
         if h in existing_q_hashes:
             continue
         bank_q.append(norm)
@@ -2703,7 +2725,7 @@ def api_dev_ingest():
             "questions_rejected": len(rejected_q),
         },
         "rejected": {
-            "flashcards": rejected_fc[:50],  # cap to keep payload light
+            "flashcards": rejected_fc[:50],
             "questions": rejected_q[:50]
         }
     })
@@ -2746,7 +2768,6 @@ def admin_check_bank():
         correct = (q.get("correct","")).strip().upper()
         if not question:
             q_errors.append(f"Q[{i}]: empty question")
-        # options must be A..D and all non-empty
         for L in ["A","B","C","D"]:
             if not (isinstance(opts, dict) and opts.get(L)):
                 q_errors.append(f"Q[{i}]: missing option {L}")
@@ -2830,36 +2851,43 @@ def admin_check_bank():
     </div>
     """
     return base_layout("Bank Checker", content)
+
 # =========================
 # SECTION 7/8: Tutor — web-aware citations (+ admin toggles)
 # =========================
 
-# ---- Settings loader for Tutor "web-aware" mode (persisted; override by ENV) ----
+# ---- Tutor settings (persisted file; ENV can override) ----
 def _load_tutor_settings():
-    return _load_json("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"})
+    # Defaults to ENV TUTOR_WEB_AWARE if present; else file (default False)
+    return _load_json(
+        "tutor_settings.json",
+        {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}
+    )
 
 def _save_tutor_settings(cfg: dict):
     _save_json("tutor_settings.json", cfg or {})
 
 def _tutor_web_enabled() -> bool:
-    # ENV overrides file if set explicitly
-    if os.environ.get("TUTOR_WEB_AWARE") in ("0", "1"):
-        return os.environ.get("TUTOR_WEB_AWARE") == "1"
+    # Hard override by ENV if explicitly set
+    env = os.environ.get("TUTOR_WEB_AWARE")
+    if env in ("0", "1"):
+        return env == "1"
     return bool(_load_tutor_settings().get("web_aware", False))
 
-# ---- Bank-source citation finder (uses your uploaded/ingested sources only) ----
+# ---- Bank-source citation finder (uses only your ingested sources) ----
 def _bank_all_sources():
     """
-    Yields deduped source dicts from bank files:
+    Yields unique source dicts from bank files:
       {"title":..., "url":..., "domain":..., "from":"flashcard|question"}
-    Only returns URLs whose domain is in ALLOWED_SOURCE_DOMAINS.
+    Only returns URLs whose domain is whitelisted by ALLOWED_SOURCE_DOMAINS.
     """
     seen = set()
+    # From flashcards
     for fc in _load_json("bank/cpp_flashcards_v1.json", []):
         for s in (fc.get("sources") or []):
-            u = (s.get("url") or "").strip()
             t = (s.get("title") or "").strip()
-            if not u or not t:
+            u = (s.get("url") or "").strip()
+            if not t or not u:
                 continue
             if not _url_domain_ok(u):
                 continue
@@ -2868,11 +2896,12 @@ def _bank_all_sources():
                 continue
             seen.add(key)
             yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "flashcard"}
+    # From questions
     for q in _load_json("bank/cpp_questions_v1.json", []):
         for s in (q.get("sources") or []):
-            u = (s.get("url") or "").strip()
             t = (s.get("title") or "").strip()
-            if not u or not t:
+            u = (s.get("url") or "").strip()
+            if not t or not u:
                 continue
             if not _url_domain_ok(u):
                 continue
@@ -2884,17 +2913,15 @@ def _bank_all_sources():
 
 def _extract_keywords(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z]{3,}", (text or "").lower())
-    # simple stoplist
-    stop = {"the","and","for","with","from","this","that","into","over","under","your","about","into","have","what","when","where","which"}
+    stop = {"the","and","for","with","from","this","that","into","over","under",
+            "your","about","have","what","when","where","which"}
     return {w for w in words if w not in stop}
 
 def _score_source(src, kw: set[str]) -> int:
+    # Basic scoring by title overlap + small boost for gov/standards
     score = 0
     title_words = set(re.findall(r"[A-Za-z]{3,}", src["title"].lower()))
     score += len(title_words & kw) * 3
-    domain_words = set(re.findall(r"[A-Za-z]{3,}", src["domain"].split(":")[0]))
-    score += len(domain_words & kw)
-    # prefer government standards & official guidance slightly
     if any(src["domain"].endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
         score += 2
     return score
@@ -2905,55 +2932,55 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
     if not pool:
         return []
     scored = sorted(pool, key=lambda s: _score_source(s, kw), reverse=True)
-    out = []
-    seen_urls = set()
+    out, seen = [], set()
     for s in scored:
-        if s["url"] in seen_urls:
+        if s["url"] in seen:
             continue
         out.append(s)
-        seen_urls.add(s["url"])
+        seen.add(s["url"])
         if len(out) >= max_n:
             break
     return out
 
-# ---- Replaces/extends prior _call_tutor_agent to inject citations when enabled ----
+# ---- Web-aware Tutor: wraps model call and injects citations from bank ----
 def _call_tutor_agent(user_query, meta=None):
     """
-    Web-aware mode: when enabled, we pass 1–3 bank-sourced citations to the model
-    and instruct it to include a short 'Citations' section with Title + URL.
+    Web-aware mode:
+      - If enabled, collect up to 3 citations from your content bank that match the query.
+      - Send them as 'Supporting_sources' to the model.
+      - Ask model to include a short 'Citations' section (Title + URL) in the answer.
+    Uses OpenAI-compatible Chat Completions (OPENAI_API_KEY/BASE/MODEL).
     """
     meta = meta or {}
     timeout_s   = float(os.environ.get("TUTOR_TIMEOUT", "45"))
     temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
     max_tokens  = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
-    model       = os.environ.get("MODEL_TUTOR", "gpt-4o-mini").strip()
-    base_url    = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1").rstrip("/")
-    api_key     = os.environ.get("OPENAI_API_KEY","").strip()
-    org_id      = os.environ.get("OPENAI_ORG","").strip()
+
+    api_key   = OPENAI_API_KEY
+    base_url  = OPENAI_API_BASE
+    model     = os.environ.get("MODEL_TUTOR", OPENAI_CHAT_MODEL).strip()
+    org_id    = os.environ.get("OPENAI_ORG", "").strip()
 
     if not api_key:
-        return False, "Tutor is not configured: missing API key.", {}
+        return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
 
     web_on = _tutor_web_enabled()
     cites  = _find_bank_citations(user_query, max_n=3) if web_on else []
     cites_lines = "\n".join([f"- {c['title']} — {c['url']}" for c in cites])
 
     system_msg = (
-        "You are a calm, expert CPP/PSP study tutor. Be concise, structured, and practical. "
-        "If a question maps to CPP domains, mention the domain at the end of the relevant bullet. "
+        "You are a calm, expert CPP/PSP study tutor. Be concise, step-by-step, and practical. "
+        "Map advice to CPP domains when relevant (note the domain inline). "
         "If supporting_sources are provided, incorporate their facts and add a short 'Citations' "
-        "section at the end listing Title and URL (1–3 items). If sources are absent, answer normally."
+        "section at the end listing Title and URL (1–3 items). If none supplied, answer normally."
     )
 
-    messages = [{"role":"system","content": system_msg}]
+    messages = [{"role": "system", "content": system_msg}]
     if cites:
-        messages.append({"role":"system","content": "Supporting_sources:\n"+cites_lines})
-    messages.append({"role":"user","content": user_query})
+        messages.append({"role": "system", "content": "Supporting_sources:\n" + cites_lines})
+    messages.append({"role": "user", "content": user_query})
 
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     if org_id:
         headers["OpenAI-Organization"] = org_id
 
@@ -2969,19 +2996,28 @@ def _call_tutor_agent(user_query, meta=None):
     for wait_s in backoffs:
         if wait_s: time.sleep(wait_s)
         try:
-            resp = requests.post(f"{base_url}/chat/completions", headers=headers, data=json.dumps(payload), timeout=timeout_s)
+            resp = requests.post(f"{base_url}/chat/completions",
+                                 headers=headers, data=json.dumps(payload),
+                                 timeout=timeout_s)
             if resp.status_code in (429, 500, 502, 503, 504):
                 last_err = f"{resp.status_code} {resp.text[:300]}"; continue
             if resp.status_code >= 400:
                 try:
-                    j = resp.json(); msg = (j.get("error") or {}).get("message") or resp.text[:300]
+                    j = resp.json()
+                    msg = (j.get("error") or {}).get("message") or resp.text[:300]
                 except Exception:
                     msg = resp.text[:300]
                 return False, f"Agent error {resp.status_code}: {msg}", {"status": resp.status_code}
             data = resp.json()
             answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             usage  = data.get("usage", {})
-            meta_out = {"usage": usage, "provider": "openai", "model": model, "web_aware": web_on, "citations_used": cites}
+            meta_out = {
+                "usage": usage,
+                "provider": "openai",
+                "model": model,
+                "web_aware": web_on,
+                "citations_used": cites
+            }
             return True, answer, meta_out
         except Exception as e:
             last_err = str(e)
@@ -2989,8 +3025,8 @@ def _call_tutor_agent(user_query, meta=None):
 
     return False, f"Network/agent error: {last_err or 'unknown'}", {}
 
-# ---- Admin UI to toggle web-aware mode & preview citations ----
-@app.route("/admin/tutor-mode", methods=["GET","POST"])
+# ---- Admin UI: toggle web-aware + preview matching citations ----
+@app.route("/admin/tutor-mode", methods=["GET", "POST"])
 @login_required
 def admin_tutor_mode():
     if not is_admin():
@@ -2999,35 +3035,44 @@ def admin_tutor_mode():
     cfg = _load_tutor_settings()
     msg = ""
     if request.method == "POST":
-        if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+        if HAS_CSRF and (request.form.get("csrf_token") != csrf_token()):
             abort(403)
-        enabled = (request.form.get("web_aware") == "1")
-        cfg["web_aware"] = enabled
+        cfg["web_aware"] = (request.form.get("web_aware") == "1")
         _save_tutor_settings(cfg)
-        msg = "Saved. Web-aware Tutor is now " + ("ON" if enabled else "OFF")
+        msg = "Saved. Web-aware Tutor is now " + ("ON" if cfg["web_aware"] else "OFF")
 
-    # quick preview if a query is provided
+    # Optional preview of citations for a sample query
     preview_query = (request.args.get("q") or "").strip()
     preview_list = _find_bank_citations(preview_query, 3) if preview_query else []
-    prev_html = ""
     if preview_query:
         if preview_list:
-            items = "".join([f'<li><a href="{html.escape(x["url"])}" target="_blank" rel="noopener">{html.escape(x["title"])}</a> <span class="text-muted small">({html.escape(x["domain"])})</span></li>' for x in preview_list])
-            prev_html = f"<div class='mt-3'><div class='fw-semibold'>Preview citations for: <em>{html.escape(preview_query)}</em></div><ul class='small'>{items}</ul></div>"
+            items = "".join([
+                f'<li><a href="{html.escape(x["url"])}" target="_blank" rel="noopener">'
+                f'{html.escape(x["title"])}</a> '
+                f'<span class="text-muted small">({html.escape(x["domain"])})</span></li>'
+                for x in preview_list
+            ])
+            preview_html = f"<ul class='small mb-0'>{items}</ul>"
         else:
-            prev_html = f"<div class='mt-3 text-muted small'>No matching sources found in your bank for: <em>{html.escape(preview_query)}</em></div>"
+            preview_html = "<div class='text-muted small'>No matching sources found in your bank.</div>"
+    else:
+        preview_html = ""
 
-    content = f"""
+    body = f"""
     <div class="container"><div class="row justify-content-center"><div class="col-lg-7">
       <div class="card">
-        <div class="card-header bg-secondary text-white"><h3 class="mb-0"><i class="bi bi-robot me-2"></i>Tutor Mode</h3></div>
+        <div class="card-header bg-secondary text-white">
+          <h3 class="mb-0"><i class="bi bi-robot me-2"></i>Tutor Mode</h3>
+        </div>
         <div class="card-body">
           {"<div class='alert alert-success'>"+html.escape(msg)+"</div>" if msg else ""}
-          <form method="POST" class="mb-3">
+          <form method="POST" class="mb-4">
             <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
             <div class="form-check form-switch">
               <input class="form-check-input" type="checkbox" id="webAware" name="web_aware" value="1" {"checked" if cfg.get("web_aware") else ""}>
-              <label class="form-check-label" for="webAware">Enable web-aware Tutor (uses citations from your content bank)</label>
+              <label class="form-check-label" for="webAware">
+                Enable web-aware Tutor (uses citations from your content bank only)
+              </label>
             </div>
             <button class="btn btn-primary mt-3" type="submit">Save</button>
             <a class="btn btn-outline-secondary mt-3 ms-2" href="/tutor">Go to Tutor</a>
@@ -3036,85 +3081,36 @@ def admin_tutor_mode():
           <form method="GET" class="row g-2 align-items-end">
             <div class="col-9">
               <label class="form-label fw-semibold">Preview citations for a sample question</label>
-              <input type="text" class="form-control" name="q" placeholder="e.g., physical access control for data centers" value="{html.escape(preview_query)}">
+              <input type="text" class="form-control" name="q" placeholder="e.g., perimeter security lighting"
+                     value="{html.escape(preview_query)}">
             </div>
             <div class="col-3">
               <button class="btn btn-outline-primary w-100">Preview</button>
             </div>
           </form>
-          {prev_html}
+          <div class="mt-3">{preview_html}</div>
         </div>
       </div>
     </div></div></div>
     """
-    return base_layout("Tutor Mode", content)
+    return base_layout("Tutor Mode", body)
 
-# ---- Diagnostic endpoint to verify citations path (no overlap with existing /tutor/ping) ----
+# ---- Diagnostic endpoint: verify citations pipeline quickly ----
 @app.get("/tutor/ping-web")
 @login_required
 def tutor_ping_web():
-    q = request.args.get("q") or "Explain incident command system basics for private sector security roles."
+    q = request.args.get("q") or "Explain risk assessment steps for a corporate facility."
     cites = _find_bank_citations(q, 3) if _tutor_web_enabled() else []
-    return jsonify({
-        "web_aware": _tutor_web_enabled(),
-        "query": q,
-        "citations": cites
-    })
-# =========================
-# SECTION 8/8: Startup, health, error pages, and __main__
-# =========================
+    return jsonify({"web_aware": _tutor_web_enabled(), "query": q, "citations": cites})
 
-def init_sample_data():
-    """
-    Ensure required folders/files exist so the app never 500s on first boot.
-    Non-destructive: only creates files if missing.
-    """
-    try:
-        # Base data dir
-        os.makedirs(DATA_DIR, exist_ok=True)
-        # Bank dir
-        bank_dir = os.path.join(DATA_DIR, "bank")
-        os.makedirs(bank_dir, exist_ok=True)
+# ---- CSRF validator shim (ensures admin forms validate cleanly) ----
+# If Flask-WTF is installed (HAS_CSRF=True), import validate_csrf; otherwise keep as None.
+try:
+    from flask_wtf.csrf import validate_csrf as validate_csrf  # noqa: F401
+except Exception:  # pragma: no cover
+    validate_csrf = None  # type: ignore
 
-        # Core JSON stores (create if missing)
-        for name, default in [
-            ("users.json", []),
-            ("questions.json", []),      # legacy optional
-            ("flashcards.json", []),     # legacy optional
-            ("attempts.json", []),
-            ("events.json", []),
-        ]:
-            path = os.path.join(DATA_DIR, name)
-            if not os.path.exists(path):
-                _save_json(name, default)
-
-        # Bank files (create empty arrays if missing)
-        if not os.path.exists(os.path.join(bank_dir, "cpp_flashcards_v1.json")):
-            _save_json("bank/cpp_flashcards_v1.json", [])
-        if not os.path.exists(os.path.join(bank_dir, "cpp_questions_v1.json")):
-            _save_json("bank/cpp_questions_v1.json", [])
-        if not os.path.exists(os.path.join(bank_dir, "content_index.json")):
-            _save_json("bank/content_index.json", {})
-
-        # Tutor settings (default OFF unless env overrides)
-        if not os.path.exists(os.path.join(DATA_DIR, "tutor_settings.json")):
-            _save_json("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"})
-
-    except Exception as e:
-        logger.warning("init_sample_data encountered an issue: %s", e)
-
-# ---- Health endpoint (idempotent: defined only if not already) ----
-if "healthz" not in app.view_functions:
-    @app.get("/healthz")
-    def healthz():
-        return {
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "version": APP_VERSION,
-            "web_aware_tutor": _tutor_web_enabled() if " _tutor_web_enabled" in globals() else False
-        }
-
-# ---- Friendly error pages (do not leak stack traces) ----
+# ---- Friendly error pages (no stack traces leaked) ----
 @app.errorhandler(403)
 def forbidden(e):
     content = """
@@ -3127,7 +3123,7 @@ def forbidden(e):
           <div class="card-body">
             <p class="text-muted mb-2">You don’t have permission to access that action right now.</p>
             <ul class="text-muted small">
-              <li>If you were submitting a form, please retry (your session may have refreshed).</li>
+              <li>If you submitted a form, please retry (your session may have refreshed).</li>
               <li>Make sure you’re logged in and, for admin pages, that you’ve entered the admin password.</li>
             </ul>
             <a class="btn btn-primary me-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
@@ -3178,7 +3174,18 @@ def server_error(e):
     """
     return base_layout("Server Error", content), 500
 
-# ---- App factory (for gunicorn) ----
+# ---- Health endpoint (define once; skip if already defined in Section 2) ----
+if "healthz" not in app.view_functions:
+    @app.get("/healthz")
+    def healthz():
+        return {
+            "status": "healthy",
+            "timestamp": datetime.utcnow().isoformat() + "Z",
+            "version": APP_VERSION,
+            "web_aware_tutor": bool(globals().get("_tutor_web_enabled", lambda: False)())
+        }
+
+# ---- App factory (for gunicorn: `app:app`) ----
 def create_app():
     init_sample_data()
     logger.info("CPP Test Prep v%s starting up", APP_VERSION)
@@ -3198,21 +3205,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
