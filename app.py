@@ -19,8 +19,9 @@ import sqlite3
 import stripe
 
 # Optional CSRF import
+# Optional CSRF import
 try:
-    from flask_wtf.csrf import CSRFProtect
+    from flask_wtf.csrf import CSRFProtect, validate_csrf
     HAS_CSRF = True
 except ImportError:
     HAS_CSRF = False
@@ -3024,5 +3025,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
