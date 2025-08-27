@@ -1822,6 +1822,7 @@ def mock_exam_page():
 # =========================
 
 # ---------- FLASHCARDS ----------
+# ---------- FLASHCARDS ----------
 def _normalize_flashcard(item):
     """
     Accepts shapes like:
@@ -1838,6 +1839,7 @@ def _normalize_flashcard(item):
         return None
     domain = (item.get("domain") or item.get("category") or "Unspecified").strip()
     sources = item.get("sources") or []
+    # keep 0-3 structured sources
     cleaned_sources = []
     for s in sources[:3]:
         t = (s.get("title") or "").strip()
@@ -1891,7 +1893,7 @@ def _filter_flashcards_domain(cards, domain_key: str | None):
 @app.route("/flashcards", methods=["GET", "POST"])
 @login_required
 def flashcards_page():
-    # Picker (count + domain)
+    # GET -> picker (domain buttons + count buttons)
     if request.method == "GET":
         csrf_val = csrf_token()
         domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
@@ -1937,12 +1939,9 @@ def flashcards_page():
         """
         return base_layout("Flashcards", content)
 
-    # POST -> start session client-side (no server state needed)
-    # CSRF: when Flask-WTF CSRFProtect is enabled, it validates automatically. Only check manually if disabled.
-    if not HAS_CSRF:
-        if request.form.get("csrf_token") != csrf_token():
-            abort(403)
-
+    # POST -> start a session client-side (no server state)
+    if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+        abort(403)
     try:
         count = int(request.form.get("count") or 20)
     except Exception:
@@ -2029,37 +2028,6 @@ def flashcards_page():
     """
     _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
     return base_layout("Flashcards", content)
-
-# ---------- USAGE (upgrade #1) ----------
-@app.get("/usage")
-@login_required
-def usage_dashboard():
-    user = _find_user(session.get("email",""))
-    usage = (user or {}).get("usage") or {}
-    month = datetime.utcnow().strftime("%Y-%m")
-    m = (usage.get("monthly") or {}).get(month, {})
-    rows = []
-    for k in ("tutor_msgs","questions","quizzes","flashcards"):
-        rows.append(f"<tr><td class='fw-semibold'>{html.escape(k)}</td><td class='text-end'>{int(m.get(k,0))}</td></tr>")
-    tbl = "".join(rows) or "<tr><td colspan='2' class='text-center text-muted'>No usage yet.</td></tr>"
-    content = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-md-7">
-      <div class="card">
-        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-speedometer me-2"></i>Usage Dashboard</h3></div>
-        <div class="card-body">
-          <div class="small text-muted mb-2">Month: {html.escape(month)}</div>
-          <div class="table-responsive">
-            <table class="table table-sm align-middle">
-              <thead><tr><th>Metric</th><th class="text-end">Count</th></tr></thead>
-              <tbody>{tbl}</tbody>
-            </table>
-          </div>
-          <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
-        </div>
-      </div>
-    </div></div></div>
-    """
-    return base_layout("Usage", content)
 
 # ---------- PROGRESS ----------
 @app.get("/progress")
@@ -3205,3 +3173,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
