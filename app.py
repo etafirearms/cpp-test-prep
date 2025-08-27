@@ -146,7 +146,7 @@ def add_security_headers(resp):
     csp = (
         "default-src 'self' https: data: blob:; "
         "img-src 'self' https: data:; "
-        "script-src 'self' https://cdn.jsdelivr.net https://js.stripe.com; "
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net https://js.stripe.com; "
         "style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
         "font-src 'self' https: data:; "
         "connect-src 'self' https://api.openai.com https://js.stripe.com https://api.stripe.com; "
@@ -3024,4 +3024,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
