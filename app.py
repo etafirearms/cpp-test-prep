@@ -3119,6 +3119,30 @@ if "healthz" not in app.view_functions:
         }
 
 # ---- Friendly error pages (do not leak stack traces) ----
+@app.errorhandler(403)
+def forbidden(e):
+    content = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-md-8">
+        <div class="card">
+          <div class="card-header bg-danger text-white">
+            <h3 class="mb-0"><i class="bi bi-slash-circle me-2"></i>Forbidden</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted mb-2">You don’t have permission to access that action right now.</p>
+            <ul class="text-muted small">
+              <li>If you were submitting a form, please retry (your session may have refreshed).</li>
+              <li>Make sure you’re logged in and, for admin pages, that you’ve entered the admin password.</li>
+            </ul>
+            <a class="btn btn-primary me-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+            <a class="btn btn-outline-secondary" href="/login"><i class="bi bi-box-arrow-in-right me-1"></i>Login</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Forbidden", content), 403
+
 @app.errorhandler(404)
 def not_found(e):
     content = """
@@ -3178,6 +3202,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
