@@ -2391,9 +2391,16 @@ def admin_login_page():
 
 @app.post("/admin/login")
 def admin_login_post():
+    # Robust CSRF validation: use validate_csrf if available; otherwise compare tokens
     if HAS_CSRF:
         try:
-            validate_csrf(request.form.get("csrf_token"))
+            token = request.form.get("csrf_token") or ""
+            if validate_csrf:
+                validate_csrf(token)
+            else:
+                # Fallback strict compare
+                if token != csrf_token():
+                    abort(403)
         except Exception:
             abort(403)
 
@@ -3171,6 +3178,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
