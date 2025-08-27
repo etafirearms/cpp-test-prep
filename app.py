@@ -620,6 +620,9 @@ def base_layout(title: str, body_html: str) -> str:
       }
       .card:hover { transform: translateY(-2px); box-shadow: 0 8px 24px rgba(0,0,0,0.12); }
       .btn { border-radius: 12px; font-weight: 600; letter-spacing: 0.025em; padding: 0.75rem 1.5rem; transition: all 0.2s ease; }
+            /* Domain buttons */
+      .domain-btn { border-radius: 999px; padding: 0.4rem 0.9rem; }
+      .domain-btn.active { outline: 3px solid rgba(0,0,0,0.1); box-shadow: 0 0 0 3px rgba(37,99,235,0.15) inset; }
       .btn-primary { background: linear-gradient(135deg, var(--primary-blue), var(--purple-accent)); border: none; box-shadow: 0 4px 12px rgba(37, 99, 235, 0.25); }
       .btn-primary:hover { transform: translateY(-1px); box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35); }
       .plan-monthly { background: linear-gradient(45deg, var(--primary-blue), var(--purple-accent)); color: white; }
@@ -3131,6 +3134,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
