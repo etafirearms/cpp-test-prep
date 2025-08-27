@@ -53,6 +53,7 @@ stripe.api_key            = os.environ.get('STRIPE_SECRET_KEY', '').strip()
 STRIPE_WEBHOOK_SECRET     = os.environ.get('STRIPE_WEBHOOK_SECRET', '').strip()
 STRIPE_MONTHLY_PRICE_ID   = os.environ.get('STRIPE_MONTHLY_PRICE_ID', '').strip()
 STRIPE_SIXMONTH_PRICE_ID  = os.environ.get('STRIPE_SIXMONTH_PRICE_ID', '').strip()
+STRIPE_PUBLISHABLE_KEY    = os.environ.get('STRIPE_PUBLISHABLE_KEY', '').strip()
 ADMIN_PASSWORD            = os.environ.get("ADMIN_PASSWORD", "").strip()
 
 APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
@@ -3023,3 +3024,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
