@@ -1,0 +1,37 @@
+{
+  "domains": [
+    "nist.gov",
+    "cisa.gov",
+    "fema.gov",
+    "training.fema.gov",
+    "osha.gov",
+    "gao.gov",
+    "popcenter.asu.edu",
+    "ncpc.org",
+    "fbi.gov",
+    "rand.org",
+    "hsdl.org",
+    "nfpa.org",
+    "iso.org"
+  ],
+  "notes": [
+    "NFPA/ISO: summaries/view-only info only. Do NOT copy paid full text.",
+    "Official public After Action Reports (AARs) are allowed."
+  ],
+  "blocked_domains": [
+    "wikipedia.org",
+    "asisonline.org",
+    "store.nfpa.org",
+    "webstore.ansi.org"
+  ],
+  "seed_urls": [
+    "https://www.cisa.gov/topics/physical-security",
+    "https://www.nist.gov/cyberframework",
+    "https://www.ready.gov/business",
+    "https://www.osha.gov/emergency-preparedness",
+    "https://www.popcenter.asu.edu/",
+    "https://www.rand.org/topics/homeland-security.html"
+  ],
+  "max_fetch": 3,
+  "per_page_chars": 4000
+}
