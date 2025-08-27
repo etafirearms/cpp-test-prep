@@ -1372,19 +1372,8 @@ def _record_attempt(user_id, mode, run, results):
 
 # ---------- Shared rendering ----------
 def _render_picker_page(title, route, counts, include_domain=True):
-    # Build domain dropdown (Random + known keys)
-    domain_opts = ['<option value="random">Random (all domains)</option>']
-    # Use keys from DOMAINS dict (Section 1) for explicit domain picking
-    for key, label in DOMAINS.items():
-        domain_opts.append(f'<option value="{html.escape(key)}">{html.escape(label)}</option>')
-    domain_select = f"""
-      <div class="mb-3">
-        <label class="form-label fw-semibold">Domain</label>
-        <select class="form-select" name="domain">
-          {"".join(domain_opts)}
-        </select>
-      </div>
-    """ if include_domain else ""
+    # Domain buttons
+    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain") if include_domain else ""
 
     count_buttons = []
     for c in counts:
@@ -1404,17 +1393,32 @@ def _render_picker_page(title, route, counts, include_domain=True):
           <div class="card-body">
             <form method="POST" class="mb-3">
               <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              {domain_select}
-              <div class="mb-2 fw-semibold">How many questions?</div>
+              {"<label class='form-label fw-semibold'>Domain</label>" if include_domain else ""}
+              {domain_buttons}
+              <div class="mt-3 mb-2 fw-semibold">How many questions?</div>
               <div class="d-flex flex-wrap gap-2">
                 {buttons_html}
               </div>
             </form>
-            <div class="text-muted small">Tip: You can change domain to focus on a single area, or keep it Random.</div>
+            <div class="text-muted small">Tip: Choose a domain to focus, or keep Random.</div>
           </div>
         </div>
       </div></div>
     </div>
+
+    <script>
+      (function(){{
+        var container = document.currentScript.closest('.card').querySelector('.card-body');
+        var hidden = container.querySelector('#domain_val');
+        container.querySelectorAll('.domain-btn').forEach(function(btn){{
+          btn.addEventListener('click', function(){{
+            container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+            btn.classList.add('active');
+            if (hidden) hidden.value = btn.getAttribute('data-value');
+          }});
+        }});
+      }})();
+    </script>
     """
     return base_layout(title, content)
 
@@ -3159,6 +3163,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
