@@ -288,17 +288,22 @@ def check_usage_limit(user, action_type):
     return True, ""
 
 def increment_usage(user_email, action_type, count=1):
-    user = _find_user(user_email)
-    if not user:
+    if not user_email:
         return
-    today = datetime.utcnow()
-    month_key = today.strftime('%Y-%m')
-    usage = user.setdefault('usage', {})
-    monthly = usage.setdefault('monthly', {})
-    month_usage = monthly.setdefault(month_key, {})
-    month_usage[action_type] = month_usage.get(action_type, 0) + count
-    usage['last_active'] = today.isoformat(timespec="seconds") + "Z"
-    _save_json("users.json", USERS)
+    users = _load_users()
+    el = user_email.strip().lower()
+    for i, u in enumerate(users):
+        if (u.get("email","").strip().lower() == el):
+            today = datetime.utcnow()
+            month_key = today.strftime('%Y-%m')
+            usage = u.setdefault('usage', {})
+            monthly = usage.setdefault('monthly', {})
+            month_usage = monthly.setdefault(month_key, {})
+            month_usage[action_type] = month_usage.get(action_type, 0) + count
+            usage['last_active'] = today.isoformat(timespec="seconds") + "Z"
+            users[i] = u
+            _save_users(users)
+            return
 
 # ----- Base Questions & Domains (starter content) -----
 BASE_QUESTIONS = [
@@ -3095,6 +3100,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
