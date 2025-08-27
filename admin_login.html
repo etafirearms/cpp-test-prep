@@ -1,25 +1,74 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="card border-0 shadow-sm mb-3">
-  <div class="card-header bg-light"><strong>Admin Login</strong></div>
-  <div class="card-body">
-    {% if error == "badpass" %}
-      <div class="alert alert-danger mb-2">Incorrect password.</div>
-    {% elif error == "nopass" %}
-      <div class="alert alert-warning mb-2">ADMIN_PASSWORD is not set on the server; dev-only guard is available via <code>?admin=1</code>.</div>
-    {% endif %}
-    <form method="post" action="{{ url_for('admin_login') }}" class="row g-2">
-      <div class="col-md-6">
-        <input class="form-control" type="password" name="password" placeholder="Enter admin password" required/>
-      </div>
-      <div class="col-md-6">
-        <button class="btn btn-primary">Log in</button>
-      </div>
-      {% if request.args.get('next') %}
-        <input type="hidden" name="next" value="{{ request.args.get('next') }}">
+<div class="container" style="max-width:720px">
+  <div class="card border-0 shadow-sm mb-3">
+    <div class="card-header bg-light d-flex align-items-center">
+      <strong class="me-2">Admin Login</strong>
+      <span class="text-muted small">Secure access for administrators</span>
+    </div>
+    <div class="card-body">
+
+      {# Optional error/status messages passed from the view #}
+      {% if error == "badpass" %}
+        <div class="alert alert-danger mb-3">
+          Incorrect password. Please try again.
+        </div>
+      {% elif error == "nopass" %}
+        <div class="alert alert-warning mb-3">
+          ADMIN_PASSWORD is not set on the server.
+          Please configure it in your Render environment and redeploy.
+        </div>
+      {% elif msg %}
+        <div class="alert alert-info mb-3">{{ msg }}</div>
       {% endif %}
-    </form>
-    <div class="text-muted small mt-2">Set the ADMIN_PASSWORD env var in Render → Environment.</div>
+
+      <form method="POST" action="/admin/login" class="row g-3">
+        <!-- IMPORTANT: CSRF token to prevent 403 -->
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+
+        {% if request.args.get('next') %}
+          <input type="hidden" name="next" value="{{ request.args.get('next') }}">
+        {% elif next %}
+          <input type="hidden" name="next" value="{{ next }}">
+        {% endif %}
+
+        <div class="col-12">
+          <label class="form-label fw-semibold" for="adminPassword">Admin Password</label>
+          <input
+            id="adminPassword"
+            class="form-control"
+            type="password"
+            name="password"
+            placeholder="Enter admin password"
+            autocomplete="current-password"
+            required
+          />
+          <div class="form-text">
+            Tip: This value must match your <code>ADMIN_PASSWORD</code> in Render → Environment.
+          </div>
+        </div>
+
+        <div class="col-12 d-grid d-sm-flex gap-2">
+          <button class="btn btn-primary" type="submit">
+            <i class="bi bi-box-arrow-in-right me-1"></i> Log in
+          </button>
+          <a class="btn btn-outline-secondary" href="/">
+            <i class="bi bi-house me-1"></i> Cancel
+          </a>
+        </div>
+      </form>
+
+      <hr class="my-4">
+
+      <div class="text-muted small">
+        Having trouble?
+        <ul class="mb-0">
+          <li>Make sure cookies aren’t blocked (needed to keep your admin session).</li>
+          <li>If you still see 403 on submit, view page source and confirm a hidden <code>csrf_token</code> field is present.</li>
+          <li>After changing <code>ADMIN_PASSWORD</code> in Render, redeploy your service.</li>
+        </ul>
+      </div>
+    </div>
   </div>
 </div>
 {% endblock %}
