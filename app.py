@@ -20,14 +20,14 @@ import sqlite3
 import stripe
 
 # CSRF imports (robust: provide safe fallbacks)
+# Optional CSRF import
 try:
     from flask_wtf.csrf import CSRFProtect, validate_csrf, generate_csrf
     HAS_CSRF = True
 except Exception:
     HAS_CSRF = False
     CSRFProtect = None
-    def validate_csrf(_token: str) -> None:
-        return None  # no-op fallback
+    validate_csrf = None
     def generate_csrf() -> str:
         return ""
 
@@ -3173,4 +3173,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
