@@ -1904,42 +1904,50 @@ def _filter_flashcards_domain(cards, domain_key: str | None):
 @login_required
 def flashcards_page():
     # Picker (count + domain)
-    if request.method == "GET":
-        # build domain select
-        domain_opts = ['<option value="random">Random (all domains)</option>']
-        for key, label in DOMAINS.items():
-            domain_opts.append(f'<option value="{html.escape(key)}">{html.escape(label)}</option>')
-        domain_select = "".join(domain_opts)
+   if request.method == "GET":
+    csrf_val = csrf_token()
+    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
 
-        csrf_val = csrf_token()
-        content = f"""
-        <div class="container">
-          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-            <div class="card">
-              <div class="card-header bg-success text-white">
-                <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+        <div class="card">
+          <div class="card-header bg-success text-white">
+            <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
+          </div>
+          <div class="card-body">
+            <form method="POST" class="mb-3">
+              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+              <label class="form-label fw-semibold">Domain</label>
+              {domain_buttons}
+              <div class="mt-3 mb-2 fw-semibold">How many cards?</div>
+              <div class="d-flex flex-wrap gap-2">
+                <button class="btn btn-outline-success" name="count" value="10">10</button>
+                <button class="btn btn-outline-success" name="count" value="20">20</button>
+                <button class="btn btn-outline-success" name="count" value="30">30</button>
               </div>
-              <div class="card-body">
-                <form method="POST" class="mb-3">
-                  <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-                  <div class="mb-3">
-                    <label class="form-label fw-semibold">Domain</label>
-                    <select class="form-select" name="domain">{domain_select}</select>
-                  </div>
-                  <div class="mb-2 fw-semibold">How many cards?</div>
-                  <div class="d-flex flex-wrap gap-2">
-                    <button class="btn btn-outline-success" name="count" value="10">10</button>
-                    <button class="btn btn-outline-success" name="count" value="20">20</button>
-                    <button class="btn btn-outline-success" name="count" value="30">30</button>
-                  </div>
-                </form>
-                <div class="text-muted small">Tip: Choose a domain to focus, or Random to mix all.</div>
-              </div>
-            </div>
-          </div></div>
+            </form>
+            <div class="text-muted small">Tip: Choose a domain to focus, or Random to mix all.</div>
+          </div>
         </div>
-        """
-        return base_layout("Flashcards", content)
+      </div></div>
+    </div>
+
+    <script>
+      (function(){{
+        var container = document.currentScript.closest('.card').querySelector('.card-body');
+        var hidden = container.querySelector('#domain_val');
+        container.querySelectorAll('.domain-btn').forEach(function(btn){{
+          btn.addEventListener('click', function(){{
+            container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+            btn.classList.add('active');
+            if (hidden) hidden.value = btn.getAttribute('data-value');
+          }});
+        }});
+      }})();
+    </script>
+    """
+    return base_layout("Flashcards", content)
 
     # POST -> start session client-side (no server state needed)
     if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
@@ -3163,6 +3171,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
