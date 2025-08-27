@@ -207,26 +207,37 @@ def validate_email(email):
     return re.match(pattern, email) is not None
 
 # ----- Users (file-backed) -----
+# ----- Users (file-backed) -----
+def _load_users():
+    # Always read fresh from disk to avoid multi-process staleness
+    return _load_json("users.json", [])
+
+def _save_users(users):
+    _save_json("users.json", users)
+
 def _find_user(email: str):
     if not email:
         return None
     el = email.strip().lower()
-    for u in USERS:
+    users = _load_users()
+    for u in users:
         if (u.get("email","").strip().lower() == el):
             return u
     return None
 
 def _find_user_by_id(user_id: str):
-    for u in USERS:
+    users = _load_users()
+    for u in users:
         if u.get("id") == user_id:
             return u
     return None
 
 def _update_user(user_id: str, updates: Dict[str, Any]) -> bool:
-    for i, u in enumerate(USERS):
+    users = _load_users()
+    for i, u in enumerate(users):
         if u.get("id") == user_id:
-            USERS[i].update(updates)
-            _save_json("users.json", USERS)
+            users[i] = {**u, **(updates or {})}
+            _save_users(users)
             return True
     return False
 
@@ -3084,6 +3095,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
