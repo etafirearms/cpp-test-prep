@@ -2315,6 +2315,61 @@ def admin_login_post():
         session["admin_ok"] = True
         return redirect(nxt)
     return redirect(url_for("admin_login_page", next=nxt))
+    
+# --- Admin: Reset a user's password (admin-only, minimal UI) ---
+@app.route("/admin/reset-password", methods=["GET","POST"])
+@login_required
+def admin_reset_password():
+    if not is_admin():
+        return redirect(url_for("admin_login_page", next=request.path))
+
+    msg = ""
+    if request.method == "POST":
+        if HAS_CSRF:
+            try:
+                validate_csrf(request.form.get("csrf_token"))
+            except Exception:
+                abort(403)
+        email = (request.form.get("email") or "").strip().lower()
+        new_pw = request.form.get("password") or ""
+        ok, err = validate_password(new_pw)
+        if not email or not ok:
+            msg = err or "Please provide a valid email and a password with at least 8 characters."
+        else:
+            u = _find_user(email)
+            if not u:
+                msg = "No user found with that email."
+            else:
+                u["password_hash"] = generate_password_hash(new_pw)
+                _save_json("users.json", USERS)
+                msg = "Password updated successfully."
+
+    csrf_val = csrf_token()
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-md-6">
+      <div class="card">
+        <div class="card-header bg-secondary text-white"><h3 class="mb-0"><i class="bi bi-key me-2"></i>Admin: Reset User Password</h3></div>
+        <div class="card-body">
+          {"<div class='alert alert-info'>" + html.escape(msg) + "</div>" if msg else ""}
+          <form method="POST">
+            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <div class="mb-3">
+              <label class="form-label">User Email</label>
+              <input type="email" class="form-control" name="email" placeholder="user@example.com" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">New Password</label>
+              <input type="password" class="form-control" name="password" minlength="8" required>
+            </div>
+            <button class="btn btn-primary" type="submit">Update Password</button>
+            <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+          </form>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Admin Reset Password", body)
+   
 # =========================
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
@@ -3028,6 +3083,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
