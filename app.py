@@ -368,15 +368,43 @@ BASE_QUESTIONS = [
     },
 ]
 
-DOMAINS = {
-    "security-principles": "Security Principles & Practices",
-    "business-principles": "Business Principles & Practices",
-    "investigations": "Investigations",
-    "personnel-security": "Personnel Security",
-    "physical-security": "Physical Security",
-    "information-security": "Information Security",
-    "crisis-management": "Crisis Management",
+# Simple color tags for domain buttons
+DOMAIN_STYLES = {
+    "security-principles":  "primary",
+    "business-principles":  "secondary",
+    "investigations":       "info",
+    "personnel-security":   "success",
+    "physical-security":    "warning",
+    "information-security": "dark",
+    "crisis-management":    "danger",
 }
+
+def domain_buttons_html(selected_key: str = "random", field_name: str = "domain") -> str:
+    """
+    Returns a block of colored buttons (including 'Random') + a hidden input.
+    Clicking a button sets the hidden input and toggles the active style.
+    """
+    def _btn(key, label, color):
+        active = " active" if key == (selected_key or "random") else ""
+        return (
+            f'<button type="button" class="btn domain-btn btn-{color}{active}" '
+            f' data-value="{html.escape(key)}">{html.escape(label)}</button>'
+        )
+
+    parts = []
+    # Random button
+    parts.append(_btn("random", "Random (all domains)", "outline-secondary"))
+
+    # One button per domain
+    for key, label in DOMAINS.items():
+        color = DOMAIN_STYLES.get(key, "outline-primary")
+        parts.append(_btn(key, label, color))
+
+    hidden = (
+        f'<input type="hidden" name="{html.escape(field_name)}" '
+        f'id="{html.escape(field_name)}_val" value="{html.escape(selected_key or "random")}">'
+    )
+    return f'<div class="d-flex flex-wrap gap-2">{ "".join(parts) }</div>{hidden}'
 
 # ----- Question normalization/merge for legacy + base -----
 def _normalize_question_legacy(q: dict):
@@ -3103,6 +3131,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
