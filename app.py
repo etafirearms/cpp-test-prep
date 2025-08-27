@@ -2304,11 +2304,12 @@ def admin_login_page():
 
 @app.post("/admin/login")
 def admin_login_post():
-       if HAS_CSRF:
+    if HAS_CSRF:
         try:
             validate_csrf(request.form.get("csrf_token"))
         except Exception:
             abort(403)
+
     nxt = request.form.get("next") or "/"
     pw = (request.form.get("pw") or "").strip()
     if ADMIN_PASSWORD and pw == ADMIN_PASSWORD:
@@ -3083,6 +3084,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
