@@ -781,8 +781,8 @@ def signup_page():
               <div class="form-text">Choose a strong password with at least 8 characters</div>
             </div>
             <div class="mb-3">
-              <label class="form-label fw-semibold">Coupon Code (optional)</label>
-              <input type="text" class="form-control" name="coupon" placeholder="e.g., betatester2025 or cppclass2025">
+              <label class="form-label fw-semibold">Discount Code (optional)</label>
+              <input type="text" class="form-control" name="discount_code" placeholder="betatester2025 or cppclass2025">
               <div class="form-text">If you have a promo code, enter it here.</div>
             </div>
             <button type="submit" class="btn btn-success btn-lg w-100">
@@ -794,14 +794,14 @@ def signup_page():
     </div>
     <script>
       var selectedPlanType = 'monthly';
-      function selectPlan(plan) {{
+      function selectPlan(plan) {
         selectedPlanType = plan;
         var el = document.getElementById('selectedPlan'); if (el) el.value = plan;
         var cards = document.querySelectorAll('.card.h-100');
-        cards.forEach(function(c){{ c.style.transform='none'; c.classList.remove('shadow-lg'); }});
+        cards.forEach(function(c){ c.style.transform='none'; c.classList.remove('shadow-lg'); });
         var btn = document.querySelector('[onclick="selectPlan(\\''+plan+'\\')"]');
-        if (btn) {{ var card = btn.closest('.card'); if (card) {{ card.classList.add('shadow-lg'); card.style.transform='translateY(-6px)'; }} }}
-      }}
+        if (btn) { var card = btn.closest('.card'); if (card) { card.classList.add('shadow-lg'); card.style.transform='translateY(-6px)'; } }
+      }
       selectPlan('monthly');
     </script>
     """
@@ -842,10 +842,10 @@ def signup_post():
 
     discount_code = (request.form.get('discount_code') or "").strip()
     checkout_url = create_stripe_checkout_session(user_email=email, plan=plan, discount_code=discount_code)
-    if 'create_stripe_checkout_session' in globals() else None
     if checkout_url:
         return redirect(checkout_url)
-    return redirect(url_for('billing_checkout', plan=plan))
+    # fallback: go through checkout route (preserves code via query)
+    return redirect(url_for('billing_checkout', plan=plan, discount_code=discount_code))
 
 @app.post("/logout")
 def logout():
@@ -3266,6 +3266,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
