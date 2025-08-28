@@ -2154,8 +2154,29 @@ def usage_dashboard():
 
 
 # ---------- BILLING (Stripe) ----------
-def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
+def create_stripe_checkout_session(user_email: str, plan: str = "monthly", discount_code: str | None = None):
+    """
+    Creates a Stripe Checkout Session.
+    - plan: "monthly" (subscription) or "sixmonth" (one-time)
+    - discount_code: human-readable promotion code like "betatester2025" or "cppclass2025"
+      (must exist in Stripe as an active Promotion Code that points to the right Coupon)
+    """
     try:
+        promotions = []
+        code = (discount_code or "").strip()
+        if code:
+            try:
+                # Only accept the two whitelisted codes you provided
+                if code.lower() in {"betatester2025", "cppclass2025"}:
+                    # Look up the active Promotion Code in Stripe by human-readable code
+                    promo_list = stripe.PromotionCode.list(code=code, active=True, limit=1)
+                    promo_id = (promo_list.data[0].id if getattr(promo_list, "data", []) else None)
+                    if promo_id:
+                        promotions = [{"promotion_code": promo_id}]
+                # else: ignore unknown codes silently
+            except Exception as e:
+                logger.warning("Promotion code lookup failed for %s: %s", code, e)
+
         if plan == "monthly":
             if not STRIPE_MONTHLY_PRICE_ID:
                 logger.error("Monthly price ID not configured")
@@ -2167,13 +2188,31 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
                 customer_email=user_email,
                 success_url=request.url_root.rstrip('/') + "/billing/success?session_id={CHECKOUT_SESSION_ID}&plan=monthly",
                 cancel_url=request.url_root.rstrip('/') + "/billing",
-                metadata={"user_email": user_email, "plan": "monthly"},
+                metadata={"user_email": user_email, "plan": "monthly", "entered_code": code or ""},
+                discounts=(promotions or None),
             )
             return sess.url
+
         elif plan == "sixmonth":
             if not STRIPE_SIXMONTH_PRICE_ID:
                 logger.error("Six-month price ID not configured")
                 return None
+            sess = stripe.checkout.Session.create(
+                payment_method_types=["card"],
+                mode="payment",
+                line_items=[{"price": STRIPE_SIXMONTH_PRICE_ID, "quantity": 1}],
+                customer_email=user_email,
+                success_url=request.url_root.rstrip('/') + "/billing/success?session_id={CHECKOUT_SESSION_ID}&plan=sixmonth",
+                cancel_url=request.url_root.rstrip('/') + "/billing",
+                metadata={"user_email": user_email, "plan": "sixmonth", "duration_days": 180, "entered_code": code or ""},
+                discounts=(promotions or None),
+            )
+            return sess.url
+
+        return None
+    except Exception as e:
+        logger.error("Stripe session creation failed: %s", e)
+        return None
             sess = stripe.checkout.Session.create(
                 payment_method_types=["card"],
                 mode="payment",
@@ -3202,3 +3241,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
