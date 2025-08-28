@@ -840,7 +840,9 @@ def signup_post():
         session.clear(); session.permanent = True
     session['user_id'] = user['id']; session['email'] = user['email']; session['name'] = user['name']
 
-    checkout_url = create_stripe_checkout_session(user_email=email, plan=plan) if 'create_stripe_checkout_session' in globals() else None
+    discount_code = (request.form.get('discount_code') or "").strip()
+    checkout_url = create_stripe_checkout_session(user_email=email, plan=plan, discount_code=discount_code)
+    if 'create_stripe_checkout_session' in globals() else None
     if checkout_url:
         return redirect(checkout_url)
     return redirect(url_for('billing_checkout', plan=plan))
@@ -3264,6 +3266,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
