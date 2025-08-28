@@ -2294,7 +2294,12 @@ def billing_checkout():
     user_email = session.get("email","")
     if not user_email:
         return redirect(url_for("login_page"))
-    url = create_stripe_checkout_session(user_email, plan=plan)
+
+    # read promo from query OR fall back to stored value
+    user = _find_user(user_email)
+    discount_code = (request.args.get("code") or (user or {}).get("discount_code") or "").strip()
+
+    url = create_stripe_checkout_session(user_email, plan=plan, discount_code=discount_code)
     if url:
         return redirect(url)
     return redirect(url_for("billing_page"))
@@ -3241,4 +3246,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
