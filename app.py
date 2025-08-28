@@ -780,6 +780,11 @@ def signup_page():
               <input type="password" class="form-control" name="password" required minlength="8" placeholder="At least 8 characters">
               <div class="form-text">Choose a strong password with at least 8 characters</div>
             </div>
+            <div class="mb-3">
+              <label class="form-label fw-semibold">Coupon Code (optional)</label>
+              <input type="text" class="form-control" name="coupon" placeholder="e.g., betatester2025 or cppclass2025">
+              <div class="form-text">If you have a promo code, enter it here.</div>
+            </div>
             <button type="submit" class="btn btn-success btn-lg w-100">
               <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Start Learning
             </button>
@@ -3246,5 +3251,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
