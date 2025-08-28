@@ -12,7 +12,6 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 from datetime import datetime, timedelta
-from contextlib import contextmanager
 from typing import Dict, Any
 
 import os, json, random, requests, html, uuid, logging, time, hashlib, re
@@ -20,7 +19,6 @@ import sqlite3
 import stripe
 
 # CSRF imports (robust: provide safe fallbacks)
-# Optional CSRF import
 try:
     from flask_wtf.csrf import CSRFProtect, validate_csrf, generate_csrf
     HAS_CSRF = True
@@ -49,6 +47,8 @@ app.secret_key = os.environ.get("SECRET_KEY") or os.urandom(24)
 
 if HAS_CSRF and CSRFProtect:
     csrf = CSRFProtect(app)
+else:
+    csrf = None
 
 # ----- Environment / Providers -----
 OPENAI_API_KEY    = os.environ.get("OPENAI_API_KEY", "").strip()
@@ -200,7 +200,6 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         if 'user_id' not in session:
-            # upgrade: remember destination safely
             nxt = request.path if request.path.startswith("/") and not request.path.startswith("//") else "/"
             return redirect(url_for('login_page', next=nxt))
         return f(*args, **kwargs)
@@ -218,7 +217,6 @@ def _is_safe_next(n: str | None) -> bool:
 
 # ----- Users (file-backed) -----
 def _load_users():
-    # Always read fresh from disk to avoid multi-process staleness
     return _load_json("users.json", [])
 
 def _save_users(users):
@@ -267,7 +265,6 @@ def check_usage_limit(user, action_type):
         try:
             expires_dt = datetime.fromisoformat(expires_at.replace('Z', '+00:00'))
             if expires_dt.replace(tzinfo=None) < datetime.utcnow():
-                # mark inactive in-memory; persistence handled elsewhere
                 user['subscription'] = 'inactive'
                 user.pop('subscription_expires_at', None)
                 subscription = 'inactive'
@@ -374,7 +371,7 @@ BASE_QUESTIONS = [
     },
 ]
 
-# --- FIX: define labels for domain buttons (was missing, caused 500s) ---
+# --- FIX: define labels for domain buttons (prevents 500s) ---
 DOMAINS = {
     "security-principles":  "Security Principles",
     "business-principles":  "Business Principles",
@@ -409,10 +406,8 @@ def domain_buttons_html(selected_key: str = "random", field_name: str = "domain"
         )
 
     parts = []
-    # Random button
     parts.append(_btn("random", "Random (all domains)", "outline-secondary"))
 
-    # One button per domain
     for key, label in DOMAINS.items():
         color = DOMAIN_STYLES.get(key, "outline-primary")
         parts.append(_btn(key, label, color))
@@ -421,7 +416,7 @@ def domain_buttons_html(selected_key: str = "random", field_name: str = "domain"
         f'<input type="hidden" name="{html.escape(field_name)}" '
         f'id="{html.escape(field_name)}_val" value="{html.escape(selected_key or "random")}">'
     )
-    return f'<div class="d-flex flex-wrap gap-2">{ "".join(parts) }</div>{hidden}'
+    return f'<div class="d-flex flex-wrap gap-2">{"".join(parts)}</div>{hidden}'
 
 # ----- Question normalization/merge for legacy + base -----
 def _normalize_question_legacy(q: dict):
@@ -481,7 +476,6 @@ def _percent(num, den):
 
 def _user_id():
     return (session.get("user_id") or session.get("email") or "unknown")
-
 # =========================
 # SECTION 2/8: Layout, CSRF, Health, Auth (Login/Signup/Logout)
 # =========================
@@ -852,7 +846,6 @@ def logout():
         abort(403)
     session.clear()
     return redirect(url_for('login_page'))
-
 # =========================
 # SECTION 3/8: Home, Study Alias, Tutor (AI), Minimal Analytics
 # =========================
@@ -1001,7 +994,7 @@ def _track_page_views():
     except Exception:
         pass
 
-# ---------- Tutor (AI) ----------
+# ---------- Tutor (AI): baseline implementation (extended in Section 7) ----------
 def _call_tutor_agent(user_query, meta=None):
     """
     Baseline agent caller. This function is intentionally simple here and
@@ -1168,7 +1161,6 @@ def tutor_page():
 def tutor_ping():
     ok, answer, meta = _call_tutor_agent("Reply 'pong' only.", meta={"ping": True})
     return jsonify({"ok": bool(ok), "answer_preview": (answer or "")[:200], "meta": meta}), (200 if ok else 502)
-
 # =========================
 # SECTION 4/8: Quiz & Mock Exam (domain & count pickers, safe handling)
 # =========================
@@ -1816,19 +1808,17 @@ def mock_exam_page():
 
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
-
 # =========================
 # SECTION 5/8: Flashcards, Progress, Billing/Stripe (+ debug)
 # =========================
 
-# ---------- FLASHCARDS ----------
 # ---------- FLASHCARDS ----------
 def _normalize_flashcard(item):
     """
     Accepts shapes like:
       {"front": "...", "back":"...", "domain":"...", "sources":[{"title": "...", "url":"..."}]}
     or {"q":"...", "a":"..."} etc.
-    Returns:
+    Returns normalized:
       {"id": "...", "front":"...", "back":"...", "domain":"...", "sources":[...]}
     """
     if not item:
@@ -1839,7 +1829,6 @@ def _normalize_flashcard(item):
         return None
     domain = (item.get("domain") or item.get("category") or "Unspecified").strip()
     sources = item.get("sources") or []
-    # keep 0-3 structured sources
     cleaned_sources = []
     for s in sources[:3]:
         t = (s.get("title") or "").strip()
@@ -1848,40 +1837,30 @@ def _normalize_flashcard(item):
             cleaned_sources.append({"title": t, "url": u})
     return {
         "id": item.get("id") or str(uuid.uuid4()),
-        "front": front,
-        "back": back,
-        "domain": domain,
+        "front": front, "back": back, "domain": domain,
         "sources": cleaned_sources
     }
 
 def _all_flashcards():
     """
     Merge legacy FLASHCARDS + optional bank file data/bank/cpp_flashcards_v1.json
-    into normalized flashcards.
+    into normalized flashcards; de-dup by (front, back, domain).
     """
-    out = []
-    seen = set()
-    # 1) legacy top-level
+    out, seen = [], set()
     for fc in (FLASHCARDS or []):
         n = _normalize_flashcard(fc)
-        if not n:
-            continue
+        if not n: continue
         key = (n["front"], n["back"], n["domain"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(n)
-    # 2) bank file (if present)
+        if key in seen: continue
+        seen.add(key); out.append(n)
+
     bank = _load_json("bank/cpp_flashcards_v1.json", [])
     for fc in (bank or []):
         n = _normalize_flashcard(fc)
-        if not n:
-            continue
+        if not n: continue
         key = (n["front"], n["back"], n["domain"])
-        if key in seen:
-            continue
-        seen.add(key)
-        out.append(n)
+        if key in seen: continue
+        seen.add(key); out.append(n)
     return out
 
 def _filter_flashcards_domain(cards, domain_key: str | None):
@@ -1939,9 +1918,10 @@ def flashcards_page():
         """
         return base_layout("Flashcards", content)
 
-    # POST -> start a session client-side (no server state)
-    if HAS_CSRF and request.form.get("csrf_token") != csrf_token():
+    # POST -> render a client-side session (no server state)
+    if not _csrf_ok():
         abort(403)
+
     try:
         count = int(request.form.get("count") or 20)
     except Exception:
@@ -2029,6 +2009,7 @@ def flashcards_page():
     _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
     return base_layout("Flashcards", content)
 
+
 # ---------- PROGRESS ----------
 @app.get("/progress")
 @login_required
@@ -2037,17 +2018,17 @@ def progress_page():
     attempts = [a for a in _load_json("attempts.json", []) if a.get("user_id") == uid]
     attempts.sort(key=lambda x: x.get("ts",""), reverse=True)
 
-    total_q = sum(a.get("count", 0) for a in attempts)
+    total_q  = sum(a.get("count", 0) for a in attempts)
     total_ok = sum(a.get("correct", 0) for a in attempts)
     best = max([a.get("score_pct", 0.0) for a in attempts], default=0.0)
-    avg = round(sum([a.get("score_pct", 0.0) for a in attempts]) / len(attempts), 1) if attempts else 0.0
+    avg  = round(sum([a.get("score_pct", 0.0) for a in attempts]) / len(attempts), 1) if attempts else 0.0
 
     dom = {}
     for a in attempts:
         for dname, stats in (a.get("domains") or {}).items():
             dd = dom.setdefault(dname, {"correct": 0, "total": 0})
             dd["correct"] += int(stats.get("correct", 0))
-            dd["total"] += int(stats.get("total", 0))
+            dd["total"]   += int(stats.get("total", 0))
 
     def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
 
@@ -2128,6 +2109,49 @@ def progress_page():
     </div>
     """
     return base_layout("Progress", content)
+
+
+# ---------- USAGE DASHBOARD (nav link helper) ----------
+@app.get("/usage")
+@login_required
+def usage_dashboard():
+    email = session.get("email","")
+    u = _find_user(email) or {}
+    usage = (u.get("usage") or {}).get("monthly", {})
+    rows = []
+    for month, items in sorted(usage.items()):
+        quizzes = int(items.get("quizzes", 0))
+        questions = int(items.get("questions", 0))
+        tutor = int(items.get("tutor_msgs", 0))
+        flashcards = int(items.get("flashcards", 0))
+        rows.append(f"""
+          <tr>
+            <td>{html.escape(month)}</td>
+            <td class="text-end">{quizzes}</td>
+            <td class="text-end">{questions}</td>
+            <td class="text-end">{tutor}</td>
+            <td class="text-end">{flashcards}</td>
+          </tr>
+        """)
+    tbl = "".join(rows) or "<tr><td colspan='5' class='text-center text-muted'>No usage yet.</td></tr>"
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-lg-8">
+      <div class="card">
+        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-speedometer2 me-2"></i>Usage Dashboard</h3></div>
+        <div class="card-body">
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead><tr><th>Month</th><th class="text-end">Quizzes</th><th class="text-end">Questions</th><th class="text-end">Tutor Msgs</th><th class="text-end">Flashcards</th></tr></thead>
+              <tbody>{tbl}</tbody>
+            </table>
+          </div>
+          <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Usage", body)
+
 
 # ---------- BILLING (Stripe) ----------
 def create_stripe_checkout_session(user_email: str, plan: str = "monthly"):
@@ -2309,6 +2333,7 @@ def stripe_webhook():
 
     return "", 200
 
+
 # ---------- BILLING DEBUG (admin-only; no secrets) ----------
 @app.get("/billing/debug")
 @login_required
@@ -2346,6 +2371,7 @@ def billing_debug():
     """
     return base_layout("Billing Debug", content)
 
+
 # ---------- ADMIN LOGIN & PASSWORD RESET ----------
 @app.get("/admin/login")
 def admin_login_page():
@@ -2372,7 +2398,8 @@ def admin_login_page():
 
 @app.post("/admin/login")
 def admin_login_post():
-    # CSRF: let CSRFProtect enforce when enabled; manual check only if disabled
+    # If CSRFProtect is active, it will enforce validity.
+    # Fallback manual check when CSRF is not enabled.
     if not HAS_CSRF:
         if request.form.get("csrf_token") != csrf_token():
             abort(403)
@@ -2384,7 +2411,6 @@ def admin_login_post():
         return redirect(nxt)
     return redirect(url_for("admin_login_page", next=nxt))
 
-# Admin: Reset a user's password (admin-only, minimal UI)
 @app.route("/admin/reset-password", methods=["GET","POST"])
 @login_required
 def admin_reset_password():
@@ -2406,8 +2432,8 @@ def admin_reset_password():
             if not u:
                 msg = "No user found with that email."
             else:
-                u["password_hash"] = generate_password_hash(new_pw)
-                _save_json("users.json", USERS)
+                # FIX: update through persistent helpers (do not write stale USERS global)
+                _update_user(u["id"], {"password_hash": generate_password_hash(new_pw)})
                 msg = "Password updated successfully."
 
     csrf_val = csrf_token()
@@ -2435,7 +2461,6 @@ def admin_reset_password():
     </div></div></div>
     """
     return base_layout("Admin Reset Password", body)
-
 # =========================
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
@@ -2462,6 +2487,7 @@ ALLOWED_SOURCE_DOMAINS = {
 from urllib.parse import urlparse
 
 def _url_domain_ok(url: str) -> bool:
+    """Return True if URL domain is in the allowed whitelist."""
     try:
         d = urlparse((url or "").strip()).netloc.lower()
         if not d:
@@ -2489,6 +2515,7 @@ def _validate_sources(sources: list) -> tuple[bool, str]:
 
 # -------- Hash & de-dup index --------
 def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> str:
+    # Canonical string for deterministic hashing
     blob = json.dumps({
         "k": "fc",
         "front": front.strip().lower(),
@@ -2500,6 +2527,7 @@ def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> s
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 def _item_hash_question(question: str, options: dict, correct: str, domain: str, sources: list) -> str:
+    # Keep options in A..D order for stable hashing
     ordered = {k: str(options.get(k,"")).strip().lower() for k in ["A","B","C","D"]}
     blob = json.dumps({
         "k": "q",
@@ -2548,7 +2576,8 @@ def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
     ok, msg = _validate_sources(sources)
     if not ok:
         return None, msg
-    return {"front": front, "back": back, "domain": domain, "sources": sources}, ""
+    out = {"front": front, "back": back, "domain": domain, "sources": sources}
+    return out, ""
 
 def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
     """
@@ -2566,24 +2595,24 @@ def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
     question = (q_in.get("question") or q_in.get("q") or q_in.get("stem") or "").strip()
     domain   = (q_in.get("domain") or q_in.get("category") or "Unspecified").strip()
     sources  = q_in.get("sources") or []
-
-    # Options may be dict or list
+    # Options can come as dict or list
     raw_opts = q_in.get("options") or q_in.get("choices") or q_in.get("answers")
     opts = {}
     if isinstance(raw_opts, dict):
         for L in ["A","B","C","D"]:
             v = raw_opts.get(L) or raw_opts.get(L.lower())
-            if not v:
-                return None, f"Missing option {L}"
+            if not v: return None, f"Missing option {L}"
             opts[L] = str(v)
     elif isinstance(raw_opts, list) and len(raw_opts) >= 4:
         letters = ["A","B","C","D"]
         for i, L in enumerate(letters):
             v = raw_opts[i]
-            opts[L] = str(v.get("text") if isinstance(v, dict) else v)
+            if isinstance(v, dict):
+                opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "")
+            else:
+                opts[L] = str(v)
     else:
         return None, "Options must provide 4 choices."
-
     # Correct can be letter or 1-based index
     correct = q_in.get("correct") or q_in.get("answer") or q_in.get("correct_key")
     if isinstance(correct, str) and correct.strip().upper() in ("A","B","C","D"):
@@ -2594,31 +2623,27 @@ def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
             correct = ["A","B","C","D"][idx - 1]
         except Exception:
             return None, "Correct must be A/B/C/D or 1..4."
-
+    # Sources validate
     ok, msg = _validate_sources(sources)
     if not ok:
         return None, msg
     if not question:
         return None, "Question text required."
-
-    return {"question": question, "options": opts, "correct": correct,
-            "domain": domain, "sources": sources}, ""
+    return {"question": question, "options": opts, "correct": correct, "domain": domain, "sources": sources}, ""
 
 # -------- Ingestion (admin-only JSON API) --------
-# NOTE: This endpoint expects application/json and is admin-gated.
-# If CSRF is enabled, exempt this JSON endpoint to avoid 403 on POST without form token.
-if HAS_CSRF:
-    @csrf.exempt
+# NOTE: This endpoint expects application/json and is admin-gated. If CSRF is enabled,
+# we exempt AFTER definition to avoid decorator indentation errors and 403s for JSON posts.
 @app.post("/api/dev/ingest")
 @login_required
 def api_dev_ingest():
     if not is_admin():
         return jsonify({"ok": False, "error": "admin-required"}), 403
 
-    # Accept JSON body; if missing, return helpful error
     if not request.is_json:
         return jsonify({"ok": False, "error": "application/json required",
-                        "hint": "In Postman: choose POST + Body: raw + JSON"}), 415
+                        "hint": "Use Content-Type: application/json"}), 415
+
     data = request.get_json(silent=True) or {}
     in_flash = data.get("flashcards") or []
     in_questions = data.get("questions") or []
@@ -2693,10 +2718,17 @@ def api_dev_ingest():
             "questions_rejected": len(rejected_q),
         },
         "rejected": {
-            "flashcards": rejected_fc[:50],
+            "flashcards": rejected_fc[:50],  # cap to keep payload light
             "questions": rejected_q[:50]
         }
     })
+
+# If CSRF is enabled, exempt the JSON ingestion endpoint (post-definition to avoid syntax issues).
+if HAS_CSRF:
+    try:
+        api_dev_ingest = csrf.exempt(api_dev_ingest)  # type: ignore
+    except Exception:
+        logger.warning("Could not CSRF-exempt /api/dev/ingest; continuing without exemption.")
 
 # -------- Acceptance checker (admin-only UI) --------
 @app.get("/admin/check-bank")
@@ -2736,6 +2768,7 @@ def admin_check_bank():
         correct = (q.get("correct","")).strip().upper()
         if not question:
             q_errors.append(f"Q[{i}]: empty question")
+        # options must be A..D and all non-empty
         for L in ["A","B","C","D"]:
             if not (isinstance(opts, dict) and opts.get(L)):
                 q_errors.append(f"Q[{i}]: missing option {L}")
@@ -2749,7 +2782,7 @@ def admin_check_bank():
             q_errors.append(f"Q[{i}]: duplicate hash")
         seen_q.add(h)
 
-    # Domain counts (simple) to help balancing
+    # Domain counts to help balancing
     def _count_by_domain(items, key="domain"):
         d = {}
         for it in items:
@@ -2819,14 +2852,12 @@ def admin_check_bank():
     </div>
     """
     return base_layout("Bank Checker", content)
-
-# =========================
-# SECTION 7/8: Tutor — web-aware citations (+ admin toggles)
-# =========================
-
 # ---- Tutor settings (persisted file; ENV can override) ----
 def _load_tutor_settings():
-    # Defaults to ENV TUTOR_WEB_AWARE if present; else file (default False)
+    """
+    Returns {"web_aware": bool}. Default is taken from ENV TUTOR_WEB_AWARE if present,
+    otherwise the value stored in data/tutor_settings.json (default False).
+    """
     return _load_json(
         "tutor_settings.json",
         {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}
@@ -2836,11 +2867,11 @@ def _save_tutor_settings(cfg: dict):
     _save_json("tutor_settings.json", cfg or {})
 
 def _tutor_web_enabled() -> bool:
-    # Hard override by ENV if explicitly set
     env = os.environ.get("TUTOR_WEB_AWARE")
     if env in ("0", "1"):
         return env == "1"
     return bool(_load_tutor_settings().get("web_aware", False))
+
 
 # ---- Bank-source citation finder (uses only your ingested sources) ----
 def _bank_all_sources():
@@ -2850,6 +2881,7 @@ def _bank_all_sources():
     Only returns URLs whose domain is whitelisted by ALLOWED_SOURCE_DOMAINS.
     """
     seen = set()
+
     # From flashcards
     for fc in _load_json("bank/cpp_flashcards_v1.json", []):
         for s in (fc.get("sources") or []):
@@ -2864,6 +2896,7 @@ def _bank_all_sources():
                 continue
             seen.add(key)
             yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "flashcard"}
+
     # From questions
     for q in _load_json("bank/cpp_questions_v1.json", []):
         for s in (q.get("sources") or []):
@@ -2879,20 +2912,25 @@ def _bank_all_sources():
             seen.add(key)
             yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "question"}
 
+
 def _extract_keywords(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z]{3,}", (text or "").lower())
     stop = {"the","and","for","with","from","this","that","into","over","under",
             "your","about","have","what","when","where","which"}
     return {w for w in words if w not in stop}
 
+
 def _score_source(src, kw: set[str]) -> int:
-    # Basic scoring by title overlap + small boost for gov/standards
+    """
+    Score by keyword overlap in title; small boost for .gov standards.
+    """
     score = 0
     title_words = set(re.findall(r"[A-Za-z]{3,}", src["title"].lower()))
     score += len(title_words & kw) * 3
     if any(src["domain"].endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
         score += 2
     return score
+
 
 def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
     kw = _extract_keywords(query)
@@ -2909,6 +2947,7 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
         if len(out) >= max_n:
             break
     return out
+
 
 # ---- Web-aware Tutor: wraps model call and injects citations from bank ----
 def _call_tutor_agent(user_query, meta=None):
@@ -2962,7 +3001,8 @@ def _call_tutor_agent(user_query, meta=None):
     backoffs = [0, 1.5, 3.0]
     last_err = None
     for wait_s in backoffs:
-        if wait_s: time.sleep(wait_s)
+        if wait_s:
+            time.sleep(wait_s)
         try:
             resp = requests.post(f"{base_url}/chat/completions",
                                  headers=headers, data=json.dumps(payload),
@@ -2993,6 +3033,7 @@ def _call_tutor_agent(user_query, meta=None):
 
     return False, f"Network/agent error: {last_err or 'unknown'}", {}
 
+
 # ---- Admin UI: toggle web-aware + preview matching citations ----
 @app.route("/admin/tutor-mode", methods=["GET", "POST"])
 @login_required
@@ -3003,7 +3044,8 @@ def admin_tutor_mode():
     cfg = _load_tutor_settings()
     msg = ""
     if request.method == "POST":
-        if HAS_CSRF and (request.form.get("csrf_token") != csrf_token()):
+        # Only check form token manually if CSRFProtect is not active
+        if not HAS_CSRF and (request.form.get("csrf_token") != csrf_token()):
             abort(403)
         cfg["web_aware"] = (request.form.get("web_aware") == "1")
         _save_tutor_settings(cfg)
@@ -3063,6 +3105,7 @@ def admin_tutor_mode():
     """
     return base_layout("Tutor Mode", body)
 
+
 # ---- Diagnostic endpoint: verify citations pipeline quickly ----
 @app.get("/tutor/ping-web")
 @login_required
@@ -3070,61 +3113,56 @@ def tutor_ping_web():
     q = request.args.get("q") or "Explain risk assessment steps for a corporate facility."
     cites = _find_bank_citations(q, 3) if _tutor_web_enabled() else []
     return jsonify({"web_aware": _tutor_web_enabled(), "query": q, "citations": cites})
+# =========================
+# SECTION 8/8: Startup, health, error pages, and __main__
+# =========================
 
-# ---- CSRF validator shim (ensures admin forms validate cleanly) ----
-# If Flask-WTF is installed (HAS_CSRF=True), import validate_csrf; otherwise keep as None.
-try:
-    from flask_wtf.csrf import validate_csrf as validate_csrf  # noqa: F401
-except Exception:  # pragma: no cover
-    validate_csrf = None  # type: ignore
-
-# ---- Friendly error pages (no stack traces leaked) ----
-@app.errorhandler(403)
-def forbidden(e):
-    content = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-md-8">
-        <div class="card">
-          <div class="card-header bg-danger text-white">
-            <h3 class="mb-0"><i class="bi bi-slash-circle me-2"></i>Forbidden</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted mb-2">You don’t have permission to access that action right now.</p>
-            <ul class="text-muted small">
-              <li>If you submitted a form, please retry (your session may have refreshed).</li>
-              <li>Make sure you’re logged in and, for admin pages, that you’ve entered the admin password.</li>
-            </ul>
-            <a class="btn btn-primary me-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-            <a class="btn btn-outline-secondary" href="/login"><i class="bi bi-box-arrow-in-right me-1"></i>Login</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
+def init_sample_data():
     """
-    return base_layout("Forbidden", content), 403
-
-@app.errorhandler(404)
-def not_found(e):
-    content = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-md-8">
-        <div class="card">
-          <div class="card-header bg-danger text-white">
-            <h3 class="mb-0"><i class="bi bi-exclamation-triangle me-2"></i>Page Not Found</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted mb-3">We couldn’t find that page. Check the URL or use the navigation above.</p>
-            <a class="btn btn-primary" href="/"><i class="bi bi-house me-1"></i>Go Home</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
+    Ensure required folders/files exist so the app never 500s on first boot.
+    Non-destructive: only creates files if missing.
     """
-    return base_layout("404 Not Found", content), 404
+    try:
+        # Base data dir
+        os.makedirs(DATA_DIR, exist_ok=True)
 
+        # Bank dir
+        bank_dir = os.path.join(DATA_DIR, "bank")
+        os.makedirs(bank_dir, exist_ok=True)
+
+        # Core JSON stores (create if missing)
+        core_defaults = [
+            ("users.json", []),
+            ("questions.json", []),      # legacy optional
+            ("flashcards.json", []),     # legacy optional
+            ("attempts.json", []),
+            ("events.json", []),
+        ]
+        for name, default in core_defaults:
+            path = os.path.join(DATA_DIR, name)
+            if not os.path.exists(path):
+                _save_json(name, default)
+
+        # Bank files (create empty arrays if missing)
+        if not os.path.exists(os.path.join(bank_dir, "cpp_flashcards_v1.json")):
+            _save_json("bank/cpp_flashcards_v1.json", [])
+        if not os.path.exists(os.path.join(bank_dir, "cpp_questions_v1.json")):
+            _save_json("bank/cpp_questions_v1.json", [])
+        if not os.path.exists(os.path.join(bank_dir, "content_index.json")):
+            _save_json("bank/content_index.json", {})
+
+        # Tutor settings (default OFF unless env overrides)
+        tutor_path = os.path.join(DATA_DIR, "tutor_settings.json")
+        if not os.path.exists(tutor_path):
+            _save_json("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"})
+
+    except Exception as e:
+        logger.warning("init_sample_data encountered an issue: %s", e)
+
+
+# ---- 500 error page (friendly, no stack traces) ----
 @app.errorhandler(500)
 def server_error(e):
-    # Keep message generic; details are in logs
     content = """
     <div class="container">
       <div class="row justify-content-center"><div class="col-md-8">
@@ -3142,18 +3180,8 @@ def server_error(e):
     """
     return base_layout("Server Error", content), 500
 
-# ---- Health endpoint (define once; skip if already defined in Section 2) ----
-if "healthz" not in app.view_functions:
-    @app.get("/healthz")
-    def healthz():
-        return {
-            "status": "healthy",
-            "timestamp": datetime.utcnow().isoformat() + "Z",
-            "version": APP_VERSION,
-            "web_aware_tutor": bool(globals().get("_tutor_web_enabled", lambda: False)())
-        }
 
-# ---- App factory (for gunicorn: `app:app`) ----
+# ---- App factory (for gunicorn / WSGI servers) ----
 def create_app():
     init_sample_data()
     logger.info("CPP Test Prep v%s starting up", APP_VERSION)
@@ -3167,11 +3195,10 @@ def create_app():
     logger.info("OpenAI key present: %s", bool(OPENAI_API_KEY))
     return app
 
+
 # ---- Local runner (Render uses gunicorn `app:app`) ----
 if __name__ == "__main__":
     init_sample_data()
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
-
