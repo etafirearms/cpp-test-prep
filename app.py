@@ -1964,8 +1964,9 @@ def mock_exam_page():
 
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
+
 # =========================
-# SECTION 5/8: Flashcards, Progress, Billing/Stripe (+ debug)
+# SECTION 5/8: Flashcards, Progress, Billing/Stripe (+ debug) + Admin ingest/check-bank
 # =========================
 
 # ---------- FLASHCARDS ----------
@@ -2314,10 +2315,10 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly", disco
     """
     Creates a Stripe Checkout Session for either a subscription (monthly) or a one-time payment (sixmonth).
     If a discount_code is provided, we look up an active Promotion Code in Stripe and apply it.
-    We also enable allow_promotion_codes=True so testers can enter codes on the Stripe page if needed.
+    We also enable allow_promotion_codes=True so users can enter codes on the Stripe page if needed.
     """
     try:
-        # Try to resolve a Stripe Promotion Code (promo_...) from the human-readable code (e.g., 'betatester2025')
+        # Try to resolve a Stripe Promotion Code (promo_...) from the human-readable code
         discounts_param = None
         if discount_code:
             try:
@@ -2391,6 +2392,7 @@ def billing_page():
     names = {"monthly":"Monthly Plan","sixmonth":"6-Month Plan","inactive":"Free Plan"}
 
     if sub == 'inactive':
+        # Discount code UI lives *only* on Billing page; we append it to checkout links via JS
         plans_html = """
           <div class="row g-3">
             <div class="col-md-6">
@@ -2398,7 +2400,7 @@ def billing_page():
                 <div class="card-header bg-primary text-white text-center"><h5 class="mb-0">Monthly Plan</h5></div>
                 <div class="card-body text-center">
                   <h3 class="text-primary">$39.99/month</h3><p class="text-muted">Unlimited access</p>
-                  <a href="/billing/checkout?plan=monthly" class="btn btn-primary">Upgrade</a>
+                  <a href="/billing/checkout?plan=monthly" class="btn btn-primary upgrade-btn" data-plan="monthly">Upgrade</a>
                 </div>
               </div>
             </div>
@@ -2407,11 +2409,46 @@ def billing_page():
                 <div class="card-header bg-success text-white text-center"><h5 class="mb-0">6-Month Plan</h5></div>
                 <div class="card-body text-center">
                   <h3 class="text-success">$99.00</h3><p class="text-muted">One-time payment</p>
-                  <a href="/billing/checkout?plan=sixmonth" class="btn btn-success">Upgrade</a>
+                  <a href="/billing/checkout?plan=sixmonth" class="btn btn-success upgrade-btn" data-plan="sixmonth">Upgrade</a>
                 </div>
               </div>
             </div>
           </div>
+
+          <div class="mt-3">
+            <label class="form-label fw-semibold">Discount code (optional)</label>
+            <div class="input-group">
+              <input type="text" id="discount_code" class="form-control" placeholder="Enter a valid code (if you have one)">
+              <button id="apply_code" class="btn btn-outline-secondary" type="button">Apply at Checkout</button>
+            </div>
+            <div class="form-text">Codes can also be entered on the Stripe checkout page.</div>
+          </div>
+
+          <script>
+            (function(){{
+              function goWithCode(href) {{
+                var code = (document.getElementById('discount_code')||{{value:''}}).value.trim();
+                if (code) {{
+                  var url = new URL(href, window.location.origin);
+                  url.searchParams.set('code', code);
+                  return url.toString();
+                }}
+                return href;
+              }}
+              document.querySelectorAll('.upgrade-btn').forEach(function(btn){{
+                btn.addEventListener('click', function(e){{
+                  e.preventDefault();
+                  window.location.href = goWithCode(btn.getAttribute('href'));
+                }});
+              }});
+              var apply = document.getElementById('apply_code');
+              if (apply) {{
+                apply.addEventListener('click', function(){{
+                  // NOP: user still needs to click a plan button; this just keeps the code in the field
+                }});
+              }}
+            }})();
+          </script>
         """
     else:
         plans_html = """
@@ -2449,9 +2486,8 @@ def billing_checkout():
     if not user_email:
         return redirect(url_for("login_page"))
 
-    # read promo from query OR fall back to stored value
-    user = _find_user(user_email)
-    discount_code = (request.args.get("code") or (user or {}).get("discount_code") or "").strip()
+    # read promo only from query; no suggestions anywhere else
+    discount_code = (request.args.get("code") or "").strip()
 
     url = create_stripe_checkout_session(user_email, plan=plan, discount_code=discount_code)
     if url:
@@ -2630,7 +2666,6 @@ def admin_reset_password():
             if not u:
                 msg = "No user found with that email."
             else:
-                # FIX: update through persistent helpers (do not write stale USERS global)
                 _update_user(u["id"], {"password_hash": generate_password_hash(new_pw)})
                 msg = "Password updated successfully."
 
@@ -2659,6 +2694,229 @@ def admin_reset_password():
     </div></div></div>
     """
     return base_layout("Admin Reset Password", body)
+
+
+# ---------- ADMIN CONTENT INGESTION (JSON API) ----------
+# NOTE: This endpoint expects application/json and is admin-gated. If CSRF is enabled,
+# we exempt AFTER definition to avoid 403s for JSON posts.
+@app.post("/api/dev/ingest")
+@login_required
+def api_dev_ingest():
+    if not is_admin():
+        return jsonify({"ok": False, "error": "admin-required"}), 403
+
+    if not request.is_json:
+        return jsonify({"ok": False, "error": "application/json required",
+                        "hint": "Use Content-Type: application/json"}), 415
+
+    data = request.get_json(silent=True) or {}
+    in_flash = data.get("flashcards") or []
+    in_questions = data.get("questions") or []
+
+    # Load current bank & index
+    bank_fc = _bank_read_flashcards()
+    bank_q  = _bank_read_questions()
+    idx = _load_content_index()  # {hash: {...}}
+
+    # Build quick hash sets for existing
+    existing_fc_hashes = set()
+    for fc in bank_fc:
+        h = _item_hash_flashcard(fc.get("front",""), fc.get("back",""),
+                                 fc.get("domain","Unspecified"), fc.get("sources") or [])
+        existing_fc_hashes.add(h)
+        idx.setdefault(h, {"type":"fc",
+                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
+
+    existing_q_hashes = set()
+    for q in bank_q:
+        h = _item_hash_question(q.get("question",""), q.get("options") or {},
+                                q.get("correct",""), q.get("domain","Unspecified"),
+                                q.get("sources") or [])
+        existing_q_hashes.add(h)
+        idx.setdefault(h, {"type":"q",
+                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
+
+    # Process incoming flashcards
+    added_fc = 0
+    rejected_fc = []
+    for raw in in_flash:
+        norm, msg = _norm_bank_flashcard(raw)
+        if not norm:
+            rejected_fc.append({"item": raw, "error": msg}); continue
+        h = _item_hash_flashcard(norm["front"], norm["back"], norm["domain"], norm["sources"])
+        if h in existing_fc_hashes:
+            continue
+        bank_fc.append(norm)
+        existing_fc_hashes.add(h)
+        idx[h] = {"type": "fc", "added": datetime.utcnow().isoformat()+"Z"}
+        added_fc += 1
+
+    # Process incoming questions
+    added_q = 0
+    rejected_q = []
+    for raw in in_questions:
+        norm, msg = _norm_bank_question(raw)
+        if not norm:
+            rejected_q.append({"item": raw, "error": msg}); continue
+        h = _item_hash_question(norm["question"], norm["options"], norm["correct"],
+                                norm["domain"], norm["sources"])
+        if h in existing_q_hashes:
+            continue
+        bank_q.append(norm)
+        existing_q_hashes.add(h)
+        idx[h] = {"type": "q", "added": datetime.utcnow().isoformat()+"Z"}
+        added_q += 1
+
+    # Save files atomically
+    _bank_write_flashcards(bank_fc)
+    _bank_write_questions(bank_q)
+    _save_content_index(idx)
+
+    return jsonify({
+        "ok": True,
+        "summary": {
+            "flashcards_added": added_fc,
+            "questions_added": added_q,
+            "flashcards_total": len(bank_fc),
+            "questions_total": len(bank_q),
+            "flashcards_rejected": len(rejected_fc),
+            "questions_rejected": len(rejected_q),
+        },
+        "rejected": {
+            "flashcards": rejected_fc[:50],  # cap to keep payload light
+            "questions": rejected_q[:50]
+        }
+    })
+
+# If CSRF is enabled, exempt the JSON ingestion endpoint (post-definition).
+if HAS_CSRF:
+    try:
+        api_dev_ingest = csrf.exempt(api_dev_ingest)  # type: ignore
+    except Exception:
+        logger.warning("Could not CSRF-exempt /api/dev/ingest; continuing without exemption.")
+
+# ---------- ADMIN: Acceptance checker (bank validator) ----------
+@app.get("/admin/check-bank")
+@login_required
+def admin_check_bank():
+    if not is_admin():
+        return redirect(url_for("admin_login_page", next=request.path))
+
+    bank_fc = _bank_read_flashcards()
+    bank_q  = _bank_read_questions()
+
+    # Validate flashcards
+    fc_errors = []
+    seen_fc = set()
+    for i, fc in enumerate(bank_fc):
+        if not isinstance(fc, dict):
+            fc_errors.append(f"FC[{i}]: not an object"); continue
+        f = (fc.get("front","")).strip(); b = (fc.get("back","")).strip()
+        if not f or not b:
+            fc_errors.append(f"FC[{i}]: missing front/back")
+        ok, msg = _validate_sources(fc.get("sources") or [])
+        if not ok:
+            fc_errors.append(f"FC[{i}]: {msg}")
+        h = _item_hash_flashcard(f, b, (fc.get('domain') or 'Unspecified'), fc.get('sources') or [])
+        if h in seen_fc:
+            fc_errors.append(f"FC[{i}]: duplicate hash")
+        seen_fc.add(h)
+
+    # Validate questions
+    q_errors = []
+    seen_q = set()
+    for i, q in enumerate(bank_q):
+        if not isinstance(q, dict):
+            q_errors.append(f"Q[{i}]: not an object"); continue
+        question = (q.get("question","")).strip()
+        opts = q.get("options") or {}
+        correct = (q.get("correct","")).strip().upper()
+        if not question:
+            q_errors.append(f"Q[{i}]: empty question")
+        # options must be A..D and all non-empty
+        for L in ["A","B","C","D"]:
+            if not (isinstance(opts, dict) and opts.get(L)):
+                q_errors.append(f"Q[{i}]: missing option {L}")
+        if correct not in ("A","B","C","D"):
+            q_errors.append(f"Q[{i}]: invalid correct {correct}")
+        ok, msg = _validate_sources(q.get("sources") or [])
+        if not ok:
+            q_errors.append(f"Q[{i}]: {msg}")
+        h = _item_hash_question(question, opts, correct, (q.get("domain") or "Unspecified"), q.get("sources") or [])
+        if h in seen_q:
+            q_errors.append(f"Q[{i}]: duplicate hash")
+        seen_q.add(h)
+
+    # Domain counts to help balancing
+    def _count_by_domain(items, key="domain"):
+        d = {}
+        for it in items:
+            dn = (it.get(key) or "Unspecified")
+            d[dn] = d.get(dn, 0) + 1
+        return d
+
+    fc_by_dom = _count_by_domain(bank_fc)
+    q_by_dom  = _count_by_domain(bank_q)
+
+    def _tbl_dict(dct):
+        rows = []
+        for k in sorted(dct.keys()):
+            rows.append(f"<tr><td>{html.escape(str(k))}</td><td class='text-end'>{int(dct[k])}</td></tr>")
+        return "".join(rows) or "<tr><td colspan='2' class='text-center text-muted'>None</td></tr>"
+
+    fc_err_html = "".join(f"<li>{html.escape(e)}</li>" for e in fc_errors) or "<li class='text-muted'>None</li>"
+    q_err_html  = "".join(f"<li>{html.escape(e)}</li>" for e in q_errors)  or "<li class='text-muted'>None</li>"
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-dark text-white"><h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Bank Acceptance Check</h3></div>
+          <div class="card-body">
+            <div class="row g-4">
+              <div class="col-md-6">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">Flashcards</div>
+                  <div class="small text-muted mb-2">Total: {len(bank_fc)}</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-end">Count</th></tr></thead>
+                      <tbody>{_tbl_dict(fc_by_dom)}</tbody>
+                    </table>
+                  </div>
+                  <div class="mt-2">
+                    <div class="fw-semibold">Issues</div>
+                    <ul class="small">{fc_err_html}</ul>
+                  </div>
+                </div>
+              </div>
+              <div class="col-md-6">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">Questions</div>
+                  <div class="small text-muted mb-2">Total: {len(bank_q)}</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-end">Count</th></tr></thead>
+                      <tbody>{_tbl_dict(q_by_dom)}</tbody>
+                    </table>
+                  </div>
+                  <div class="mt-2">
+                    <div class="fw-semibold">Issues</div>
+                    <ul class="small">{q_err_html}</ul>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="mt-3 d-flex gap-2">
+              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+              <a class="btn btn-outline-primary" href="/billing/debug"><i class="bi bi-bug me-1"></i>Config Debug</a>
+            </div>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Bank Checker", content)
 # =========================
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
@@ -3442,3 +3700,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
