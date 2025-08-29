@@ -1,6 +1,4 @@
 # =========================
-# CPP Test Prep - app.py
-# =========================
 # SECTION 1/8: Imports, Config, Data IO, Security, Base Data
 # =========================
 
@@ -418,6 +416,74 @@ def domain_buttons_html(selected_key: str = "random", field_name: str = "domain"
     )
     return f'<div class="d-flex flex-wrap gap-2">{"".join(parts)}</div>{hidden}'
 
+# ----- Suggested Tutor Questions (randomized helper for sidebar) -----
+# These are lightweight, safe-to-display prompts that map to each domain.
+SUGGESTED_QUESTION_BANK = {
+    "security-principles": [
+        "Explain defense-in-depth with a simple example.",
+        "What is risk appetite vs. risk tolerance?",
+        "Qualitative vs quantitative risk assessment — when to use each?",
+        "How does least privilege reduce attack surface?"
+    ],
+    "business-principles": [
+        "How do you build a risk-based security budget?",
+        "What KPIs matter most for a security program?",
+        "CapEx vs OpEx tradeoffs in security investments?",
+        "Make a short security business case outline."
+    ],
+    "investigations": [
+        "Walk through chain-of-custody best practices.",
+        "What is the difference between interview and interrogation?",
+        "How to preserve a digital scene first?",
+        "Administrative vs. criminal investigation — key differences?"
+    ],
+    "personnel-security": [
+        "What background checks are most effective & why?",
+        "Steps for handling insider threat indicators?",
+        "Progressive discipline vs. immediate termination?",
+        "How to design an employee reporting mechanism?"
+    ],
+    "physical-security": [
+        "CPTED: give examples of natural surveillance.",
+        "Pros/cons: mantraps vs turnstiles?",
+        "Perimeter layers: deter, detect, delay — examples?",
+        "How to choose a lock by risk level?"
+    ],
+    "information-security": [
+        "First steps in incident containment for ransomware?",
+        "What is zero trust in plain terms?",
+        "Security awareness topics that really work?",
+        "How to prioritize patching across assets?"
+    ],
+    "crisis-management": [
+        "BCP vs DRP — what’s the difference?",
+        "Simple RTO/RPO explanation with examples.",
+        "ICS roles to know for private sector?",
+        "How to run a table-top exercise effectively?"
+    ],
+}
+
+def get_suggested_questions(domain_key: str | None, n: int = 4) -> list[str]:
+    """
+    Returns up to n randomized suggestions for the given domain.
+    If domain_key is 'random' or None, sample across all domains.
+    """
+    try:
+        n = max(1, min(int(n), 8))
+    except Exception:
+        n = 4
+    if not domain_key or domain_key == "random":
+        pool = []
+        for items in SUGGESTED_QUESTION_BANK.values():
+            pool.extend(items)
+        random.shuffle(pool)
+        return pool[:n]
+    dk = str(domain_key).strip().lower()
+    pool = SUGGESTED_QUESTION_BANK.get(dk, [])
+    pool = pool[:]  # copy
+    random.shuffle(pool)
+    return pool[:n]
+
 # ----- Question normalization/merge for legacy + base -----
 def _normalize_question_legacy(q: dict):
     if not q or not q.get("question"):
@@ -595,7 +661,7 @@ def base_layout(title: str, body_html: str) -> str:
         --danger-red:#dc2626; --purple-accent:#7c3aed; --soft-gray:#f8fafc;
         --warm-white:#fefefe; --text-dark:#1f2937; --text-light:#6b7280;
       }
-      body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',system-ui,sans-serif;
+      body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',systemui,sans-serif;
            background:linear-gradient(135deg,#f8fafc 0%,#e2e8f0 100%);color:var(--text-dark);line-height:1.6;}
       .bg-gradient-primary{background:linear-gradient(135deg,var(--primary-blue) 0%,var(--purple-accent) 100%)!important;}
       .text-white-75{color:rgba(255,255,255,.85)!important}.text-white-75:hover{color:#fff!important}
@@ -1001,7 +1067,7 @@ def _track_page_views():
     except Exception:
         pass
 
-# ---------- Tutor (AI): baseline implementation (extended in Section 7) ----------
+# ---------- Tutor (AI) ----------
 def _call_tutor_agent(user_query, meta=None):
     """
     Baseline agent caller. This function is intentionally simple here and
@@ -1062,6 +1128,43 @@ def _call_tutor_agent(user_query, meta=None):
             continue
     return False, f"Network/agent error: {last_err or 'unknown'}", {}
 
+# --- NEW: Randomized suggested questions helper (Option B) ---
+def _suggested_questions_for_domain(domain_key: str | None, k: int = 4):
+    """
+    Return up to k suggested question dicts [{"text":..., "domain":...}] for the given domain.
+    - If domain_key is 'random' or falsy, pick from ALL domains.
+    - Always shuffle and de-duplicate by text.
+    """
+    try:
+        pool = _all_normalized_questions()
+        pool = _filter_by_domain(pool, domain_key or "random")
+        random.shuffle(pool)
+        out, seen = [], set()
+        for q in pool:
+            t = (q.get("text") or "").strip()
+            if not t or t in seen:
+                continue
+            seen.add(t)
+            out.append({"text": t, "domain": (q.get("domain") or "Unspecified")})
+            if len(out) >= k:
+                break
+        # Fallback: if not enough, top up from global pool
+        if len(out) < k:
+            backup = _all_normalized_questions()
+            random.shuffle(backup)
+            for q in backup:
+                t = (q.get("text") or "").strip()
+                if not t or t in seen:
+                    continue
+                seen.add(t)
+                out.append({"text": t, "domain": (q.get("domain") or "Unspecified")})
+                if len(out) >= k:
+                    break
+        return out
+    except Exception as e:
+        logger.warning("suggested questions error: %s", e)
+        return []
+
 @app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
 @app.route("/tutor/", methods=["GET", "POST"], strict_slashes=False)
 @login_required
@@ -1115,47 +1218,94 @@ def tutor_page():
     # Domain button block
     domain_buttons = domain_buttons_html(selected_key=selected_domain, field_name="domain")
 
+    # NEW: randomized suggested questions (4) based on selected domain (or mixed when random)
+    suggestions = _suggested_questions_for_domain(selected_domain, k=4)
+    def _suggest_btn(s):
+        dom_key = (s.get("domain") or "Unspecified")
+        dom_label = DOMAINS.get(str(dom_key).lower(), dom_key)
+        return (
+            "<button type='button' class='btn btn-outline-secondary w-100 text-start mb-2 suggested-q' "
+            f"data-q=\"{html.escape(s.get('text',''))}\">"
+            f"<span class='badge bg-light text-dark me-2'>{html.escape(str(dom_label))}</span>"
+            f"{html.escape(s.get('text',''))}</button>"
+        )
+    suggestions_html = "".join(_suggest_btn(s) for s in suggestions) or "<div class='text-muted'>No suggestions yet.</div>"
+
     content = f"""
     <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8">
-        <div class="card">
-          <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3></div>
-          <div class="card-body">
-            <form method="POST" class="mb-3">
-              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              <label class="form-label fw-semibold">Select a domain (optional)</label>
-              {domain_buttons}
-              <label class="form-label fw-semibold mt-3">Ask the Tutor</label>
-              <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
-              <div class="d-flex gap-2 mt-3">
-                <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
-                <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
-              </div>
-            </form>
-
-            {"<div class='alert alert-danger'>" + html.escape(tutor_error) + "</div>" if tutor_error else ""}
-            {"<div class='alert alert-success'><div class='fw-semibold mb-1'>Tutor:</div>" + _fmt(tutor_answer) + "</div>" if tutor_answer else ""}
-
-            <div class="border-top pt-3">
-              <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
-              {history_html}
+      <div class="row g-3 justify-content-center">
+        <div class="col-lg-8">
+          <div class="card">
+            <div class="card-header bg-primary text-white">
+              <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Tutor</h3>
             </div>
-            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
+            <div class="card-body">
+              <form id="tutorForm" method="POST" class="mb-3">
+                <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+                <label class="form-label fw-semibold">Select a domain (optional)</label>
+                {domain_buttons}
+                <label class="form-label fw-semibold mt-3">Ask the Tutor</label>
+                <textarea name="query" class="form-control" rows="3" placeholder="Ask about CPP/PSP topics...">{html.escape(user_query)}</textarea>
+                <div class="d-flex gap-2 mt-3">
+                  <button type="submit" class="btn btn-primary"><i class="bi bi-send me-1"></i>Ask</button>
+                  <a href="/tutor" class="btn btn-outline-secondary">Clear</a>
+                </div>
+              </form>
+
+              {"<div class='alert alert-danger'>" + html.escape(tutor_error) + "</div>" if tutor_error else ""}
+              {"<div class='alert alert-success'><div class='fw-semibold mb-1'>Tutor:</div>" + _fmt(tutor_answer) + "</div>" if tutor_answer else ""}
+
+              <div class="border-top pt-3">
+                <div class="fw-semibold mb-2"><i class="bi bi-clock-history me-1"></i>Recent (last 5)</div>
+                {history_html}
+              </div>
+              <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-arrow-left me-1"></i>Back</a>
+            </div>
           </div>
         </div>
-      </div></div>
+
+        <!-- NEW: Suggestions sidebar -->
+        <div class="col-lg-4">
+          <div class="card h-100">
+            <div class="card-header bg-light">
+              <h5 class="mb-0"><i class="bi bi-stars me-1"></i>Suggested prompts</h5>
+              <div class="small text-muted">
+                {("Mix of all domains" if selected_domain == "random" else "Based on " + html.escape(DOMAINS.get(selected_domain, selected_domain)))}
+              </div>
+            </div>
+            <div class="card-body">
+              {suggestions_html}
+              <div class="small text-muted mt-2">Click a suggestion to auto-send.</div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <script>
       // Make the domain buttons click set the hidden input + toggle active
       (function(){{
-        var container = document.currentScript.closest('.card-body');
-        var hidden = container.querySelector('#domain_val');
-        container.querySelectorAll('.domain-btn').forEach(function(btn){{
+        var container = document.currentScript.closest('body').querySelector('.card-body');
+        if (!container) return;
+        var hidden = document.getElementById('domain_val');
+        document.querySelectorAll('.domain-btn').forEach(function(btn){{
           btn.addEventListener('click', function(){{
-            container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+            document.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
             btn.classList.add('active');
             if (hidden) hidden.value = btn.getAttribute('data-value');
+          }});
+        }});
+      }})();
+      // Auto-submit when clicking a suggested question
+      (function(){{
+        var form = document.getElementById('tutorForm');
+        if (!form) return;
+        var ta = form.querySelector('textarea[name="query"]');
+        document.querySelectorAll('.suggested-q').forEach(function(btn){{
+          btn.addEventListener('click', function(){{
+            var q = btn.getAttribute('data-q') || '';
+            if (ta) ta.value = q;
+            form.submit();
           }});
         }});
       }})();
@@ -1296,7 +1446,6 @@ def _record_attempt(user_id, mode, run, results):
         _save_json("attempts.json", attempts)
     except Exception as e:
         logger.warning("record_attempt failed: %s", e)
-
 # ---------- Shared rendering ----------
 def _render_picker_page(title, route, counts, include_domain=True):
     # Domain buttons
@@ -2901,6 +3050,7 @@ def admin_check_bank():
     </div>
     """
     return base_layout("Bank Checker", content)
+
 # ---- Tutor settings (persisted file; ENV can override) ----
 def _load_tutor_settings():
     """
@@ -2982,69 +3132,135 @@ def _score_source(src, kw: set[str]) -> int:
 
 
 def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
-    kw = _extract_keywords(query)
-    pool = list(_bank_all_sources())
-    if not pool:
+    """
+    Returns up to `max_n` relevant sources from the ingested bank (flashcards/questions).
+    Uses a simple keyword overlap scoring on titles with a small boost for .gov/standards.
+    Output item shape: {"title": str, "url": str, "domain": str, "from": "flashcard"|"question"}
+    """
+    try:
+        kw = _extract_keywords(query)
+        candidates = []
+        for src in _bank_all_sources():
+            sc = _score_source(src, kw)
+            if sc > 0:
+                candidates.append((sc, src))
+        # If nothing scored > 0, fall back to top N unique sources
+        if not candidates:
+            uniq = []
+            seen = set()
+            for src in _bank_all_sources():
+                k = (src["title"], src["url"])
+                if k in seen:
+                    continue
+                seen.add(k)
+                uniq.append(src)
+                if len(uniq) >= max_n:
+                    break
+            return uniq
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        top = []
+        seen_k = set()
+        for _, src in candidates:
+            k = (src["title"], src["url"])
+            if k in seen_k:
+                continue
+            seen_k.add(k)
+            top.append(src)
+            if len(top) >= max_n:
+                break
+        return top
+    except Exception as e:
+        logger.warning("find_bank_citations failed: %s", e)
         return []
-    scored = sorted(pool, key=lambda s: _score_source(s, kw), reverse=True)
-    out, seen = [], set()
-    for s in scored:
-        if s["url"] in seen:
-            continue
-        out.append(s)
-        seen.add(s["url"])
-        if len(out) >= max_n:
-            break
-    return out
+# =========================
+# SECTION 7/8: Tutor (web-aware citations override) + settings UI
+# =========================
 
+# If Section 6 defined helpers like:
+#   - _tutor_web_enabled()
+#   - _bank_all_sources()
+#   - _extract_keywords()
+#   - _score_source()
+#   - _find_bank_citations(query, max_n=3)
+# they are reused here. We override _call_tutor_agent from Section 3 to add
+# lightweight “web-aware” behavior that cites only your ingested/whitelisted sources.
 
-# ---- Web-aware Tutor: wraps model call and injects citations from bank ----
+def _format_citations_for_prompt(cites: list[dict]) -> str:
+    if not cites:
+        return ""
+    lines = []
+    for i, c in enumerate(cites, 1):
+        title = (c.get("title") or "").strip()
+        url = (c.get("url") or "").strip()
+        dom = (c.get("domain") or "").strip()
+        lines.append(f"[{i}] {title} — {dom}\n{url}")
+    return "\n".join(lines)
+
 def _call_tutor_agent(user_query, meta=None):
     """
-    Web-aware mode:
-      - If enabled, collect up to 3 citations from your content bank that match the query.
-      - Send them as 'Supporting_sources' to the model.
-      - Ask model to include a short 'Citations' section (Title + URL) in the answer.
-    Uses OpenAI-compatible Chat Completions (OPENAI_API_KEY/BASE/MODEL).
+    Override of the baseline agent (Section 3):
+    - If web-aware is OFF, behave exactly like the original.
+    - If web-aware is ON, include up to 3 best-matching *ingested bank* sources (no live web),
+      instruct the model to ground its explanation to those sources, and append a compact
+      reference list at the end of the answer.
     """
     meta = meta or {}
-    timeout_s   = float(os.environ.get("TUTOR_TIMEOUT", "45"))
+    timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
     temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
-    max_tokens  = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
-
-    api_key   = OPENAI_API_KEY
-    base_url  = OPENAI_API_BASE
-    model     = os.environ.get("MODEL_TUTOR", OPENAI_CHAT_MODEL).strip()
-    org_id    = os.environ.get("OPENAI_ORG", "").strip()
-
-    if not api_key:
-        return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
-
-    web_on = _tutor_web_enabled()
-    cites  = _find_bank_citations(user_query, max_n=3) if web_on else []
-    cites_lines = "\n".join([f"- {c['title']} — {c['url']}" for c in cites])
-
-    system_msg = (
-        "You are a calm, expert CPP/PSP study tutor. Be concise, step-by-step, and practical. "
-        "Map advice to CPP domains when relevant (note the domain inline). "
-        "If supporting_sources are provided, incorporate their facts and add a short 'Citations' "
-        "section at the end listing Title and URL (1–3 items). If none supplied, answer normally."
+    max_tokens = int(os.environ.get("TUTOR_MAX_TOKENS", "900"))
+    base_system = os.environ.get(
+        "TUTOR_SYSTEM_PROMPT",
+        "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step."
     )
 
-    messages = [{"role": "system", "content": system_msg}]
-    if cites:
-        messages.append({"role": "system", "content": "Supporting_sources:\n" + cites_lines})
-    messages.append({"role": "user", "content": user_query})
+    if not OPENAI_API_KEY:
+        return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
 
-    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
-    if org_id:
-        headers["OpenAI-Organization"] = org_id
+    # Branch: web-aware vs baseline
+    web_on = _tutor_web_enabled()
+    sources = []
+    sys_msg = base_system
+    user_content = user_query
+
+    if web_on:
+        # Rank within user-ingested sources only (no internet). See Section 6 helpers.
+        try:
+            sources = _find_bank_citations(user_query, max_n=3)
+        except Exception as _e:
+            sources = []
+
+        sys_msg = (
+            base_system
+            + "\n\nGROUNDING:\n"
+              "- You are provided a small list of relevant, vetted sources (government/standards/AAR style).\n"
+              "- Answer using your expertise and *align with* these sources. If something is uncertain, say so.\n"
+              "- Keep the answer concise and exam-focused; show steps when helpful."
+        )
+
+        cites_block = _format_citations_for_prompt(sources)
+        if cites_block:
+            user_content = (
+                f"{user_query}\n\n"
+                f"Candidate reference material (use when helpful):\n{cites_block}"
+            )
+
+    url = f"{OPENAI_API_BASE}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
+    org = os.environ.get("OPENAI_ORG", "").strip()
+    if org:
+        headers["OpenAI-Organization"] = org
 
     payload = {
-        "model": model,
-        "messages": messages,
+        "model": OPENAI_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": sys_msg},
+            {"role": "user", "content": user_content}
+        ],
         "temperature": temperature,
-        "max_tokens": max_tokens,
+        "max_tokens": max_tokens
     }
 
     backoffs = [0, 1.5, 3.0]
@@ -3053,11 +3269,10 @@ def _call_tutor_agent(user_query, meta=None):
         if wait_s:
             time.sleep(wait_s)
         try:
-            resp = requests.post(f"{base_url}/chat/completions",
-                                 headers=headers, data=json.dumps(payload),
-                                 timeout=timeout_s)
+            resp = requests.post(url, headers=headers, data=json.dumps(payload), timeout=timeout_s)
             if resp.status_code in (429, 500, 502, 503, 504):
-                last_err = f"{resp.status_code} {resp.text[:300]}"; continue
+                last_err = f"{resp.status_code} {resp.text[:300]}"
+                continue
             if resp.status_code >= 400:
                 try:
                     j = resp.json()
@@ -3065,103 +3280,79 @@ def _call_tutor_agent(user_query, meta=None):
                 except Exception:
                     msg = resp.text[:300]
                 return False, f"Agent error {resp.status_code}: {msg}", {"status": resp.status_code}
+
             data = resp.json()
             answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            usage  = data.get("usage", {})
-            meta_out = {
-                "usage": usage,
-                "provider": "openai",
-                "model": model,
-                "web_aware": web_on,
-                "citations_used": cites
-            }
-            return True, answer, meta_out
+            usage = data.get("usage", {})
+
+            # Append compact references when web-aware is ON and we had any sources
+            if web_on and sources and answer:
+                refs_lines = []
+                for i, s in enumerate(sources, 1):
+                    t = (s.get("title") or "").strip()
+                    u = (s.get("url") or "").strip()
+                    refs_lines.append(f"[{i}] {t} — {u}")
+                answer = f"{answer}\n\nReferences:\n" + "\n".join(refs_lines)
+
+            return True, answer, {"usage": usage, "model": OPENAI_CHAT_MODEL, "web_aware": web_on}
         except Exception as e:
             last_err = str(e)
             continue
+    return False, f"Network/agent error: {last_err or 'unknown'}", {"web_aware": web_on}
 
-    return False, f"Network/agent error: {last_err or 'unknown'}", {}
 
-
-# ---- Admin UI: toggle web-aware + preview matching citations ----
-@app.route("/admin/tutor-mode", methods=["GET", "POST"])
+# -------- Tutor settings UI (admin) --------
+@app.route("/admin/tutor-settings", methods=["GET", "POST"])
 @login_required
-def admin_tutor_mode():
+def admin_tutor_settings():
     if not is_admin():
         return redirect(url_for("admin_login_page", next=request.path))
 
-    cfg = _load_tutor_settings()
     msg = ""
+    cfg = _load_tutor_settings()
     if request.method == "POST":
-        # Only check form token manually if CSRFProtect is not active
-        if not HAS_CSRF and (request.form.get("csrf_token") != csrf_token()):
-            abort(403)
-        cfg["web_aware"] = (request.form.get("web_aware") == "1")
+        # CSRF: if Flask-WTF is active it will enforce; fallback minimal when disabled
+        if not HAS_CSRF:
+            if request.form.get("csrf_token") != csrf_token():
+                abort(403)
+        web_aware = (request.form.get("web_aware") == "on")
+        cfg["web_aware"] = bool(web_aware)
         _save_tutor_settings(cfg)
-        msg = "Saved. Web-aware Tutor is now " + ("ON" if cfg["web_aware"] else "OFF")
+        msg = "Tutor settings updated."
 
-    # Optional preview of citations for a sample query
-    preview_query = (request.args.get("q") or "").strip()
-    preview_list = _find_bank_citations(preview_query, 3) if preview_query else []
-    if preview_query:
-        if preview_list:
-            items = "".join([
-                f'<li><a href="{html.escape(x["url"])}" target="_blank" rel="noopener">'
-                f'{html.escape(x["title"])}</a> '
-                f'<span class="text-muted small">({html.escape(x["domain"])})</span></li>'
-                for x in preview_list
-            ])
-            preview_html = f"<ul class='small mb-0'>{items}</ul>"
-        else:
-            preview_html = "<div class='text-muted small'>No matching sources found in your bank.</div>"
-    else:
-        preview_html = ""
-
+    csrf_val = csrf_token()
+    checked = "checked" if cfg.get("web_aware") else ""
     body = f"""
     <div class="container"><div class="row justify-content-center"><div class="col-lg-7">
       <div class="card">
-        <div class="card-header bg-secondary text-white">
-          <h3 class="mb-0"><i class="bi bi-robot me-2"></i>Tutor Mode</h3>
+        <div class="card-header bg-dark text-white">
+          <h3 class="mb-0"><i class="bi bi-gear-wide-connected me-2"></i>Tutor Settings</h3>
         </div>
         <div class="card-body">
-          {"<div class='alert alert-success'>"+html.escape(msg)+"</div>" if msg else ""}
-          <form method="POST" class="mb-4">
-            <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
-            <div class="form-check form-switch">
-              <input class="form-check-input" type="checkbox" id="webAware" name="web_aware" value="1" {"checked" if cfg.get("web_aware") else ""}>
+          {"<div class='alert alert-success'>" + html.escape(msg) + "</div>" if msg else ""}
+          <form method="POST">
+            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <div class="form-check form-switch mb-3">
+              <input class="form-check-input" type="checkbox" id="webAware" name="web_aware" {checked}>
               <label class="form-check-label" for="webAware">
-                Enable web-aware Tutor (uses citations from your content bank only)
+                Enable web-aware mode (use *ingested* sources for citations)
               </label>
             </div>
-            <button class="btn btn-primary mt-3" type="submit">Save</button>
-            <a class="btn btn-outline-secondary mt-3 ms-2" href="/tutor">Go to Tutor</a>
+            <button class="btn btn-primary" type="submit"><i class="bi bi-save me-1"></i>Save</button>
+            <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
           </form>
-
-          <form method="GET" class="row g-2 align-items-end">
-            <div class="col-9">
-              <label class="form-label fw-semibold">Preview citations for a sample question</label>
-              <input type="text" class="form-control" name="q" placeholder="e.g., perimeter security lighting"
-                     value="{html.escape(preview_query)}">
-            </div>
-            <div class="col-3">
-              <button class="btn btn-outline-primary w-100">Preview</button>
-            </div>
-          </form>
-          <div class="mt-3">{preview_html}</div>
+          <hr>
+          <div class="small text-muted">
+            When enabled, the Tutor will ground answers to sources you ingested under <code>data/bank</code>.
+            It never fetches the live internet; it only cites your vetted, whitelisted materials.
+          </div>
         </div>
       </div>
     </div></div></div>
     """
-    return base_layout("Tutor Mode", body)
+    return base_layout("Tutor Settings", body)
 
 
-# ---- Diagnostic endpoint: verify citations pipeline quickly ----
-@app.get("/tutor/ping-web")
-@login_required
-def tutor_ping_web():
-    q = request.args.get("q") or "Explain risk assessment steps for a corporate facility."
-    cites = _find_bank_citations(q, 3) if _tutor_web_enabled() else []
-    return jsonify({"web_aware": _tutor_web_enabled(), "query": q, "citations": cites})
 # =========================
 # SECTION 8/8: Startup, health, error pages, and __main__
 # =========================
@@ -3251,4 +3442,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
