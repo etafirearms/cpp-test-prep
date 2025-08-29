@@ -306,7 +306,7 @@ def increment_usage(user_email, action_type, count=1):
             month_usage[action_type] = month_usage.get(action_type, 0) + count
             usage['last_active'] = today.isoformat(timespec="seconds") + "Z"
             users[i] = u
-            _save_users(users)
+            _save_json("users.json", users)
             return
 
 # ----- Base Questions & Domains (starter content) -----
@@ -417,7 +417,6 @@ def domain_buttons_html(selected_key: str = "random", field_name: str = "domain"
     return f'<div class="d-flex flex-wrap gap-2">{"".join(parts)}</div>{hidden}'
 
 # ----- Suggested Tutor Questions (randomized helper for sidebar) -----
-# These are lightweight, safe-to-display prompts that map to each domain.
 SUGGESTED_QUESTION_BANK = {
     "security-principles": [
         "Explain defense-in-depth with a simple example.",
@@ -542,6 +541,7 @@ def _percent(num, den):
 
 def _user_id():
     return (session.get("user_id") or session.get("email") or "unknown")
+
 # =========================
 # SECTION 2/8: Layout, CSRF, Health, Auth (Login/Signup/Logout)
 # =========================
@@ -3700,4 +3700,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
