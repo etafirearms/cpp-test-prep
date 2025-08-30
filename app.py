@@ -127,7 +127,6 @@ def init_database():
             password_hash TEXT NOT NULL,
             subscription TEXT DEFAULT 'inactive',
             subscription_expires_at TEXT,
-            discount_code TEXT,
             stripe_customer_id TEXT,
             created_at TEXT DEFAULT (datetime('now', 'utc')),
             updated_at TEXT DEFAULT (datetime('now', 'utc'))
@@ -541,7 +540,6 @@ def _percent(num, den):
 
 def _user_id():
     return (session.get("user_id") or session.get("email") or "unknown")
-
 # =========================
 # SECTION 2/8: Layout, CSRF, Health, Auth (Login/Signup/Logout)
 # =========================
@@ -551,8 +549,7 @@ def _csrf_ok() -> bool:
     if not HAS_CSRF:
         return True
     try:
-        # validate_csrf was imported in Section 1 when available
-        from flask_wtf.csrf import validate_csrf  # safe import even if already loaded
+        from flask_wtf.csrf import validate_csrf  # re-import safe
         validate_csrf(request.form.get("csrf_token") or "")
         return True
     except Exception:
@@ -768,7 +765,7 @@ def login_post():
     user = _find_user(email)
     if user and check_password_hash(user.get('password_hash', ''), password):
         try:
-            session.regenerate()  # Flask 3.x; guard below keeps compatibility
+            session.regenerate()  # Flask 3.x
         except AttributeError:
             session.clear()
             session.permanent = True
@@ -846,13 +843,8 @@ def signup_page():
               <input type="password" class="form-control" name="password" required minlength="8" placeholder="At least 8 characters">
               <div class="form-text">Choose a strong password with at least 8 characters</div>
             </div>
-            <div class="mb-3">
-              <label class="form-label fw-semibold">Discount Code (optional)</label>
-              <input type="text" class="form-control" name="discount_code" placeholder="betatester2025 or cppclass2025">
-              <div class="form-text">If you have a promo code, enter it here.</div>
-            </div>
             <button type="submit" class="btn btn-success btn-lg w-100">
-              <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Start Learning
+              <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Continue to Billing
             </button>
           </form>
         </div></div>
@@ -887,7 +879,8 @@ def signup_post():
         return redirect(url_for('signup_page'))
     if not validate_email(email):
         return redirect(url_for('signup_page'))
-    if len(password) < 8:
+    ok_pw, err_pw = validate_password(password)
+    if not ok_pw:
         return redirect(url_for('signup_page'))
     if _find_user(email):
         return redirect(url_for('signup_page'))
@@ -906,12 +899,12 @@ def signup_post():
         session.clear(); session.permanent = True
     session['user_id'] = user['id']; session['email'] = user['email']; session['name'] = user['name']
 
-    discount_code = (request.form.get('discount_code') or "").strip()
-    checkout_url = create_stripe_checkout_session(user_email=email, plan=plan, discount_code=discount_code)
+    # No discount code on signup. Proceed to Stripe checkout without codes.
+    checkout_url = create_stripe_checkout_session(user_email=email, plan=plan, discount_code=None)
     if checkout_url:
         return redirect(checkout_url)
-    # fallback: go through checkout route (preserves code via query)
-    return redirect(url_for('billing_checkout', plan=plan, discount_code=discount_code))
+    # Fallback: go through checkout route (no code parameter here)
+    return redirect(url_for('billing_checkout', plan=plan))
 
 @app.post("/logout")
 def logout():
@@ -1856,7 +1849,7 @@ def mock_exam_page():
                     <div class="card">
                       <div class="card-header bg-warning text-dark"><h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Mock Exam</h3></div>
                       <div class="card-body">
-                        <div class="alert alert-warning">{html.escape(msg_limit)}</div>
+                        <div class="alert alert.Warning">{html.escape(msg_limit)}</div>
                         <a class="btn btn-primary" href="/billing"><i class="bi bi-credit-card me-1"></i>Upgrade Plan</a>
                         <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
                       </div>
@@ -1882,7 +1875,7 @@ def mock_exam_page():
             <div class="container">
               <div class="row justify-content-center"><div class="col-lg-8">
                 <div class="card">
-                  <div class="card-header bg-warning text-dark">
+                  <div class="card-header bg.Warning text-dark">
                     <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Mock Exam</h3>
                   </div>
                   <div class="card-body">
@@ -1964,7 +1957,6 @@ def mock_exam_page():
 
     curr_idx = int(run.get("index", 0))
     return _render_question_card("Mock Exam", "/mock-exam", run, curr_idx, error_msg)
-
 # =========================
 # SECTION 5/8: Flashcards, Progress, Billing/Stripe (+ debug) + Admin ingest/check-bank
 # =========================
@@ -2447,7 +2439,7 @@ def billing_page():
                   // NOP: user still needs to click a plan button; this just keeps the code in the field
                 }});
               }}
-            }})();
+            })();
           </script>
         """
     else:
@@ -2922,514 +2914,310 @@ def admin_check_bank():
 # =========================
 
 # -------- Source whitelist (edit anytime) --------
-ALLOWED_SOURCE_DOMAINS = {
-    # Government & standards (non-proprietary)
-    "nist.gov", "cisa.gov", "fema.gov", "osha.gov", "gao.gov",
-    # Research & practice
-    "popcenter.asu.edu",  # POP Center
-    "ncpc.org",           # National Crime Prevention Council
-    "fbi.gov",
-    "rand.org",
-    "hsdl.org",           # Homeland Security Digital Library
-    "nfpa.org",           # view-only summaries allowed
-    "iso.org",            # summaries only
-    # After Action Reports (public/official postings)
-    "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov", "phila.gov", "denvergov.org",
-    "boston.gov", "chicago.gov", "seattle.gov", "sandiego.gov", "lacounty.gov",
-    "ready.gov"           # FEMA/ICS public summaries & guidance
-}
-# NOTE: Wikipedia intentionally NOT allowed.
+if 'ALLOWED_SOURCE_DOMAINS' not in globals():
+    ALLOWED_SOURCE_DOMAINS = {
+        # Government & standards (non-proprietary)
+        "nist.gov", "cisa.gov", "fema.gov", "osha.gov", "gao.gov",
+        # Research & practice
+        "popcenter.asu.edu",  # POP Center
+        "ncpc.org",           # National Crime Prevention Council
+        "fbi.gov",
+        "rand.org",
+        "hsdl.org",           # Homeland Security Digital Library
+        "nfpa.org",           # view-only summaries allowed
+        "iso.org",            # summaries only
+        # After Action Reports (public/official postings)
+        "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov", "phila.gov", "denvergov.org",
+        "boston.gov", "chicago.gov", "seattle.gov", "sandiego.gov", "lacounty.gov",
+        "ready.gov"           # FEMA/ICS public summaries & guidance
+    }
 
 from urllib.parse import urlparse
 
-def _url_domain_ok(url: str) -> bool:
-    """Return True if URL domain is in the allowed whitelist."""
-    try:
-        d = urlparse((url or "").strip()).netloc.lower()
-        if not d:
+# -------- URL/domain + sources validation --------
+if '_url_domain_ok' not in globals():
+    def _url_domain_ok(url: str) -> bool:
+        """Return True if URL domain is in the allowed whitelist."""
+        try:
+            d = urlparse((url or "").strip()).netloc.lower()
+            if not d:
+                return False
+            return any(d == dom or d.endswith("." + dom) for dom in ALLOWED_SOURCE_DOMAINS)
+        except Exception:
             return False
-        return any(d == dom or d.endswith("." + dom) for dom in ALLOWED_SOURCE_DOMAINS)
-    except Exception:
-        return False
 
-def _validate_sources(sources: list) -> tuple[bool, str]:
-    """
-    Enforce 1–3 sources; each must have title + URL; URL domain must be whitelisted.
-    """
-    if not isinstance(sources, list) or not (1 <= len(sources) <= 3):
-        return False, "Each item must include 1–3 sources."
-    for s in sources:
-        if not isinstance(s, dict):
-            return False, "Source entries must be objects with title and url."
-        t = (s.get("title") or "").strip()
-        u = (s.get("url") or "").strip()
-        if not t or not u:
-            return False, "Source requires non-empty title and url."
-        if not _url_domain_ok(u):
-            return False, f"URL domain not allowed: {u}"
-    return True, ""
+if '_validate_sources' not in globals():
+    def _validate_sources(sources: list) -> tuple[bool, str]:
+        """
+        Enforce 1–3 sources; each must have title + URL; URL domain must be whitelisted.
+        """
+        if not isinstance(sources, list) or not (1 <= len(sources) <= 3):
+            return False, "Each item must include 1–3 sources."
+        for s in sources:
+            if not isinstance(s, dict):
+                return False, "Source entries must be objects with title and url."
+            t = (s.get("title") or "").strip()
+            u = (s.get("url") or "").strip()
+            if not t or not u:
+                return False, "Source requires non-empty title and url."
+            if not _url_domain_ok(u):
+                return False, f"URL domain not allowed: {u}"
+        return True, ""
 
 # -------- Hash & de-dup index --------
-def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> str:
-    # Canonical string for deterministic hashing
-    blob = json.dumps({
-        "k": "fc",
-        "front": front.strip().lower(),
-        "back": back.strip().lower(),
-        "domain": (domain or "Unspecified").strip().lower(),
-        "srcs": [{"t": (s.get("title","").strip().lower()),
-                  "u": (s.get("url","").strip().lower())} for s in (sources or [])]
-    }, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+if '_item_hash_flashcard' not in globals():
+    def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> str:
+        # Canonical string for deterministic hashing
+        blob = json.dumps({
+            "k": "fc",
+            "front": front.strip().lower(),
+            "back": back.strip().lower(),
+            "domain": (domain or "Unspecified").strip().lower(),
+            "srcs": [{"t": (s.get("title","").strip().lower()),
+                      "u": (s.get("url","").strip().lower())} for s in (sources or [])]
+        }, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-def _item_hash_question(question: str, options: dict, correct: str, domain: str, sources: list) -> str:
-    # Keep options in A..D order for stable hashing
-    ordered = {k: str(options.get(k,"")).strip().lower() for k in ["A","B","C","D"]}
-    blob = json.dumps({
-        "k": "q",
-        "q": (question or "").strip().lower(),
-        "opts": ordered,
-        "correct": (correct or "").strip().upper(),
-        "domain": (domain or "Unspecified").strip().lower(),
-        "srcs": [{"t": (s.get("title","").strip().lower()),
-                  "u": (s.get("url","").strip().lower())} for s in (sources or [])]
-    }, sort_keys=True, ensure_ascii=False)
-    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+if '_item_hash_question' not in globals():
+    def _item_hash_question(question: str, options: dict, correct: str, domain: str, sources: list) -> str:
+        # Keep options in A..D order for stable hashing
+        ordered = {k: str(options.get(k,"")).strip().lower() for k in ["A","B","C","D"]}
+        blob = json.dumps({
+            "k": "q",
+            "q": (question or "").strip().lower(),
+            "opts": ordered,
+            "correct": (correct or "").strip().upper(),
+            "domain": (domain or "Unspecified").strip().lower(),
+            "srcs": [{"t": (s.get("title","").strip().lower()),
+                      "u": (s.get("url","").strip().lower())} for s in (sources or [])]
+        }, sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-def _load_content_index():
-    return _load_json("bank/content_index.json", {})
+# -------- Content index IO --------
+if '_load_content_index' not in globals():
+    def _load_content_index():
+        return _load_json("bank/content_index.json", {})
 
-def _save_content_index(idx: dict):
-    _save_json("bank/content_index.json", idx)
+if '_save_content_index' not in globals():
+    def _save_content_index(idx: dict):
+        _save_json("bank/content_index.json", idx)
 
 # -------- Bank file helpers --------
-def _bank_read_flashcards():
-    return _load_json("bank/cpp_flashcards_v1.json", [])
+if '_bank_read_flashcards' not in globals():
+    def _bank_read_flashcards():
+        return _load_json("bank/cpp_flashcards_v1.json", [])
 
-def _bank_read_questions():
-    return _load_json("bank/cpp_questions_v1.json", [])
+if '_bank_read_questions' not in globals():
+    def _bank_read_questions():
+        return _load_json("bank/cpp_questions_v1.json", [])
 
-def _bank_write_flashcards(items: list):
-    _save_json("bank/cpp_flashcards_v1.json", items)
+if '_bank_write_flashcards' not in globals():
+    def _bank_write_flashcards(items: list):
+        _save_json("bank/cpp_flashcards_v1.json", items)
 
-def _bank_write_questions(items: list):
-    _save_json("bank/cpp_questions_v1.json", items)
+if '_bank_write_questions' not in globals():
+    def _bank_write_questions(items: list):
+        _save_json("bank/cpp_questions_v1.json", items)
 
-# -------- Normalize incoming shapes to bank schema --------
-def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
-    """
-    Input flexible keys -> output bank schema:
-    { "front": str, "back": str, "domain": str, "sources": [{title,url},..] }
-    """
-    if not isinstance(fc_in, dict):
-        return None, "Flashcard must be an object."
-    front = (fc_in.get("front") or fc_in.get("q") or fc_in.get("term") or "").strip()
-    back  = (fc_in.get("back") or fc_in.get("a") or fc_in.get("definition") or "").strip()
-    domain = (fc_in.get("domain") or fc_in.get("category") or "Unspecified").strip()
-    sources = fc_in.get("sources") or []
-    if not front or not back:
-        return None, "Flashcard needs front/back text."
-    ok, msg = _validate_sources(sources)
-    if not ok:
-        return None, msg
-    out = {"front": front, "back": back, "domain": domain, "sources": sources}
-    return out, ""
+# -------- Normalize incoming shapes to bank schema (helpers only; routes live in Section 5) --------
+if '_norm_bank_flashcard' not in globals():
+    def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
+        """
+        Input flexible keys -> output bank schema:
+        { "front": str, "back": str, "domain": str, "sources": [{title,url},..] }
+        """
+        if not isinstance(fc_in, dict):
+            return None, "Flashcard must be an object."
+        front = (fc_in.get("front") or fc_in.get("q") or fc_in.get("term") or "").strip()
+        back  = (fc_in.get("back") or fc_in.get("a") or fc_in.get("definition") or "").strip()
+        domain = (fc_in.get("domain") or fc_in.get("category") or "Unspecified").strip()
+        sources = fc_in.get("sources") or []
+        if not front or not back:
+            return None, "Flashcard needs front/back text."
+        ok, msg = _validate_sources(sources)
+        if not ok:
+            return None, msg
+        out = {"front": front, "back": back, "domain": domain, "sources": sources}
+        return out, ""
 
-def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
-    """
-    Input flexible keys -> bank schema (4-choice MCQ):
-    {
-      "question": str,
-      "options": {"A": "...","B": "...","C": "...","D": "..."},
-      "correct": "A"|"B"|"C"|"D",
-      "domain": str,
-      "sources": [{title,url}]
-    }
-    """
-    if not isinstance(q_in, dict):
-        return None, "Question must be an object."
-    question = (q_in.get("question") or q_in.get("q") or q_in.get("stem") or "").strip()
-    domain   = (q_in.get("domain") or q_in.get("category") or "Unspecified").strip()
-    sources  = q_in.get("sources") or []
-    # Options can come as dict or list
-    raw_opts = q_in.get("options") or q_in.get("choices") or q_in.get("answers")
-    opts = {}
-    if isinstance(raw_opts, dict):
-        for L in ["A","B","C","D"]:
-            v = raw_opts.get(L) or raw_opts.get(L.lower())
-            if not v: return None, f"Missing option {L}"
-            opts[L] = str(v)
-    elif isinstance(raw_opts, list) and len(raw_opts) >= 4:
-        letters = ["A","B","C","D"]
-        for i, L in enumerate(letters):
-            v = raw_opts[i]
-            if isinstance(v, dict):
-                opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "")
-            else:
-                opts[L] = str(v)
-    else:
-        return None, "Options must provide 4 choices."
-    # Correct can be letter or 1-based index
-    correct = q_in.get("correct") or q_in.get("answer") or q_in.get("correct_key")
-    if isinstance(correct, str) and correct.strip().upper() in ("A","B","C","D"):
-        correct = correct.strip().upper()
-    else:
-        try:
-            idx = int(correct)
-            correct = ["A","B","C","D"][idx - 1]
-        except Exception:
-            return None, "Correct must be A/B/C/D or 1..4."
-    # Sources validate
-    ok, msg = _validate_sources(sources)
-    if not ok:
-        return None, msg
-    if not question:
-        return None, "Question text required."
-    return {"question": question, "options": opts, "correct": correct, "domain": domain, "sources": sources}, ""
-
-# -------- Ingestion (admin-only JSON API) --------
-# NOTE: This endpoint expects application/json and is admin-gated. If CSRF is enabled,
-# we exempt AFTER definition to avoid decorator indentation errors and 403s for JSON posts.
-@app.post("/api/dev/ingest")
-@login_required
-def api_dev_ingest():
-    if not is_admin():
-        return jsonify({"ok": False, "error": "admin-required"}), 403
-
-    if not request.is_json:
-        return jsonify({"ok": False, "error": "application/json required",
-                        "hint": "Use Content-Type: application/json"}), 415
-
-    data = request.get_json(silent=True) or {}
-    in_flash = data.get("flashcards") or []
-    in_questions = data.get("questions") or []
-
-    # Load current bank & index
-    bank_fc = _bank_read_flashcards()
-    bank_q  = _bank_read_questions()
-    idx = _load_content_index()  # {hash: {...}}
-
-    # Build quick hash sets for existing
-    existing_fc_hashes = set()
-    for fc in bank_fc:
-        h = _item_hash_flashcard(fc.get("front",""), fc.get("back",""),
-                                 fc.get("domain","Unspecified"), fc.get("sources") or [])
-        existing_fc_hashes.add(h)
-        idx.setdefault(h, {"type":"fc",
-                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
-
-    existing_q_hashes = set()
-    for q in bank_q:
-        h = _item_hash_question(q.get("question",""), q.get("options") or {},
-                                q.get("correct",""), q.get("domain","Unspecified"),
-                                q.get("sources") or [])
-        existing_q_hashes.add(h)
-        idx.setdefault(h, {"type":"q",
-                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
-
-    # Process incoming flashcards
-    added_fc = 0
-    rejected_fc = []
-    for raw in in_flash:
-        norm, msg = _norm_bank_flashcard(raw)
-        if not norm:
-            rejected_fc.append({"item": raw, "error": msg}); continue
-        h = _item_hash_flashcard(norm["front"], norm["back"], norm["domain"], norm["sources"])
-        if h in existing_fc_hashes:
-            continue
-        bank_fc.append(norm)
-        existing_fc_hashes.add(h)
-        idx[h] = {"type": "fc", "added": datetime.utcnow().isoformat()+"Z"}
-        added_fc += 1
-
-    # Process incoming questions
-    added_q = 0
-    rejected_q = []
-    for raw in in_questions:
-        norm, msg = _norm_bank_question(raw)
-        if not norm:
-            rejected_q.append({"item": raw, "error": msg}); continue
-        h = _item_hash_question(norm["question"], norm["options"], norm["correct"],
-                                norm["domain"], norm["sources"])
-        if h in existing_q_hashes:
-            continue
-        bank_q.append(norm)
-        existing_q_hashes.add(h)
-        idx[h] = {"type": "q", "added": datetime.utcnow().isoformat()+"Z"}
-        added_q += 1
-
-    # Save files atomically
-    _bank_write_flashcards(bank_fc)
-    _bank_write_questions(bank_q)
-    _save_content_index(idx)
-
-    return jsonify({
-        "ok": True,
-        "summary": {
-            "flashcards_added": added_fc,
-            "questions_added": added_q,
-            "flashcards_total": len(bank_fc),
-            "questions_total": len(bank_q),
-            "flashcards_rejected": len(rejected_fc),
-            "questions_rejected": len(rejected_q),
-        },
-        "rejected": {
-            "flashcards": rejected_fc[:50],  # cap to keep payload light
-            "questions": rejected_q[:50]
+if '_norm_bank_question' not in globals():
+    def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
+        """
+        Input flexible keys -> bank schema (4-choice MCQ):
+        {
+          "question": str,
+          "options": {"A": "...","B": "...","C": "...","D": "..."},
+          "correct": "A"|"B"|"C"|"D",
+          "domain": str,
+          "sources": [{title,url}]
         }
-    })
-
-# If CSRF is enabled, exempt the JSON ingestion endpoint (post-definition to avoid syntax issues).
-if HAS_CSRF:
-    try:
-        api_dev_ingest = csrf.exempt(api_dev_ingest)  # type: ignore
-    except Exception:
-        logger.warning("Could not CSRF-exempt /api/dev/ingest; continuing without exemption.")
-
-# -------- Acceptance checker (admin-only UI) --------
-@app.get("/admin/check-bank")
-@login_required
-def admin_check_bank():
-    if not is_admin():
-        return redirect(url_for("admin_login_page", next=request.path))
-
-    bank_fc = _bank_read_flashcards()
-    bank_q  = _bank_read_questions()
-
-    # Validate flashcards
-    fc_errors = []
-    seen_fc = set()
-    for i, fc in enumerate(bank_fc):
-        if not isinstance(fc, dict):
-            fc_errors.append(f"FC[{i}]: not an object"); continue
-        f = (fc.get("front","")).strip(); b = (fc.get("back","")).strip()
-        if not f or not b:
-            fc_errors.append(f"FC[{i}]: missing front/back")
-        ok, msg = _validate_sources(fc.get("sources") or [])
+        """
+        if not isinstance(q_in, dict):
+            return None, "Question must be an object."
+        question = (q_in.get("question") or q_in.get("q") or q_in.get("stem") or "").strip()
+        domain   = (q_in.get("domain") or q_in.get("category") or "Unspecified").strip()
+        sources  = q_in.get("sources") or []
+        # Options can come as dict or list
+        raw_opts = q_in.get("options") or q_in.get("choices") or q_in.get("answers")
+        opts = {}
+        if isinstance(raw_opts, dict):
+            for L in ["A","B","C","D"]:
+                v = raw_opts.get(L) or raw_opts.get(L.lower())
+                if not v: return None, f"Missing option {L}"
+                opts[L] = str(v)
+        elif isinstance(raw_opts, list) and len(raw_opts) >= 4:
+            letters = ["A","B","C","D"]
+            for i, L in enumerate(letters):
+                v = raw_opts[i]
+                if isinstance(v, dict):
+                    opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "")
+                else:
+                    opts[L] = str(v)
+        else:
+            return None, "Options must provide 4 choices."
+        # Correct can be letter or 1-based index
+        correct = q_in.get("correct") or q_in.get("answer") or q_in.get("correct_key")
+        if isinstance(correct, str) and correct.strip().upper() in ("A","B","C","D"):
+            correct = correct.strip().upper()
+        else:
+            try:
+                idx = int(correct)
+                correct = ["A","B","C","D"][idx - 1]
+            except Exception:
+                return None, "Correct must be A/B/C/D or 1..4."
+        # Sources validate
+        ok, msg = _validate_sources(sources)
         if not ok:
-            fc_errors.append(f"FC[{i}]: {msg}")
-        h = _item_hash_flashcard(f, b, (fc.get('domain') or 'Unspecified'), fc.get('sources') or [])
-        if h in seen_fc:
-            fc_errors.append(f"FC[{i}]: duplicate hash")
-        seen_fc.add(h)
-
-    # Validate questions
-    q_errors = []
-    seen_q = set()
-    for i, q in enumerate(bank_q):
-        if not isinstance(q, dict):
-            q_errors.append(f"Q[{i}]: not an object"); continue
-        question = (q.get("question","")).strip()
-        opts = q.get("options") or {}
-        correct = (q.get("correct","")).strip().upper()
+            return None, msg
         if not question:
-            q_errors.append(f"Q[{i}]: empty question")
-        # options must be A..D and all non-empty
-        for L in ["A","B","C","D"]:
-            if not (isinstance(opts, dict) and opts.get(L)):
-                q_errors.append(f"Q[{i}]: missing option {L}")
-        if correct not in ("A","B","C","D"):
-            q_errors.append(f"Q[{i}]: invalid correct {correct}")
-        ok, msg = _validate_sources(q.get("sources") or [])
-        if not ok:
-            q_errors.append(f"Q[{i}]: {msg}")
-        h = _item_hash_question(question, opts, correct, (q.get("domain") or "Unspecified"), q.get("sources") or [])
-        if h in seen_q:
-            q_errors.append(f"Q[{i}]: duplicate hash")
-        seen_q.add(h)
+            return None, "Question text required."
+        return {"question": question, "options": opts, "correct": correct, "domain": domain, "sources": sources}, ""
 
-    # Domain counts to help balancing
-    def _count_by_domain(items, key="domain"):
-        d = {}
-        for it in items:
-            dn = (it.get(key) or "Unspecified")
-            d[dn] = d.get(dn, 0) + 1
-        return d
+# -------- Tutor settings persistence (used by Section 7) --------
+if '_load_tutor_settings' not in globals():
+    def _load_tutor_settings():
+        """
+        Returns {"web_aware": bool}. Default is taken from ENV TUTOR_WEB_AWARE if present,
+        otherwise the value stored in data/tutor_settings.json (default False).
+        """
+        return _load_json(
+            "tutor_settings.json",
+            {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}
+        )
 
-    fc_by_dom = _count_by_domain(bank_fc)
-    q_by_dom  = _count_by_domain(bank_q)
+if '_save_tutor_settings' not in globals():
+    def _save_tutor_settings(cfg: dict):
+        _save_json("tutor_settings.json", cfg or {})
 
-    def _tbl_dict(dct):
-        rows = []
-        for k in sorted(dct.keys()):
-            rows.append(f"<tr><td>{html.escape(str(k))}</td><td class='text-end'>{int(dct[k])}</td></tr>")
-        return "".join(rows) or "<tr><td colspan='2' class='text-center text-muted'>None</td></tr>"
-
-    fc_err_html = "".join(f"<li>{html.escape(e)}</li>" for e in fc_errors) or "<li class='text-muted'>None</li>"
-    q_err_html  = "".join(f"<li>{html.escape(e)}</li>" for e in q_errors)  or "<li class='text-muted'>None</li>"
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-dark text-white"><h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Bank Acceptance Check</h3></div>
-          <div class="card-body">
-            <div class="row g-4">
-              <div class="col-md-6">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">Flashcards</div>
-                  <div class="small text-muted mb-2">Total: {len(bank_fc)}</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-end">Count</th></tr></thead>
-                      <tbody>{_tbl_dict(fc_by_dom)}</tbody>
-                    </table>
-                  </div>
-                  <div class="mt-2">
-                    <div class="fw-semibold">Issues</div>
-                    <ul class="small">{fc_err_html}</ul>
-                  </div>
-                </div>
-              </div>
-              <div class="col-md-6">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">Questions</div>
-                  <div class="small text-muted mb-2">Total: {len(bank_q)}</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-end">Count</th></tr></thead>
-                      <tbody>{_tbl_dict(q_by_dom)}</tbody>
-                    </table>
-                  </div>
-                  <div class="mt-2">
-                    <div class="fw-semibold">Issues</div>
-                    <ul class="small">{q_err_html}</ul>
-                  </div>
-                </div>
-              </div>
-            </div>
-            <div class="mt-3 d-flex gap-2">
-              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <a class="btn btn-outline-primary" href="/billing/debug"><i class="bi bi-bug me-1"></i>Config Debug</a>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Bank Checker", content)
-
-# ---- Tutor settings (persisted file; ENV can override) ----
-def _load_tutor_settings():
-    """
-    Returns {"web_aware": bool}. Default is taken from ENV TUTOR_WEB_AWARE if present,
-    otherwise the value stored in data/tutor_settings.json (default False).
-    """
-    return _load_json(
-        "tutor_settings.json",
-        {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}
-    )
-
-def _save_tutor_settings(cfg: dict):
-    _save_json("tutor_settings.json", cfg or {})
-
-def _tutor_web_enabled() -> bool:
-    env = os.environ.get("TUTOR_WEB_AWARE")
-    if env in ("0", "1"):
-        return env == "1"
-    return bool(_load_tutor_settings().get("web_aware", False))
-
+if '_tutor_web_enabled' not in globals():
+    def _tutor_web_enabled() -> bool:
+        env = os.environ.get("TUTOR_WEB_AWARE")
+        if env in ("0", "1"):
+            return env == "1"
+        return bool(_load_tutor_settings().get("web_aware", False))
 
 # ---- Bank-source citation finder (uses only your ingested sources) ----
-def _bank_all_sources():
-    """
-    Yields unique source dicts from bank files:
-      {"title":..., "url":..., "domain":..., "from":"flashcard|question"}
-    Only returns URLs whose domain is whitelisted by ALLOWED_SOURCE_DOMAINS.
-    """
-    seen = set()
+if '_bank_all_sources' not in globals():
+    def _bank_all_sources():
+        """
+        Yields unique source dicts from bank files:
+          {"title":..., "url":..., "domain":..., "from":"flashcard|question"}
+        Only returns URLs whose domain is whitelisted by ALLOWED_SOURCE_DOMAINS.
+        """
+        seen = set()
 
-    # From flashcards
-    for fc in _load_json("bank/cpp_flashcards_v1.json", []):
-        for s in (fc.get("sources") or []):
-            t = (s.get("title") or "").strip()
-            u = (s.get("url") or "").strip()
-            if not t or not u:
-                continue
-            if not _url_domain_ok(u):
-                continue
-            key = (t, u)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "flashcard"}
-
-    # From questions
-    for q in _load_json("bank/cpp_questions_v1.json", []):
-        for s in (q.get("sources") or []):
-            t = (s.get("title") or "").strip()
-            u = (s.get("url") or "").strip()
-            if not t or not u:
-                continue
-            if not _url_domain_ok(u):
-                continue
-            key = (t, u)
-            if key in seen:
-                continue
-            seen.add(key)
-            yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "question"}
-
-
-def _extract_keywords(text: str) -> set[str]:
-    words = re.findall(r"[A-Za-z]{3,}", (text or "").lower())
-    stop = {"the","and","for","with","from","this","that","into","over","under",
-            "your","about","have","what","when","where","which"}
-    return {w for w in words if w not in stop}
-
-
-def _score_source(src, kw: set[str]) -> int:
-    """
-    Score by keyword overlap in title; small boost for .gov standards.
-    """
-    score = 0
-    title_words = set(re.findall(r"[A-Za-z]{3,}", src["title"].lower()))
-    score += len(title_words & kw) * 3
-    if any(src["domain"].endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
-        score += 2
-    return score
-
-
-def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
-    """
-    Returns up to `max_n` relevant sources from the ingested bank (flashcards/questions).
-    Uses a simple keyword overlap scoring on titles with a small boost for .gov/standards.
-    Output item shape: {"title": str, "url": str, "domain": str, "from": "flashcard"|"question"}
-    """
-    try:
-        kw = _extract_keywords(query)
-        candidates = []
-        for src in _bank_all_sources():
-            sc = _score_source(src, kw)
-            if sc > 0:
-                candidates.append((sc, src))
-        # If nothing scored > 0, fall back to top N unique sources
-        if not candidates:
-            uniq = []
-            seen = set()
-            for src in _bank_all_sources():
-                k = (src["title"], src["url"])
-                if k in seen:
+        # From flashcards
+        for fc in _load_json("bank/cpp_flashcards_v1.json", []):
+            for s in (fc.get("sources") or []):
+                t = (s.get("title") or "").strip()
+                u = (s.get("url") or "").strip()
+                if not t or not u:
                     continue
-                seen.add(k)
-                uniq.append(src)
-                if len(uniq) >= max_n:
+                if not _url_domain_ok(u):
+                    continue
+                key = (t, u)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "flashcard"}
+
+        # From questions
+        for q in _load_json("bank/cpp_questions_v1.json", []):
+            for s in (q.get("sources") or []):
+                t = (s.get("title") or "").strip()
+                u = (s.get("url") or "").strip()
+                if not t or not u:
+                    continue
+                if not _url_domain_ok(u):
+                    continue
+                key = (t, u)
+                if key in seen:
+                    continue
+                seen.add(key)
+                yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "question"}
+
+# ---- Simple keyword extraction & scoring (used by Section 7) ----
+if '_extract_keywords' not in globals():
+    def _extract_keywords(text: str) -> set[str]:
+        words = re.findall(r"[A-Za-z]{3,}", (text or "").lower())
+        stop = {"the","and","for","with","from","this","that","into","over","under",
+                "your","about","have","what","when","where","which"}
+        return {w for w in words if w not in stop}
+
+if '_score_source' not in globals():
+    def _score_source(src, kw: set[str]) -> int:
+        """
+        Score by keyword overlap in title; small boost for .gov standards.
+        """
+        score = 0
+        title_words = set(re.findall(r"[A-Za-z]{3,}", src["title"].lower()))
+        score += len(title_words & kw) * 3
+        if any(src["domain"].endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
+            score += 2
+        return score
+
+if '_find_bank_citations' not in globals():
+    def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
+        """
+        Returns up to `max_n` relevant sources from the ingested bank (flashcards/questions).
+        Uses a simple keyword overlap scoring on titles with a small boost for .gov/standards.
+        Output item shape: {"title": str, "url": str, "domain": str, "from": "flashcard"|"question"}
+        """
+        try:
+            kw = _extract_keywords(query)
+            candidates = []
+            for src in _bank_all_sources():
+                sc = _score_source(src, kw)
+                if sc > 0:
+                    candidates.append((sc, src))
+            # If nothing scored > 0, fall back to top N unique sources
+            if not candidates:
+                uniq = []
+                seen = set()
+                for src in _bank_all_sources():
+                    k = (src["title"], src["url"])
+                    if k in seen:
+                        continue
+                    seen.add(k)
+                    uniq.append(src)
+                    if len(uniq) >= max_n:
+                        break
+                return uniq
+            candidates.sort(key=lambda t: t[0], reverse=True)
+            top = []
+            seen_k = set()
+            for _, src in candidates:
+                k = (src["title"], src["url"])
+                if k in seen_k:
+                    continue
+                seen_k.add(k)
+                top.append(src)
+                if len(top) >= max_n:
                     break
-            return uniq
-        candidates.sort(key=lambda t: t[0], reverse=True)
-        top = []
-        seen_k = set()
-        for _, src in candidates:
-            k = (src["title"], src["url"])
-            if k in seen_k:
-                continue
-            seen_k.add(k)
-            top.append(src)
-            if len(top) >= max_n:
-                break
-        return top
-    except Exception as e:
-        logger.warning("find_bank_citations failed: %s", e)
-        return []
+            return top
+        except Exception as e:
+            logger.warning("find_bank_citations failed: %s", e)
+            return []
 # =========================
 # SECTION 7/8: Tutor (web-aware citations override) + settings UI
 # =========================
@@ -3700,5 +3488,3 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
-
