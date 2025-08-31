@@ -3644,8 +3644,14 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
 # SECTION 7/8: Tutor (web-aware citations override) + settings UI
 # =========================
 
-# NOTE: This section overrides _call_tutor_agent from Section 3 to add optional
-# "web-aware" grounding that ONLY cites *ingested* sources (no live web).
+# If Section 6 defined helpers like:
+#   - _tutor_web_enabled()
+#   - _bank_all_sources()
+#   - _extract_keywords()
+#   - _score_source()
+#   - _find_bank_citations(query, max_n=3)
+# they are reused here. We override _call_tutor_agent from Section 3 to add
+# lightweight “web-aware” behavior that cites only your ingested/whitelisted sources.
 
 def _format_citations_for_prompt(cites: list[dict]) -> str:
     if not cites:
@@ -3663,7 +3669,8 @@ def _call_tutor_agent(user_query, meta=None):
     Override of the baseline agent (Section 3):
     - If web-aware is OFF, behave exactly like the original.
     - If web-aware is ON, include up to 3 best-matching *ingested bank* sources (no live web),
-      instruct the model to align with these sources, and append a compact References list.
+      instruct the model to ground its explanation to those sources, and append a compact
+      reference list at the end of the answer.
     """
     meta = meta or {}
     timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
@@ -3677,12 +3684,14 @@ def _call_tutor_agent(user_query, meta=None):
     if not OPENAI_API_KEY:
         return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
 
+    # Branch: web-aware vs baseline
     web_on = _tutor_web_enabled()
     sources = []
     sys_msg = base_system
     user_content = user_query
 
     if web_on:
+        # Rank within user-ingested sources only (no internet). See Section 6 helpers.
         try:
             sources = _find_bank_citations(user_query, max_n=3)
         except Exception as _e:
@@ -3744,6 +3753,7 @@ def _call_tutor_agent(user_query, meta=None):
             answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             usage = data.get("usage", {})
 
+            # Append compact references when web-aware is ON and we had any sources
             if web_on and sources and answer:
                 refs_lines = []
                 for i, s in enumerate(sources, 1):
@@ -3758,6 +3768,7 @@ def _call_tutor_agent(user_query, meta=None):
             continue
     return False, f"Network/agent error: {last_err or 'unknown'}", {"web_aware": web_on}
 
+
 # -------- Tutor settings UI (admin) --------
 @app.route("/admin/tutor-settings", methods=["GET", "POST"])
 @login_required
@@ -3768,6 +3779,7 @@ def admin_tutor_settings():
     msg = ""
     cfg = _load_tutor_settings()
     if request.method == "POST":
+        # CSRF: if Flask-WTF is active it will enforce; fallback minimal when disabled
         if not HAS_CSRF:
             if request.form.get("csrf_token") != csrf_token():
                 abort(403)
@@ -3808,141 +3820,184 @@ def admin_tutor_settings():
     """
     return base_layout("Tutor Settings", body)
 
-# -------- Admin Content Balance (domain × type progress toward 900) --------
 
-CONTENT_TARGETS = {
-    # Domain keys follow app slugs
-    "security-principles":  {"mcq": 99, "tf": 50, "scenario": 50},   # 198
-    "business-principles":  {"mcq": 99, "tf": 50, "scenario": 50},   # 198
-    "investigations":       {"mcq": 54, "tf": 27, "scenario": 27},   # 108
-    "personnel-security":   {"mcq": 45, "tf": 22, "scenario": 22},   # 90
-    "physical-security":    {"mcq": 90, "tf": 45, "scenario": 45},   # 180
-    "information-security": {"mcq": 27, "tf": 14, "scenario": 14},   # 54
-    "crisis-management":    {"mcq": 36, "tf": 18, "scenario": 18},   # 72
-}
+# ---- Content Balance (admin-only, single definition with guard) ----
+# Avoid duplicate route registration if this file gets merged or reloaded.
+def _route_exists(rule: str) -> bool:
+    try:
+        return any(r.rule == rule for r in app.url_map.iter_rules())
+    except Exception:
+        return False
 
-_TF_TOKENS_TRUE = {"true", "t", "yes", "y"}
-_TF_TOKENS_FALSE = {"false", "f", "no", "n"}
-
-def _classify_question_type(q: dict) -> str:
-    """Heuristic classification: 'tf' if options include both True/False;
-    'scenario' if question starts with 'Scenario:' (case-insensitive); else 'mcq'."""
-    # Optional explicit hint
-    qtype = (q.get("type") or "").strip().lower()
-    if qtype in ("tf", "truefalse", "true_false"):
-        return "tf"
-    if qtype in ("scenario", "case", "case-study"):
-        return "scenario"
-
+def _question_type_from_question(q: dict) -> str:
+    """
+    Heuristic classifier for question type:
+      - 'tf'       -> options dominated by True/False (or stem mentions 'True/False')
+      - 'scenario' -> stem includes 'Scenario:' (or 'Case:')
+      - 'mcq'      -> default
+    """
     stem = (q.get("question") or "").strip()
-    if stem.lower().startswith("scenario:"):
+    opts = q.get("options") or {}
+    texts = []
+    for L in ("A", "B", "C", "D"):
+        v = opts.get(L)
+        if v is None:
+            continue
+        texts.append(str(v).strip().lower())
+
+    tf_syn = {"true", "false", "t", "f", "yes", "no", "y", "n"}
+    stem_l = stem.lower()
+
+    # Strong signals for T/F
+    if "true/false" in stem_l:
+        return "tf"
+    # Options dominated by TF synonyms (allow extra noise but require both true & false present)
+    has_true = any(t in {"true", "t", "yes", "y"} for t in texts)
+    has_false = any(t in {"false", "f", "no", "n"} for t in texts)
+    if has_true and has_false and all((t in tf_syn) for t in set(texts)):
+        return "tf"
+
+    # Scenario cues
+    if stem_l.startswith("scenario:") or "scenario:" in stem_l or stem_l.startswith("case:"):
         return "scenario"
 
-    opts = q.get("options") or {}
-    vals = [str(opts.get(k, "")).strip().lower() for k in ("A", "B", "C", "D")]
-    tokens = {re.sub(r"[^a-z]", "", v) for v in vals if v}
-    has_true = any(tok in _TF_TOKENS_TRUE for tok in tokens)
-    has_false = any(tok in _TF_TOKENS_FALSE for tok in tokens)
-    if has_true and has_false:
-        return "tf"
     return "mcq"
 
-@app.get("/admin/content-balance")
-@login_required
-def admin_content_balance():
-    if not is_admin():
-        return redirect(url_for("admin_login_page", next=request.path))
+# Only register the route once.
+if ("admin_content_balance" not in app.view_functions) and (not _route_exists("/admin/content-balance")):
+    @app.get("/admin/content-balance")
+    @login_required
+    def admin_content_balance():
+        if not is_admin():
+            return redirect(url_for("admin_login_page", next=request.path))
 
-    bank_q = _bank_read_questions()
-    # Build counts
-    counts = {}
-    total_counts = {"mcq": 0, "tf": 0, "scenario": 0}
-    for q in bank_q:
-        d = (q.get("domain") or "Unspecified").strip().lower()
-        d = d if d in CONTENT_TARGETS else d  # allow unknown, will show as-is
-        qt = _classify_question_type(q)
-        dct = counts.setdefault(d, {"mcq": 0, "tf": 0, "scenario": 0})
-        dct[qt] = dct.get(qt, 0) + 1
-        total_counts[qt] += 1
+        # Targets per your requested 900-question plan (50/25/25 split).
+        TARGETS = {
+            "security-principles":  {"mcq": 99, "tf": 50, "scenario": 50},
+            "business-principles":  {"mcq": 99, "tf": 50, "scenario": 50},
+            "investigations":       {"mcq": 54, "tf": 27, "scenario": 27},
+            "personnel-security":   {"mcq": 45, "tf": 22, "scenario": 22},
+            "physical-security":    {"mcq": 90, "tf": 45, "scenario": 45},
+            "information-security": {"mcq": 27, "tf": 14, "scenario": 14},
+            "crisis-management":    {"mcq": 36, "tf": 18, "scenario": 18},
+        }
 
-    # Render table rows
-    def _progbar(val, target):
-        pct = 0 if not target else min(100, int((val / target) * 100))
-        return f"""
-        <div class="progress" style="height:14px;">
-          <div class="progress-bar" role="progressbar" style="width: {pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="{target}">{val}/{target}</div>
-        </div>
+        # Initialize counters for all known domains (default to zeros if new).
+        all_domains = set(TARGETS.keys()) | set(DOMAINS.keys())
+        counts = {d: {"mcq": 0, "tf": 0, "scenario": 0} for d in all_domains}
+
+        # Count questions by domain × type from the bank
+        bank_q = _bank_read_questions()
+        for q in bank_q:
+            dom = (q.get("domain") or "Unspecified").strip().lower()
+            qtype = _question_type_from_question(q)
+            # Normalize domain key if it's one we show in DOMAINS
+            if dom not in counts:
+                counts[dom] = {"mcq": 0, "tf": 0, "scenario": 0}
+            if qtype not in counts[dom]:
+                counts[dom][qtype] = 0
+            counts[dom][qtype] += 1
+
+        def _pb(cur: int, tgt: int) -> str:
+            pct = 0 if tgt <= 0 else min(100, int(round(100 * (cur / tgt))))
+            bar = f"""
+            <div class="progress" style="height: 12px;">
+              <div class="progress-bar" role="progressbar" style="width: {pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">{pct}%</div>
+            </div>
+            """
+            return bar
+
+        # Build table rows
+        def _row_for_domain(dkey: str) -> str:
+            human = DOMAINS.get(dkey, dkey.title())
+            cur = counts.get(dkey, {"mcq": 0, "tf": 0, "scenario": 0})
+            tgt = TARGETS.get(dkey, {"mcq": 0, "tf": 0, "scenario": 0})
+            mcq_c, mcq_t = int(cur.get("mcq", 0)), int(tgt.get("mcq", 0))
+            tf_c, tf_t = int(cur.get("tf", 0)), int(tgt.get("tf", 0))
+            sc_c, sc_t = int(cur.get("scenario", 0)), int(tgt.get("scenario", 0))
+            return f"""
+            <tr>
+              <td class="text-nowrap">{html.escape(human)}</td>
+              <td class="text-end">{mcq_c}/{mcq_t}{_pb(mcq_c, mcq_t)}</td>
+              <td class="text-end">{tf_c}/{tf_t}{_pb(tf_c, tf_t)}</td>
+              <td class="text-end">{sc_c}/{sc_t}{_pb(sc_c, sc_t)}</td>
+            </tr>
+            """
+
+        ordered_domains = [
+            "security-principles",
+            "business-principles",
+            "investigations",
+            "personnel-security",
+            "physical-security",
+            "information-security",
+            "crisis-management",
+        ]
+        # Include any extra domains at the end
+        for extra in sorted(d for d in counts.keys() if d not in ordered_domains):
+            ordered_domains.append(extra)
+
+        rows_html = "".join(_row_for_domain(d) for d in ordered_domains)
+
+        # Totals row
+        tot_cur = {"mcq": 0, "tf": 0, "scenario": 0}
+        tot_tgt = {"mcq": 0, "tf": 0, "scenario": 0}
+        for d in ordered_domains:
+            c = counts.get(d, {})
+            t = TARGETS.get(d, {})
+            tot_cur["mcq"] += int(c.get("mcq", 0))
+            tot_cur["tf"] += int(c.get("tf", 0))
+            tot_cur["scenario"] += int(c.get("scenario", 0))
+            tot_tgt["mcq"] += int(t.get("mcq", 0))
+            tot_tgt["tf"] += int(t.get("tf", 0))
+            tot_tgt["scenario"] += int(t.get("scenario", 0))
+
+        total_row = f"""
+        <tr class="table-secondary fw-semibold">
+          <td>Total</td>
+          <td class="text-end">{tot_cur['mcq']}/{tot_tgt['mcq']}{_pb(tot_cur['mcq'], tot_tgt['mcq'])}</td>
+          <td class="text-end">{tot_cur['tf']}/{tot_tgt['tf']}{_pb(tot_cur['tf'], tot_tgt['tf'])}</td>
+          <td class="text-end">{tot_cur['scenario']}/{tot_tgt['scenario']}{_pb(tot_cur['scenario'], tot_tgt['scenario'])}</td>
+        </tr>
         """
 
-    rows = []
-    # Ensure domains show in canonical order first
-    ordered_domains = list(CONTENT_TARGETS.keys()) + [d for d in counts.keys() if d not in CONTENT_TARGETS]
-    seen_d = set()
-    for d in ordered_domains:
-        if d in seen_d:
-            continue
-        seen_d.add(d)
-        targ = CONTENT_TARGETS.get(d, {"mcq": 0, "tf": 0, "scenario": 0})
-        have = counts.get(d, {"mcq": 0, "tf": 0, "scenario": 0})
-        label = DOMAINS.get(d, d.title())
-        rows.append(f"""
-        <tr>
-          <td class="text-nowrap">{html.escape(label)}</td>
-          <td style="min-width:180px;">{_progbar(have.get('mcq',0), targ.get('mcq',0))}</td>
-          <td style="min-width:180px;">{_progbar(have.get('tf',0), targ.get('tf',0))}</td>
-          <td style="min-width:180px;">{_progbar(have.get('scenario',0), targ.get('scenario',0))}</td>
-        </tr>
-        """)
-
-    rows_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No questions ingested yet.</td></tr>"
-
-    totals_row = f"""
-    <tr class="table-light">
-      <td><strong>Totals</strong></td>
-      <td>{total_counts['mcq']}</td>
-      <td>{total_counts['tf']}</td>
-      <td>{total_counts['scenario']}</td>
-    </tr>
-    """
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-secondary text-white">
-            <h3 class="mb-0"><i class="bi bi-bullseye me-2"></i>Content Balance (Domain × Type)</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted">
-              Targets reflect 900 total questions with 50% MCQ / 25% True-False / 25% Scenario, distributed by CPP domain weights.
-            </p>
-            <div class="table-responsive">
-              <table class="table align-middle">
-                <thead>
-                  <tr>
-                    <th>Domain</th>
-                    <th>MCQ</th>
-                    <th>True/False</th>
-                    <th>Scenario</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {rows_html}
-                  {totals_row}
-                </tbody>
-              </table>
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-xl-10">
+            <div class="card">
+              <div class="card-header bg-dark text-white">
+                <h3 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Content Balance</h3>
+              </div>
+              <div class="card-body">
+                <p class="text-muted">
+                  Targets reflect the 900-question plan (50% MCQ, 25% True/False, 25% Scenario) apportioned by domain.
+                </p>
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle">
+                    <thead>
+                      <tr>
+                        <th>Domain</th>
+                        <th class="text-end">MCQ</th>
+                        <th class="text-end">True/False</th>
+                        <th class="text-end">Scenario</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows_html}
+                      {total_row}
+                    </tbody>
+                  </table>
+                </div>
+                <div class="mt-3 d-flex gap-2">
+                  <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+                  <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Checker</a>
+                </div>
+              </div>
             </div>
-            <div class="mt-3 d-flex gap-2">
-              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Validator</a>
-            </div>
-          </div>
+          </div></div>
         </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Content Balance", content)
-
+        """
+        return base_layout("Content Balance", content)
 
 # =========================
 # SECTION 8/8: Startup, health, error pages, and __main__
@@ -4177,5 +4232,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
