@@ -3352,250 +3352,421 @@ def admin_content_balance():
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
 
-# NOTE ON DUPLICATION:
-# Per requirements, canonical admin ingestion endpoints and source validation/hashing
-# helpers live in Section 5/8. To avoid duplicate route/function definitions, this
-# section ONLY adds auxiliary utilities and a new "Content Balance" admin view to
-# track progress toward the 900-question target split by domain and type.
-
-# ---------- Question Typing & Targets (for balance tracking) ----------
-
-# Supported logical types for questions
-QUESTION_TYPES = ["mcq", "tf", "scenario"]
-
-# Exact target allocation provided (total = 900; split 50% MCQ, 25% T/F, 25% Scenario)
-TARGET_COUNTS = {
-    # domain_key: {"mcq": int, "tf": int, "scenario": int, "total": int}
-    "security-principles":  {"mcq": 99, "tf": 50, "scenario": 50, "total": 198},
-    "business-principles":  {"mcq": 99, "tf": 50, "scenario": 50, "total": 198},
-    "investigations":       {"mcq": 54, "tf": 27, "scenario": 27, "total": 108},
-    "personnel-security":   {"mcq": 45, "tf": 22, "scenario": 22, "total": 90},
-    "physical-security":    {"mcq": 90, "tf": 45, "scenario": 45, "total": 180},
-    "information-security": {"mcq": 27, "tf": 14, "scenario": 14, "total": 54},
-    "crisis-management":    {"mcq": 36, "tf": 18, "scenario": 18, "total": 72},
+# -------- Source whitelist (edit anytime) --------
+ALLOWED_SOURCE_DOMAINS = {
+    # Government & standards (non-proprietary)
+    "nist.gov", "cisa.gov", "fema.gov", "osha.gov", "gao.gov",
+    # Research & practice
+    "popcenter.asu.edu",  # POP Center
+    "ncpc.org",           # National Crime Prevention Council
+    "fbi.gov",
+    "rand.org",
+    "hsdl.org",           # Homeland Security Digital Library
+    "nfpa.org",           # view-only summaries allowed
+    "iso.org",            # summaries only
+    # After Action Reports (public/official postings)
+    "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov",
+    "phila.gov", "denvergov.org", "boston.gov", "chicago.gov",
+    "seattle.gov", "sandiego.gov", "lacounty.gov",
+    "ready.gov"           # FEMA/ICS public summaries & guidance
 }
+# NOTE: Wikipedia intentionally NOT allowed.
 
-def _infer_q_type(q: dict) -> str:
+from urllib.parse import urlparse
+
+def _url_domain_ok(url: str) -> bool:
+    """Return True if URL domain is in the allowed whitelist."""
+    try:
+        d = urlparse((url or "").strip()).netloc.lower()
+        if not d:
+            return False
+        return any(d == dom or d.endswith("." + dom) for dom in ALLOWED_SOURCE_DOMAINS)
+    except Exception:
+        return False
+
+def _validate_sources(sources: list) -> tuple[bool, str]:
     """
-    Infer a question's logical type for balance tracking.
+    Enforce 1–3 sources; each must have title + URL; URL domain must be whitelisted.
+    """
+    if not isinstance(sources, list) or not (1 <= len(sources) <= 3):
+        return False, "Each item must include 1–3 sources."
+    for s in sources:
+        if not isinstance(s, dict):
+            return False, "Source entries must be objects with title and url."
+        t = (s.get("title") or "").strip()
+        u = (s.get("url") or "").strip()
+        if not t or not u:
+            return False, "Source requires non-empty title and url."
+        if not _url_domain_ok(u):
+            return False, f"URL domain not allowed: {u}"
+    return True, ""
 
-    Priority:
-      1) Respect explicit q["type"] if present and valid ('mcq'|'tf'|'scenario').
-      2) If stem starts with/contains 'Scenario:' (case-insensitive near start) -> 'scenario'.
-      3) If options suggest True/False (A/B exactly True/False or T/F) -> 'tf'.
-      4) Otherwise -> 'mcq'.
+# -------- Hash & de-dup index --------
+def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> str:
+    # Canonical string for deterministic hashing
+    blob = json.dumps({
+        "k": "fc",
+        "front": front.strip().lower(),
+        "back": back.strip().lower(),
+        "domain": (domain or "Unspecified").strip().lower(),
+        "srcs": [{"t": (s.get("title","").strip().lower()),
+                  "u": (s.get("url","").strip().lower())} for s in (sources or [])]
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-    NOTE: Rendering remains generic MCQ; this type is used for ingestion metrics only.
+def _item_hash_question(question: str, options: dict, correct: str, domain: str, sources: list) -> str:
+    # Keep options in A..D order for stable hashing
+    ordered = {k: str(options.get(k,"")).strip().lower() for k in ["A","B","C","D"]}
+    blob = json.dumps({
+        "k": "q",
+        "q": (question or "").strip().lower(),
+        "opts": ordered,
+        "correct": (correct or "").strip().upper(),
+        "domain": (domain or "Unspecified").strip().lower(),
+        "srcs": [{"t": (s.get("title","").strip().lower()),
+                  "u": (s.get("url","").strip().lower())} for s in (sources or [])]
+    }, sort_keys=True, ensure_ascii=False)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+def _load_content_index():
+    return _load_json("bank/content_index.json", {})
+
+def _save_content_index(idx: dict):
+    _save_json("bank/content_index.json", idx)
+
+# -------- Bank file helpers --------
+def _bank_read_flashcards():
+    return _load_json("bank/cpp_flashcards_v1.json", [])
+
+def _bank_read_questions():
+    return _load_json("bank/cpp_questions_v1.json", [])
+
+def _bank_write_flashcards(items: list):
+    _save_json("bank/cpp_flashcards_v1.json", items)
+
+def _bank_write_questions(items: list):
+    _save_json("bank/cpp_questions_v1.json", items)
+
+# -------- Normalize incoming shapes to bank schema --------
+def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
+    """
+    Input flexible keys -> output bank schema:
+    { "front": str, "back": str, "domain": str, "sources": [{title,url},..] }
+    """
+    if not isinstance(fc_in, dict):
+        return None, "Flashcard must be an object."
+    front = (fc_in.get("front") or fc_in.get("q") or fc_in.get("term") or "").strip()
+    back  = (fc_in.get("back") or fc_in.get("a") or fc_in.get("definition") or "").strip()
+    domain = (fc_in.get("domain") or fc_in.get("category") or "Unspecified").strip()
+    sources = fc_in.get("sources") or []
+    if not front or not back:
+        return None, "Flashcard needs front/back text."
+    ok, msg = _validate_sources(sources)
+    if not ok:
+        return None, msg
+    out = {"front": front, "back": back, "domain": domain, "sources": sources}
+    return out, ""
+
+def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
+    """
+    Input flexible keys -> bank schema (4-choice MCQ):
+    {
+      "question": str,
+      "options": {"A": "...","B": "...","C": "...","D": "..."},
+      "correct": "A"|"B"|"C"|"D",
+      "domain": str,
+      "sources": [{title,url}]
+    }
+    """
+    if not isinstance(q_in, dict):
+        return None, "Question must be an object."
+    question = (q_in.get("question") or q_in.get("q") or q_in.get("stem") or "").strip()
+    domain   = (q_in.get("domain") or q_in.get("category") or "Unspecified").strip()
+    sources  = q_in.get("sources") or []
+    # Options can come as dict or list
+    raw_opts = q_in.get("options") or q_in.get("choices") or q_in.get("answers")
+    opts = {}
+    if isinstance(raw_opts, dict):
+        for L in ["A","B","C","D"]:
+            v = raw_opts.get(L) or raw_opts.get(L.lower())
+            if not v: return None, f"Missing option {L}"
+            opts[L] = str(v)
+    elif isinstance(raw_opts, list) and len(raw_opts) >= 4:
+        letters = ["A","B","C","D"]
+        for i, L in enumerate(letters):
+            v = raw_opts[i]
+            if isinstance(v, dict):
+                opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "")
+            else:
+                opts[L] = str(v)
+    else:
+        return None, "Options must provide 4 choices."
+    # Correct can be letter or 1-based index
+    correct = q_in.get("correct") or q_in.get("answer") or q_in.get("correct_key")
+    if isinstance(correct, str) and correct.strip().upper() in ("A","B","C","D"):
+        correct = correct.strip().upper()
+    else:
+        try:
+            idx = int(correct)
+            correct = ["A","B","C","D"][idx - 1]
+        except Exception:
+            return None, "Correct must be A/B/C/D or 1..4."
+    # Sources validate
+    ok, msg = _validate_sources(sources)
+    if not ok:
+        return None, msg
+    if not question:
+        return None, "Question text required."
+    return {"question": question, "options": opts, "correct": correct, "domain": domain, "sources": sources}, ""
+
+# ---- Tutor settings (persisted file; ENV can override) ----
+def _load_tutor_settings():
+    """
+    Returns {"web_aware": bool}. Default is taken from ENV TUTOR_WEB_AWARE if present,
+    otherwise the value stored in data/tutor_settings.json (default False).
+    """
+    return _load_json(
+        "tutor_settings.json",
+        {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}
+    )
+
+def _save_tutor_settings(cfg: dict):
+    _save_json("tutor_settings.json", cfg or {})
+
+def _tutor_web_enabled() -> bool:
+    env = os.environ.get("TUTOR_WEB_AWARE")
+    if env in ("0", "1"):
+        return env == "1"
+    return bool(_load_tutor_settings().get("web_aware", False))
+
+# ---- Bank-source citation finder (uses only your ingested sources) ----
+def _bank_all_sources():
+    """
+    Yields unique source dicts from bank files:
+      {"title":..., "url":..., "domain":..., "from":"flashcard|question"}
+    Only returns URLs whose domain is whitelisted by ALLOWED_SOURCE_DOMAINS.
+    """
+    seen = set()
+
+    # From flashcards
+    for fc in _load_json("bank/cpp_flashcards_v1.json", []):
+        for s in (fc.get("sources") or []):
+            t = (s.get("title") or "").strip()
+            u = (s.get("url") or "").strip()
+            if not t or not u:
+                continue
+            if not _url_domain_ok(u):
+                continue
+            key = (t, u)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "flashcard"}
+
+    # From questions
+    for q in _load_json("bank/cpp_questions_v1.json", []):
+        for s in (q.get("sources") or []):
+            t = (s.get("title") or "").strip()
+            u = (s.get("url") or "").strip()
+            if not t or not u:
+                continue
+            if not _url_domain_ok(u):
+                continue
+            key = (t, u)
+            if key in seen:
+                continue
+            seen.add(key)
+            yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "question"}
+
+def _extract_keywords(text: str) -> set[str]:
+    words = re.findall(r"[A-Za-z]{3,}", (text or "").lower())
+    stop = {"the","and","for","with","from","this","that","into","over","under",
+            "your","about","have","what","when","where","which"}
+    return {w for w in words if w not in stop}
+
+def _score_source(src, kw: set[str]) -> int:
+    """
+    Score by keyword overlap in title; small boost for .gov standards.
+    """
+    score = 0
+    title_words = set(re.findall(r"[A-Za-z]{3,}", src["title"].lower()))
+    score += len(title_words & kw) * 3
+    if any(src["domain"].endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
+        score += 2
+    return score
+
+def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
+    """
+    Returns up to `max_n` relevant sources from the ingested bank (flashcards/questions).
+    Uses a simple keyword overlap scoring on titles with a small boost for .gov/standards.
+    Output item shape: {"title": str, "url": str, "domain": str, "from": "flashcard"|"question"}
     """
     try:
-        t = (q.get("type") or "").strip().lower()
-        if t in QUESTION_TYPES:
-            return t
-    except Exception:
-        pass
+        kw = _extract_keywords(query)
+        candidates = []
+        for src in _bank_all_sources():
+            sc = _score_source(src, kw)
+            if sc > 0:
+                candidates.append((sc, src))
+        # If nothing scored > 0, fall back to top N unique sources
+        if not candidates:
+            uniq = []
+            seen = set()
+            for src in _bank_all_sources():
+                k = (src["title"], src["url"])
+                if k in seen:
+                    continue
+                seen.add(k)
+                uniq.append(src)
+                if len(uniq) >= max_n:
+                    break
+            return uniq
+        candidates.sort(key=lambda t: t[0], reverse=True)
+        top = []
+        seen_k = set()
+        for _, src in candidates:
+            k = (src["title"], src["url"])
+            if k in seen_k:
+                continue
+            seen_k.add(k)
+            top.append(src)
+            if len(top) >= max_n:
+                break
+        return top
+    except Exception as e:
+        logger.warning("find_bank_citations failed: %s", e)
+        return []
 
-    stem = (q.get("question") or q.get("q") or q.get("stem") or "").strip()
-    if re.search(r"^\s*scenario\s*:", stem, flags=re.IGNORECASE):
+# -------- Content Balance (admin-only UI) --------
+def _infer_question_type(q: dict) -> str:
+    """
+    Heuristic to infer question type:
+      - 'scenario' if stem starts with 'Scenario:' (case-insensitive) or contains 'Scenario:' anywhere.
+      - 'tf' if options include both 'true' and 'false' strings (case-insensitive).
+      - otherwise 'mcq'.
+    """
+    stem = (q.get("question", "") or "").strip().lower()
+    if stem.startswith("scenario:") or "scenario:" in stem:
         return "scenario"
-
     opts = q.get("options") or {}
-    a = str(opts.get("A", "")).strip().lower()
-    b = str(opts.get("B", "")).strip().lower()
-    tf_set = {"true", "false", "t", "f"}
-    if a in tf_set and b in tf_set:
+    opt_texts = {str(v).strip().lower() for v in [opts.get("A"), opts.get("B"), opts.get("C"), opts.get("D")] if v is not None}
+    if "true" in opt_texts and "false" in opt_texts:
         return "tf"
-
     return "mcq"
 
+# Targets per the user's requested allocation (total 900; 50% MCQ, 25% TF, 25% Scenario)
+_CONTENT_TARGETS = {
+    "security-principles":  {"total": 198, "mcq": 99, "tf": 50, "scenario": 50},
+    "business-principles":  {"total": 198, "mcq": 99, "tf": 50, "scenario": 50},
+    "investigations":       {"total": 108, "mcq": 54, "tf": 27, "scenario": 27},
+    "personnel-security":   {"total":  90, "mcq": 45, "tf": 22, "scenario": 22},
+    "physical-security":    {"total": 180, "mcq": 90, "tf": 45, "scenario": 45},
+    "information-security": {"total":  54, "mcq": 27, "tf": 14, "scenario": 14},
+    "crisis-management":    {"total":  72, "mcq": 36, "tf": 18, "scenario": 18},
+}
 
-def _compute_content_balance(bank_questions: list[dict]) -> dict:
-    """
-    Returns nested counts by domain and type:
-      {
-        "<domain>": {"mcq": X, "tf": Y, "scenario": Z, "total": N},
-        ...
-        "_totals": {"mcq": ..., "tf": ..., "scenario": ..., "total": ...}
-      }
-    """
-    counts: dict[str, dict[str, int]] = {}
-    totals = {"mcq": 0, "tf": 0, "scenario": 0, "total": 0}
-
-    for q in (bank_questions or []):
-        dom = (q.get("domain") or "Unspecified").strip()
-        qt = _infer_q_type(q)
-        bucket = counts.setdefault(dom, {"mcq": 0, "tf": 0, "scenario": 0, "total": 0})
-        if qt not in QUESTION_TYPES:
-            qt = "mcq"
-        bucket[qt] += 1
-        bucket["total"] += 1
-        totals[qt] += 1
-        totals["total"] += 1
-
-    counts["_totals"] = totals
-    return counts
-
-
-def _progress_bar_html(current: int, target: int, label: str = "") -> str:
-    pct = 0
-    if target > 0:
-        pct = int(round((current / target) * 100))
-        pct = max(0, min(100, pct))
-    bar_class = "bg-success" if pct >= 100 else ("bg-info" if pct >= 50 else "bg-warning")
-    return f"""
-      <div class="progress" style="height: 14px;">
-        <div class="progress-bar {bar_class}" role="progressbar" style="width: {pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">
-          <span class="small">{pct}%</span>
-        </div>
-      </div>
-      <div class="small text-muted mt-1">{html.escape(label)} {current}/{target}</div>
-    """
-
-
-def _domain_label(dom_key: str) -> str:
-    try:
-        return DOMAINS.get(dom_key, dom_key)
-    except Exception:
-        return dom_key
-
-
-# ---------- Admin: Content Balance (new) ----------
 @app.get("/admin/content-balance")
 @login_required
 def admin_content_balance():
     if not is_admin():
         return redirect(url_for("admin_login_page", next=request.path))
 
-    bank_q = _bank_read_questions() if " _bank_read_questions" or True else _load_json("bank/cpp_questions_v1.json", [])
-    counts = _compute_content_balance(bank_q)
+    # Load bank questions
+    bank_q = _bank_read_questions()
 
-    # Build table rows per domain (using configured targets when present)
+    # Aggregate counts: domain -> {total, mcq, tf, scenario}
+    by_dom: dict[str, dict[str, int]] = {}
+    for q in bank_q:
+        dom = (q.get("domain") or "Unspecified").strip().lower()
+        typ = _infer_question_type(q)
+        stats = by_dom.setdefault(dom, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
+        stats["total"] += 1
+        if typ in ("mcq","tf","scenario"):
+            stats[typ] += 1
+        else:
+            stats["mcq"] += 1  # fallback
+
+    # Build rows with progress bars vs targets (only for known domains with targets)
+    def _bar(cur, tgt):
+        pct = 0 if tgt <= 0 else min(100, int(round(100.0 * float(cur) / float(tgt))))
+        cls = "bg-success" if pct >= 100 else ("bg-warning" if pct >= 60 else "bg-secondary")
+        return f"""
+          <div class="progress" style="height:14px;">
+            <div class="progress-bar {cls}" role="progressbar" style="width:{pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">
+              <span class="small">{cur}/{tgt}</span>
+            </div>
+          </div>
+        """
+
     rows = []
-    # Sort domains: known first in DOMAINS order, then others alphabetically
-    known_order = list(DOMAINS.keys())
-    domains_sorted = sorted(set([d for d in counts.keys() if d != "_totals"]),
-                            key=lambda d: (known_order.index(d) if d in known_order else 999, d))
-
-    for dom in domains_sorted:
-        c = counts.get(dom, {"mcq": 0, "tf": 0, "scenario": 0, "total": 0})
-        tgt = TARGET_COUNTS.get(dom, {"mcq": 0, "tf": 0, "scenario": 0, "total": 0})
-
-        mcq_bar = _progress_bar_html(c["mcq"], tgt.get("mcq", 0), "MCQ")
-        tf_bar = _progress_bar_html(c["tf"], tgt.get("tf", 0), "True/False")
-        sc_bar = _progress_bar_html(c["scenario"], tgt.get("scenario", 0), "Scenario")
-        tot_bar = _progress_bar_html(c["total"], tgt.get("total", 0), "Total")
-
+    # Iterate in a consistent order (targets first), then any extra domains
+    all_domains = list(_CONTENT_TARGETS.keys()) + [d for d in by_dom.keys() if d not in _CONTENT_TARGETS]
+    seen = set()
+    for dk in all_domains:
+        if dk in seen:  # avoid dupes
+            continue
+        seen.add(dk)
+        label = DOMAINS.get(dk, dk.title()) if 'DOMAINS' in globals() else dk.title()
+        stats = by_dom.get(dk, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
+        tgt = _CONTENT_TARGETS.get(dk, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
         rows.append(f"""
           <tr>
-            <td class="text-nowrap">{html.escape(_domain_label(dom))}</td>
-            <td style="min-width:180px;">{mcq_bar}</td>
-            <td style="min-width:180px;">{tf_bar}</td>
-            <td style="min-width:180px;">{sc_bar}</td>
-            <td style="min-width:180px;">{tot_bar}</td>
+            <td>{html.escape(label)}</td>
+            <td>{_bar(stats["total"], tgt["total"])}</td>
+            <td>{_bar(stats["mcq"],  tgt["mcq"])}</td>
+            <td>{_bar(stats["tf"],   tgt["tf"])}</td>
+            <td>{_bar(stats["scenario"], tgt["scenario"])}</td>
           </tr>
         """)
 
-    body_rows = "".join(rows) or "<tr><td colspan='5' class='text-center text-muted'>No questions ingested yet.</td></tr>"
+    table_html = "".join(rows) or "<tr><td colspan='5' class='text-center text-muted'>No questions yet.</td></tr>"
 
-    # Totals vs global targets
-    tot_counts = counts.get("_totals", {"mcq": 0, "tf": 0, "scenario": 0, "total": 0})
-    tgt_totals = {
-        "mcq": sum(TARGET_COUNTS[d]["mcq"] for d in TARGET_COUNTS),
-        "tf": sum(TARGET_COUNTS[d]["tf"] for d in TARGET_COUNTS),
-        "scenario": sum(TARGET_COUNTS[d]["scenario"] for d in TARGET_COUNTS),
-        "total": sum(TARGET_COUNTS[d]["total"] for d in TARGET_COUNTS),
-    }
-
-    totals_html = f"""
-      <div class="row g-3">
-        <div class="col-md-3">
-          <div class="p-3 border rounded-3">
-            <div class="fw-semibold mb-1">MCQ</div>
-            {_progress_bar_html(tot_counts.get("mcq",0), tgt_totals["mcq"], "MCQ total")}
-          </div>
-        </div>
-        <div class="col-md-3">
-          <div class="p-3 border rounded-3">
-            <div class="fw-semibold mb-1">True/False</div>
-            {_progress_bar_html(tot_counts.get("tf",0), tgt_totals["tf"], "T/F total")}
-          </div>
-        </div>
-        <div class="col-md-3">
-          <div class="p-3 border rounded-3">
-            <div class="fw-semibold mb-1">Scenario</div>
-            {_progress_bar_html(tot_counts.get("scenario",0), tgt_totals["scenario"], "Scenario total")}
-          </div>
-        </div>
-        <div class="col-md-3">
-          <div class="p-3 border rounded-3">
-            <div class="fw-semibold mb-1">All Questions</div>
-            {_progress_bar_html(tot_counts.get("total",0), tgt_totals["total"], "Grand total")}
-          </div>
-        </div>
+    # Legend & helper text
+    legend = """
+      <div class="small text-muted">
+        Targets reflect 900 total questions with a 50% / 25% / 25% type split across domains:
+        <code>MCQ</code> (Multiple Choice), <code>T/F</code> (True/False as boolean-style items),
+        and <code>Scenario</code> (scenario-driven stems).
+        Scenario items are inferred when the stem includes <em>Scenario:</em>.
       </div>
     """
 
     content = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-xl-10">
-      <div class="card">
-        <div class="card-header bg-secondary text-white">
-          <h3 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Content Balance (Targets vs Current)</h3>
-        </div>
-        <div class="card-body">
-          <div class="alert alert-info border-0">
-            <i class="bi bi-info-circle me-2"></i>
-            Tracking progress toward the 900-question goal with the requested 50% MCQ / 25% T/F / 25% Scenario split.
-            Use the <code>/api/dev/ingest</code> JSON endpoint to add content in batches.
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-secondary text-white">
+            <h3 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Content Balance</h3>
           </div>
-
-          {totals_html}
-
-          <div class="table-responsive mt-4">
-            <table class="table table-sm align-middle">
-              <thead>
-                <tr>
-                  <th>Domain</th>
-                  <th>MCQ</th>
-                  <th>True/False</th>
-                  <th>Scenario</th>
-                  <th>Total</th>
-                </tr>
-              </thead>
-              <tbody>{body_rows}</tbody>
-            </table>
-          </div>
-
-          <div class="mt-3 d-flex gap-2">
-            <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-            <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Check</a>
+          <div class="card-body">
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead>
+                  <tr>
+                    <th style="min-width:180px;">Domain</th>
+                    <th style="min-width:220px;">Total</th>
+                    <th style="min-width:220px;">MCQ</th>
+                    <th style="min-width:220px;">T/F</th>
+                    <th style="min-width:220px;">Scenario</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {table_html}
+                </tbody>
+              </table>
+            </div>
+            {legend}
+            <div class="mt-3 d-flex gap-2">
+              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+              <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Checker</a>
+            </div>
           </div>
         </div>
-      </div>
-    </div></div></div>
+      </div></div>
+    </div>
     """
     return base_layout("Content Balance", content)
 
-
-@app.get("/admin/content-balance.json")
-@login_required
-def admin_content_balance_json():
-    if not is_admin():
-        return jsonify({"ok": False, "error": "admin-required"}), 403
-
-    bank_q = _bank_read_questions()
-    counts = _compute_content_balance(bank_q)
-    targets = TARGET_COUNTS
-    totals_target = {
-        "mcq": sum(targets[d]["mcq"] for d in targets),
-        "tf": sum(targets[d]["tf"] for d in targets),
-        "scenario": sum(targets[d]["scenario"] for d in targets),
-        "total": sum(targets[d]["total"] for d in targets),
-    }
-    return jsonify({
-        "ok": True,
-        "counts": counts,
-        "targets": targets,
-        "targets_totals": totals_target
-    })
 # =========================
 # SECTION 7/8: Tutor (web-aware citations override) + settings UI
 # =========================
@@ -4133,3 +4304,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
