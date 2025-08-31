@@ -6,17 +6,13 @@
 from flask import (
     Flask, request, jsonify, session, redirect, url_for, Response, abort
 )
-# NOTE: routes that serve files (favicon, etc.) will be added later; the above import set
-# intentionally mirrors your current codebase for compatibility.
-
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
 from functools import wraps
 from datetime import datetime, timedelta
-from typing import Dict, Any
+from typing import Dict, Any, Tuple, List
 
-import os, json, random, requests, html, uuid, logging, time, hashlib, re, base64
-
+import os, json, random, requests, html, uuid, logging, time, hashlib, re
 import sqlite3
 import stripe
 
@@ -68,21 +64,8 @@ APP_VERSION = os.environ.get("APP_VERSION", "1.0.0")
 IS_STAGING  = os.environ.get("RENDER_SERVICE_NAME", "").endswith("-staging")
 DEBUG       = os.environ.get("FLASK_DEBUG", "0") == "1"
 
-# ---- NEW: Legal/T&C versioning (used for hard gate later) ----
-TERMS_VERSION = os.environ.get("TERMS_VERSION", "2025-09-01").strip()
-
-# ---- NEW: Site polish resources (served in Section 8) ----
-# 1x1 transparent PNG (valid for /favicon.ico to stop 404 noise)
-FAVICON_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y1n8y8AAAAASUVORK5CYII="
-)
-ROBOTS_TXT = "User-agent: *\nDisallow:\n"
-
-# ---- NEW: Footer text bits (Welcome/Disclaimer references in later sections) ----
-DISCLAIMER_SHORT = (
-    "Independent study tool; not affiliated with ASIS International. "
-    "CPP® is a mark of ASIS International, Inc. No refunds after access is granted."
-)
+# Legal/T&C gate versioning
+TERMS_VERSION = os.environ.get("TERMS_VERSION", "2025-09-01")  # bump when you update legal text
 
 app.config.update(
     SESSION_COOKIE_HTTPONLY=True,
@@ -95,7 +78,7 @@ DATA_DIR = os.environ.get("DATA_DIR", "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 DATABASE_PATH = os.path.join(DATA_DIR, "app.db")
 
-def _load_json(name, default):
+def _load_json(name: str, default):
     """
     name: relative to DATA_DIR. e.g., 'users.json' or 'bank/cpp_questions_v1.json'
     """
@@ -109,7 +92,7 @@ def _load_json(name, default):
         logger.warning("Failed to load %s: %s", name, e)
         return default
 
-def _save_json(name, data):
+def _save_json(name: str, data):
     """
     Atomic JSON save into DATA_DIR/name.
     """
@@ -213,10 +196,6 @@ def safe_json_response(data, status_code=200):
         logger.error(f"JSON serialization error: {e}")
         return jsonify({"error": "Internal server error"}), 500
 
-# ----- Time/ISO helpers -----
-def _now_iso(seconds: bool = True) -> str:
-    return datetime.utcnow().isoformat(timespec="seconds" if seconds else "milliseconds") + "Z"
-
 # ----- Auth helpers -----
 def login_required(f):
     @wraps(f)
@@ -265,7 +244,9 @@ def _update_user(user_id: str, updates: Dict[str, Any]) -> bool:
     users = _load_users()
     for i, u in enumerate(users):
         if u.get("id") == user_id:
-            users[i] = {**u, **(updates or {})}
+            u2 = {**u, **(updates or {})}
+            u2["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            users[i] = u2
             _save_users(users)
             return True
     return False
@@ -275,27 +256,23 @@ def validate_password(pw: str) -> tuple[bool, str]:
         return False, "Password must be at least 8 characters."
     return True, ""
 
-# ----- NEW: T&C acceptance helpers (used by signup/login flows later) -----
-def _terms_up_to_date(user: dict | None) -> bool:
+# ----- Legal/T&C helpers -----
+def _user_accepted_terms(u: Dict[str, Any]) -> bool:
     """
-    Returns True if the given user dict has accepted the current TERMS_VERSION.
+    Returns True if user has accepted current TERMS_VERSION.
     """
-    if not user:
+    if not u:
         return False
-    v = (user.get("terms_accept_version") or "").strip()
-    return bool(v and v == TERMS_VERSION)
+    v = (u.get("terms_accept_version") or "").strip()
+    return v == TERMS_VERSION
 
-def _mark_terms_accepted(user_id: str) -> bool:
-    """
-    Set current TERMS_VERSION and timestamp on the user record.
-    """
-    try:
-        return _update_user(user_id, {
-            "terms_accept_version": TERMS_VERSION,
-            "terms_accept_ts": _now_iso()
-        })
-    except Exception as _e:
-        return False
+def _set_user_terms_accept(u: Dict[str, Any]) -> None:
+    if not u:
+        return
+    _update_user(u["id"], {
+        "terms_accept_version": TERMS_VERSION,
+        "terms_accept_ts": datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    })
 
 # ----- Usage Management (plan limits) -----
 def check_usage_limit(user, action_type):
@@ -312,6 +289,7 @@ def check_usage_limit(user, action_type):
                 user['subscription'] = 'inactive'
                 user.pop('subscription_expires_at', None)
                 subscription = 'inactive'
+                _update_user(user["id"], {"subscription": "inactive"})
         except Exception:
             pass
 
@@ -591,30 +569,17 @@ def _user_id():
 # SECTION 2/8: Layout, CSRF, Health, Auth (Login/Signup/Logout)
 # =========================
 
-# ---- Terms & Conditions (T&C) versioning ----
-TERMS_VERSION = os.environ.get("TERMS_VERSION", "2025-08-30").strip()
-
-def _user_terms_accepted(user: dict | None) -> bool:
-    if not user:
-        return False
-    return str(user.get("terms_accept_version", "")).strip() == TERMS_VERSION
-
-def _require_terms_gate(user_email: str) -> bool:
-    """Return True if user MUST (re)accept T&C (missing or outdated)."""
-    return not _user_terms_accepted(_find_user(user_email))
-
-def _mark_terms_accepted(user_id: str):
-    ts = datetime.utcnow().isoformat(timespec="seconds") + "Z"
-    _update_user(user_id, {"terms_accept_version": TERMS_VERSION, "terms_accept_ts": ts})
-
-
 # ---- CSRF helpers (uniform, no false 403s) ----
 def _csrf_ok() -> bool:
+    """
+    Central CSRF validator that gracefully degrades when Flask-WTF is unavailable.
+    Use this in POST handlers that are not already covered by @csrf.exempt.
+    """
     if not HAS_CSRF:
         return True
     try:
         # validate_csrf was imported in Section 1 when available
-        from flask_wtf.csrf import validate_csrf  # safe import even if already loaded
+        from flask_wtf.csrf import validate_csrf  # safe even if already imported
         validate_csrf(request.form.get("csrf_token") or "")
         return True
     except Exception:
@@ -622,6 +587,10 @@ def _csrf_ok() -> bool:
 
 @app.template_global()
 def csrf_token():
+    """
+    Always return a concrete token (or empty string when CSRF is disabled).
+    Our templates never render the Jinja call literally thanks to base_layout replacement.
+    """
     if HAS_CSRF:
         try:
             from flask_wtf.csrf import generate_csrf
@@ -630,20 +599,32 @@ def csrf_token():
             return ""
     return ""
 
+# ---- Legal / Terms constants & helpers ----
+TERMS_VERSION = os.environ.get("TOS_VERSION", "2025-09-01")  # bump to force re-accept
+
 def _plan_badge_text(sub):
     return {"monthly": "Monthly", "sixmonth": "6-Month"}.get(sub, "Inactive")
 
+def _user_has_current_terms(u: dict | None) -> bool:
+    if not u:
+        return False
+    return (u.get("terms_accept_version") == TERMS_VERSION)
+
+# ---- Base layout (Bootstrap 5, CSP-compatible) ----
 def base_layout(title: str, body_html: str) -> str:
     user_name = session.get('name', '')
     user_email = session.get('email', '')
     is_logged_in = 'user_id' in session
     csrf_value = csrf_token()
 
+    plan_badge = ""
     if is_logged_in:
-        user = _find_user(user_email)
-        subscription = user.get('subscription', 'inactive') if user else 'inactive'
+        u = _find_user(user_email)
+        subscription = u.get('subscription', 'inactive') if u else 'inactive'
         badge_text = _plan_badge_text(subscription)
         plan_badge = f'<span class="badge plan-{subscription}">{badge_text}</span>'
+
+    if is_logged_in:
         user_menu = f"""
         <li class="nav-item dropdown">
           <a class="nav-link dropdown-toggle" href="#" id="userDropdown" role="button" data-bs-toggle="dropdown">
@@ -693,18 +674,16 @@ def base_layout(title: str, body_html: str) -> str:
     disclaimer = f"""
     <footer class="bg-light py-4 mt-5 border-top">
       <div class="container">
-        <div class="row align-items-center">
-          <div class="col-md-7">
+        <div class="row">
+          <div class="col-md-8">
             <small class="text-muted">
               <strong>Notice:</strong> This platform is independent and not affiliated with ASIS International.
               CPP&reg; is a mark of ASIS International, Inc.
               &nbsp;•&nbsp;<a href="/legal/terms" class="text-decoration-none">Terms &amp; Conditions</a>
+              &nbsp;•&nbsp;<a href="/robots.txt" class="text-decoration-none">Robots</a>
             </small>
           </div>
-          <div class="col-md-3 text-md-end mt-2 mt-md-0">
-            <a href="#" id="report-issue" class="small text-muted text-decoration-none"><i class="bi bi-flag me-1"></i>Report an issue</a>
-          </div>
-          <div class="col-md-2 text-md-end mt-2 mt-md-0">
+          <div class="col-md-4 text-end">
             <small class="text-muted">Version {APP_VERSION}</small>
           </div>
         </div>
@@ -757,7 +736,7 @@ def base_layout(title: str, body_html: str) -> str:
     </style>
     """
 
-    # Replace Jinja literal if present in inline templates
+    # Replace any literal Jinja call that may appear inside inline templates
     body_html = body_html.replace('{{ csrf_token() }}', csrf_value)
 
     return f"""<!DOCTYPE html>
@@ -776,20 +755,6 @@ def base_layout(title: str, body_html: str) -> str:
       <main class="flex-grow-1 py-4">{body_html}</main>
       {disclaimer}
       <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-      <script>
-        (function(){{
-          var a = document.getElementById('report-issue');
-          if (a) {{
-            a.addEventListener('click', function(e) {{
-              e.preventDefault();
-              try {{
-                if (navigator.sendBeacon) navigator.sendBeacon('/events/report', new Blob([], {{type:'text/plain'}}));
-              }} catch(_e) {{}}
-              alert('Thanks for the heads up! Issue ping sent.');
-            }});
-          }}
-        }})();
-      </script>
     </body></html>"""
 
 # ---- Health ----
@@ -797,85 +762,6 @@ def base_layout(title: str, body_html: str) -> str:
 def healthz():
     ok = {"status": "healthy", "timestamp": datetime.utcnow().isoformat() + "Z", "version": APP_VERSION}
     return ok
-
-# ---- Legal: Terms (static) & Accept gate ----
-@app.get("/legal/terms")
-def legal_terms_page():
-    body = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-9">
-        <div class="card">
-          <div class="card-header bg-dark text-white">
-            <h3 class="mb-0"><i class="bi bi-journal-text me-2"></i>Terms &amp; Conditions</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted">
-              This platform is an independent study aid and is not affiliated with ASIS International.
-              No refunds. Access is granted per the plan selected. Use at your own discretion.
-            </p>
-            <hr>
-            <h5>1. Access &amp; Use</h5>
-            <p class="small text-muted">You agree to use the service for personal study. Unauthorized sharing is prohibited.</p>
-            <h5>2. Payment &amp; Renewals</h5>
-            <p class="small text-muted">Subscriptions and one-time plans are processed by Stripe. No refunds.</p>
-            <h5>3. Content</h5>
-            <p class="small text-muted">Study materials are provided “as is” without warranty. Always consult official sources.</p>
-            <h5>4. Limitation of Liability</h5>
-            <p class="small text-muted">We are not liable for any damages arising from use of the service.</p>
-            <h5>5. Changes</h5>
-            <p class="small text-muted">Terms may change; you’ll be prompted to re-accept when material changes occur.</p>
-            <div class="mt-3">
-              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-arrow-left me-1"></i>Back</a>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Terms & Conditions", body)
-
-@app.route("/legal/accept", methods=["GET", "POST"])
-@login_required
-def legal_accept_page():
-    user = _find_user(session.get("email",""))
-    if not user:
-        return redirect(url_for("login_page"))
-    nxt = request.args.get("next") or url_for("home")
-
-    if request.method == "POST":
-        if not _csrf_ok():
-            abort(403)
-        if request.form.get("agree") == "on":
-            _mark_terms_accepted(user["id"])
-            return redirect(nxt)
-
-    csrf_val = csrf_token()
-    body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-md-8">
-      <div class="card">
-        <div class="card-header bg-warning text-dark">
-          <h3 class="mb-0"><i class="bi bi-shield-lock me-2"></i>Accept Terms &amp; Conditions</h3>
-        </div>
-        <div class="card-body">
-          <p class="text-muted">
-            To continue, please review our <a href="/legal/terms" target="_blank" rel="noopener">Terms &amp; Conditions</a> and confirm your acceptance.
-          </p>
-          <form method="POST">
-            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-            <div class="form-check mb-3">
-              <input class="form-check-input" type="checkbox" id="agree" name="agree" required>
-              <label class="form-check-label" for="agree">
-                I have read and agree to the <a href="/legal/terms" target="_blank" rel="noopener">Terms &amp; Conditions</a>.
-              </label>
-            </div>
-            <button type="submit" class="btn btn-primary">Accept & Continue</button>
-            <a href="/" class="btn btn-outline-secondary ms-2">Cancel</a>
-          </form>
-        </div>
-      </div>
-    </div></div></div>
-    """
-    return base_layout("Accept Terms", body)
 
 # ---- Auth: Login / Signup / Logout ----
 @app.get("/login")
@@ -904,6 +790,9 @@ def login_page():
           <div class="text-center">
             <p class="text-muted mb-2">Don't have an account?</p>
             <a href="/signup" class="btn btn-outline-primary">Create Account</a>
+          </div>
+          <div class="text-center mt-3">
+            <small class="text-muted">By signing in, you agree to our <a href="/legal/terms">Terms &amp; Conditions</a>.</small>
           </div>
         </div></div>
       </div></div>
@@ -935,9 +824,15 @@ def login_post():
         session['email'] = user['email']
         session['name'] = user.get('name', '')
         logger.info(f"User logged in: {email}")
-        # T&C gate: force accept if missing/outdated
-        if _require_terms_gate(email):
-            return redirect(url_for("legal_accept_page", next=url_for("home")))
+
+        # Enforce Terms acceptance (hard gate after login if not current)
+        if not _user_has_current_terms(user):
+            session['must_accept_terms'] = True
+            nxt = request.args.get("next") or "/"
+            if not _is_safe_next(nxt):
+                nxt = "/"
+            return redirect(url_for('legal_accept_page', next=nxt))
+
         return redirect(url_for('home'))
 
     logger.warning(f"Failed login attempt: {email}")
@@ -945,6 +840,7 @@ def login_post():
 
 @app.get("/signup")
 def signup_page():
+    # Plan chooser with NO discount/promo input (policy requirement)
     body = """
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-10">
@@ -1004,18 +900,20 @@ def signup_page():
               <div class="col-md-6 mb-3"><label class="form-label fw-semibold">Email</label>
                 <input type="email" class="form-control" name="email" required placeholder="john@example.com"></div>
             </div>
-            <div class="mb-3"><label class="form-label fw-semibold">Password</label>
+            <div class="mb-4"><label class="form-label fw-semibold">Password</label>
               <input type="password" class="form-control" name="password" required minlength="8" placeholder="At least 8 characters">
               <div class="form-text">Choose a strong password with at least 8 characters</div>
             </div>
-            <div class="form-check mb-4">
-              <input class="form-check-input" type="checkbox" id="agree" name="agree" required>
-              <label class="form-check-label" for="agree">
+
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="agreeTerms" name="agree_terms" required>
+              <label class="form-check-label" for="agreeTerms">
                 I agree to the <a href="/legal/terms" target="_blank" rel="noopener">Terms &amp; Conditions</a>.
               </label>
             </div>
+
             <button type="submit" class="btn btn-success btn-lg w-100">
-              <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Continue
+              <i class="bi bi-rocket-takeoff me-2"></i>Create Account & Start Learning
             </button>
           </form>
         </div></div>
@@ -1045,14 +943,16 @@ def signup_post():
     email = request.form.get('email', '').strip().lower()
     password = request.form.get('password', '')
     plan = (request.form.get('plan') or 'monthly').strip()
-    agree = (request.form.get('agree') == 'on')
+    agree = request.form.get('agree_terms') == 'on'
 
-    if not name or not email or not password or not agree:
+    if not name or not email or not password:
         return redirect(url_for('signup_page'))
     if not validate_email(email):
         return redirect(url_for('signup_page'))
-    ok_pw, _msg = validate_password(password)
-    if not ok_pw:
+    if len(password) < 8:
+        return redirect(url_for('signup_page'))
+    if not agree:
+        # Must accept T&C at signup
         return redirect(url_for('signup_page'))
     if _find_user(email):
         return redirect(url_for('signup_page'))
@@ -1060,10 +960,8 @@ def signup_post():
     user = {
         "id": str(uuid.uuid4()), "name": name, "email": email,
         "password_hash": generate_password_hash(password),
-        "subscription": "inactive",
-        "usage": {"monthly": {}, "last_active": ""},
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-        "history": [],
+        "subscription": "inactive", "usage": {"monthly": {}, "last_active": ""},
+        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z", "history": [],
         "terms_accept_version": TERMS_VERSION,
         "terms_accept_ts": datetime.utcnow().isoformat(timespec="seconds") + "Z"
     }
@@ -1074,10 +972,16 @@ def signup_post():
     except AttributeError:
         session.clear(); session.permanent = True
     session['user_id'] = user['id']; session['email'] = user['email']; session['name'] = user['name']
-    # Persist plan preference (optional): we can carry to /billing UI
-    session['preferred_plan'] = plan
 
-    # Per policy: no discount code handling here; purchasing happens on /billing
+    # Start Stripe checkout (no discount code here by policy)
+    checkout_url = None
+    try:
+        checkout_url = create_stripe_checkout_session(user_email=email, plan=plan, discount_code=None)
+    except Exception as e:
+        logger.warning("Checkout create failed post-signup: %s", e)
+    if checkout_url:
+        return redirect(checkout_url)
+    # Fallback to billing page
     return redirect(url_for('billing_page'))
 
 @app.post("/logout")
@@ -1086,11 +990,105 @@ def logout():
         abort(403)
     session.clear()
     return redirect(url_for('login_page'))
+
+# ---- Legal / Terms pages ----
+@app.get("/legal/terms")
+def legal_terms_page():
+    body = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-9">
+        <div class="card">
+          <div class="card-header bg-dark text-white">
+            <h3 class="mb-0"><i class="bi bi-file-text me-2"></i>Terms &amp; Conditions</h3>
+          </div>
+          <div class="card-body">
+            <p class="text-muted">Last updated: 2025-09-01 (Version """ + html.escape(TERMS_VERSION) + """)</p>
+            <p><strong>Disclaimer:</strong> This platform is independent and not affiliated with ASIS International.
+            CPP&reg; is a mark of ASIS International, Inc. This product is not endorsed or approved by ASIS.</p>
+            <p><strong>No Refund Policy:</strong> All sales are final. Please review the features before purchase.</p>
+            <hr>
+            <p>By using this site, you agree to use it for lawful purposes and to respect all copyrights.
+            Content is provided “as is” without warranties. We may update these terms at any time. Continued
+            use after updates constitutes acceptance of the new terms.</p>
+            <p>For billing and subscriptions handled by Stripe, please refer to your Stripe receipts. If you
+            have any issues, contact support with your email and purchase date.</p>
+            <hr>
+            <a href="/signup" class="btn btn-primary"><i class="bi bi-person-plus me-1"></i>Create Account</a>
+            <a href="/login" class="btn btn-outline-secondary ms-2"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Terms & Conditions", body)
+
+@app.route("/legal/accept", methods=["GET", "POST"])
+def legal_accept_page():
+    # Must be logged in to accept; if not, push to login
+    if 'user_id' not in session:
+        nxt = request.args.get("next") or "/"
+        if not _is_safe_next(nxt):
+            nxt = "/"
+        return redirect(url_for('login_page', next=nxt))
+
+    u = _find_user(session.get("email",""))
+    nxt = request.values.get("next") or "/"
+    if not _is_safe_next(nxt):
+        nxt = "/"
+
+    msg = ""
+    if request.method == "POST":
+        if not _csrf_ok():
+            abort(403)
+        if request.form.get("agree_terms") == "on":
+            _update_user(u.get("id"), {
+                "terms_accept_version": TERMS_VERSION,
+                "terms_accept_ts": datetime.utcnow().isoformat(timespec="seconds") + "Z"
+            })
+            session.pop("must_accept_terms", None)
+            return redirect(nxt)
+        else:
+            msg = "Please check the box to accept the Terms & Conditions."
+
+    checked_info = "" if _user_has_current_terms(u) else """
+      <div class="alert alert-warning">
+        Please review and accept the current Terms &amp; Conditions to continue.
+      </div>
+    """
+    csrf_val = csrf_token()
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-md-7">
+      <div class="card">
+        <div class="card-header bg-dark text-white">
+          <h3 class="mb-0"><i class="bi bi-shield-lock me-2"></i>Accept Terms &amp; Conditions</h3>
+        </div>
+        <div class="card-body">
+          {checked_info}
+          {"<div class='alert alert-danger'>" + html.escape(msg) + "</div>" if msg else ""}
+          <p class="text-muted small">Version: {html.escape(TERMS_VERSION)}</p>
+          <p>Please read the <a href="/legal/terms" target="_blank" rel="noopener">full Terms &amp; Conditions</a>.</p>
+          <form method="POST">
+            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <input type="hidden" name="next" value="{html.escape(nxt)}"/>
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="agreeT" name="agree_terms" required>
+              <label class="form-check-label" for="agreeT">
+                I have read and agree to the Terms &amp; Conditions.
+              </label>
+            </div>
+            <button class="btn btn-primary" type="submit"><i class="bi bi-check2-circle me-1"></i>Accept & Continue</button>
+            <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+          </form>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Accept Terms", body)
 # =========================
 # SECTION 3/8: Home, Study Alias, Tutor (AI), Minimal Analytics
 # =========================
 
-# Provide DOMAINS mapping if not already defined (used by domain buttons)
+# ---------- (Safety) Ensure DOMAINS exists ----------
 if 'DOMAINS' not in globals():
     DOMAINS = {
         "security-principles":  "Security Principles",
@@ -1106,7 +1104,6 @@ if 'DOMAINS' not in globals():
 @app.get("/")
 def home():
     if 'user_id' not in session:
-        # Public welcome + disclaimer with T&C link (non-destructive to existing UX)
         body = """
         <div class="container text-center">
           <div class="mb-5">
@@ -1114,18 +1111,6 @@ def home():
             <h1 class="display-4 fw-bold">Master the CPP Exam</h1>
             <p class="lead text-muted">AI tutor, practice quizzes, flashcards, and progress tracking.</p>
           </div>
-
-          <div class="alert alert-warning text-start mx-auto" style="max-width:860px;">
-            <div class="d-flex">
-              <i class="bi bi-exclamation-triangle-fill me-3 fs-4"></i>
-              <div>
-                <strong>Disclaimer.</strong> This platform is independent and not affiliated with ASIS International. CPP&reg; is a mark of ASIS International, Inc.
-                Use of this site constitutes acceptance of our <a class="fw-semibold" href="/legal/terms" target="_blank" rel="noopener">Terms &amp; Conditions</a>.
-                All sales are final.
-              </div>
-            </div>
-          </div>
-
           <div class="d-flex justify-content-center gap-3 mb-4">
             <a href="/signup" class="btn btn-primary btn-lg px-4"><i class="bi bi-rocket-takeoff me-2"></i>Start Learning</a>
             <a href="/login" class="btn btn-outline-primary btn-lg px-4"><i class="bi bi-box-arrow-in-right me-2"></i>Sign In</a>
@@ -1257,7 +1242,8 @@ def _call_tutor_agent(user_query, meta=None):
     timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
     temperature = float(os.environ.get("TUTOR_TEMP", "0.3"))
     max_tokens = int(os.environ.get("TUTOR_MAX_TOKENS", "800"))
-    system_msg = os.environ.get("TUTOR_SYSTEM_PROMPT",
+    system_msg = os.environ.get(
+        "TUTOR_SYSTEM_PROMPT",
         "You are a calm, expert CPP/PSP study tutor. Explain clearly, step-by-step."
     )
 
@@ -1308,44 +1294,16 @@ def _call_tutor_agent(user_query, meta=None):
             continue
     return False, f"Network/agent error: {last_err or 'unknown'}", {}
 
-# --- NEW: Randomized suggested questions helper (Option B) ---
-def _suggested_questions_for_domain(domain_key: str | None, k: int = 4):
+# --- Suggested questions (Option B — from Section 1 helper) ---
+def _suggested_questions_for_sidebar(domain_key: str | None, k: int = 4):
     """
-    Return up to k suggested question dicts [{"text":..., "domain":...}] for the given domain.
-    - If domain_key is 'random' or falsy, pick from ALL domains.
-    - Always shuffle and de-duplicate by text.
+    Uses the SUGGESTED_QUESTION_BANK via get_suggested_questions() defined in Section 1.
+    Returns list of plain strings.
     """
     try:
-        # Prefer curated bank if available; otherwise fall back to SUGGESTED_QUESTION_BANK (Section 1)
-        pool = []
-        try:
-            # These helpers are defined later in Section 4; runtime-safe as we only call when the route executes.
-            pool = _all_normalized_questions()
-            pool = _filter_by_domain(pool, domain_key or "random")
-            pool = [{"text": q.get("text","").strip(), "domain": q.get("domain") or "Unspecified"} for q in pool if q.get("text")]
-        except Exception:
-            # Fallback to static suggestions
-            if not domain_key or domain_key == "random":
-                for items in SUGGESTED_QUESTION_BANK.values():
-                    for t in items:
-                        pool.append({"text": t, "domain": "Mixed"})
-            else:
-                for t in SUGGESTED_QUESTION_BANK.get(domain_key, []):
-                    pool.append({"text": t, "domain": domain_key})
-
-        random.shuffle(pool)
-        out, seen = [], set()
-        for q in pool:
-            t = (q.get("text") or "").strip()
-            if not t or t in seen:
-                continue
-            seen.add(t)
-            out.append({"text": t, "domain": (q.get("domain") or "Unspecified")})
-            if len(out) >= max(1, min(int(k or 4), 8)):
-                break
-        return out
+        return get_suggested_questions(domain_key or "random", n=k)
     except Exception as e:
-        logger.warning("suggested questions error: %s", e)
+        logger.warning("suggestions failed: %s", e)
         return []
 
 @app.route("/tutor", methods=["GET", "POST"], strict_slashes=False)
@@ -1363,14 +1321,28 @@ def tutor_page():
     if request.method == "POST":
         if not _csrf_ok():
             abort(403)
-
-        # Plan/usage gate for tutor messages
-        ok_limit, msg_limit = check_usage_limit(user, "tutor_msgs")
-        if not ok_limit:
-            tutor_error = msg_limit
-        elif not user_query:
+        if not user_query:
             tutor_error = "Please enter a question."
         else:
+            # Plan/usage gate for tutor messages
+            ok_limit, msg_limit = check_usage_limit(user, "tutor_msgs")
+            if not ok_limit:
+                content = f"""
+                <div class="container">
+                  <div class="row justify-content-center"><div class="col-lg-8">
+                    <div class="card">
+                      <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-robot me-2"></i>Tutor</h3></div>
+                      <div class="card-body">
+                        <div class="alert alert-warning">{html.escape(msg_limit)}</div>
+                        <a class="btn btn-primary" href="/billing"><i class="bi bi-credit-card me-1"></i>Upgrade Plan</a>
+                        <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+                      </div>
+                    </div>
+                  </div></div>
+                </div>
+                """
+                return base_layout("Tutor", content)
+
             # Inject domain cue for the agent when selected
             if selected_domain and selected_domain != "random":
                 domain_label = DOMAINS.get(selected_domain, selected_domain)
@@ -1382,8 +1354,9 @@ def tutor_page():
                 item = {"ts": datetime.utcnow().isoformat() + "Z", "q": user_query, "a": tutor_answer, "meta": meta}
                 _append_user_history(user_id, "tutor", item)
                 _log_event(user_id, "tutor.ask", {"q_len": len(user_query), "ok": True, "model": meta.get("model")})
+                # Increment usage (1 tutor message)
                 try:
-                    increment_usage(user.get("email") or session.get("email",""), "tutor_msgs", 1)
+                    increment_usage(session.get("email",""), "tutor_msgs", 1)
                 except Exception as _e:
                     logger.warning("usage increment (tutor) failed: %s", _e)
             else:
@@ -1410,16 +1383,16 @@ def tutor_page():
     # Domain button block
     domain_buttons = domain_buttons_html(selected_key=selected_domain, field_name="domain")
 
-    # NEW: randomized suggested questions (4) based on selected domain (or mixed when random)
-    suggestions = _suggested_questions_for_domain(selected_domain, k=4)
-    def _suggest_btn(s):
-        dom_key = (s.get("domain") or "Unspecified")
-        dom_label = DOMAINS.get(str(dom_key).lower(), dom_key)
+    # Randomized suggested questions (4) based on selected domain (or mixed when random)
+    suggestions = _suggested_questions_for_sidebar(selected_domain, k=4)
+    def _suggest_btn(text):
+        # Try to label with selected domain; when random, show a neutral badge
+        label = "All Domains" if selected_domain == "random" else DOMAINS.get(selected_domain, selected_domain or "All Domains")
         return (
             "<button type='button' class='btn btn-outline-secondary w-100 text-start mb-2 suggested-q' "
-            f"data-q=\"{html.escape(s.get('text',''))}\">"
-            f"<span class='badge bg-light text-dark me-2'>{html.escape(str(dom_label))}</span>"
-            f"{html.escape(s.get('text',''))}</button>"
+            f"data-q=\"{html.escape(text)}\">"
+            f"<span class='badge bg-light text-dark me-2'>{html.escape(str(label))}</span>"
+            f"{html.escape(text)}</button>"
         )
     suggestions_html = "".join(_suggest_btn(s) for s in suggestions) or "<div class='text-muted'>No suggestions yet.</div>"
 
@@ -1456,7 +1429,7 @@ def tutor_page():
           </div>
         </div>
 
-        <!-- NEW: Suggestions sidebar -->
+        <!-- Suggestions sidebar -->
         <div class="col-lg-4">
           <div class="card h-100">
             <div class="card-header bg-light">
@@ -1477,8 +1450,6 @@ def tutor_page():
     <script>
       // Make the domain buttons click set the hidden input + toggle active
       (function(){{
-        var container = document.currentScript.closest('body').querySelector('.card-body');
-        if (!container) return;
         var hidden = document.getElementById('domain_val');
         document.querySelectorAll('.domain-btn').forEach(function(btn){{
           btn.addEventListener('click', function(){{
@@ -1522,122 +1493,58 @@ def _normalize_question_runtime(q, idx=None):
       "id": str,
       "text": "...",
       "domain": "...",
-      "choices": [{"key":"A","text":"..."}, ...],  # supports 2 (T/F) or 4 choices
-      "correct_key": "A",
-      "type": "mcq" | "tf" | "scenario"
+      "choices": [{"key":"A","text":"..."}, ...],
+      "correct_key": "A"
     }
-    Notes:
-      - True/False questions are represented as 2-choice MCQ (A=True, B=False) in the bank.
-      - Scenario questions are plain MCQ where the stem may begin with "Scenario:".
     """
     if not q:
         return None
-
     qid = str(q.get("id") or idx or uuid.uuid4())
     text = (q.get("question") or q.get("q") or q.get("stem") or q.get("text") or "").strip()
     if not text:
         return None
-
     domain = (q.get("domain") or q.get("category") or q.get("section") or "Unspecified")
-
-    # Gather options; support dict (preferred) or list
-    raw_opts = q.get("options") or q.get("choices") or {}
-    opts_dict = {}
-    if isinstance(raw_opts, dict):
-        # Accept either 2-choice (A,B) or 4-choice (A..D)
-        for L in ["A", "B", "C", "D"]:
-            if L in raw_opts:
-                opts_dict[L] = str(raw_opts[L])
-        # If only two keys are present and they are A,B -> treat as T/F
-        if set(opts_dict.keys()) not in ({"A", "B"}, {"A", "B", "C", "D"}):
-            # try lowercase keys
-            lowered = {k.upper(): v for k, v in raw_opts.items() if k and isinstance(k, str)}
-            opts_dict = {}
-            for L in ["A", "B", "C", "D"]:
-                if L in lowered:
-                    opts_dict[L] = str(lowered[L])
-    elif isinstance(raw_opts, list):
-        # Allow list with length 2 or >=4; map to A.. letters
-        letters = ["A", "B", "C", "D"]
-        if len(raw_opts) >= 4:
-            for i, L in enumerate(letters):
-                v = raw_opts[i]
-                opts_dict[L] = (v.get("text") if isinstance(v, dict) else str(v))
-        elif len(raw_opts) == 2:
-            for i, L in enumerate(["A", "B"]):
-                v = raw_opts[i]
-                opts_dict[L] = (v.get("text") if isinstance(v, dict) else str(v))
-    else:
+    opts = q.get("options") or q.get("choices") or {}
+    if not isinstance(opts, dict):
         return None
-
-    if not opts_dict or (len(opts_dict) not in (2, 4)):
-        return None
-
-    # Correct key
+    letters = ["A", "B", "C", "D"]
+    choices = []
+    for L in letters:
+        if L not in opts:
+            return None
+        choices.append({"key": L, "text": str(opts[L])})
     correct = q.get("correct") or q.get("answer") or q.get("correct_key")
-    if isinstance(correct, str):
-        ck = correct.strip().upper()
-        if ck in opts_dict:
-            correct_key = ck
-        else:
-            # allow 1-based index strings "1".."4"
-            try:
-                idx_num = int(ck)
-                letters = list(opts_dict.keys())
-                letters.sort()  # ensure deterministic A..D order
-                correct_key = letters[idx_num - 1]
-            except Exception:
-                return None
+    if isinstance(correct, str) and correct.upper() in letters:
+        correct_key = correct.upper()
     else:
         return None
-
-    # Build choices array in A.. order (or A,B for TF)
-    letters_order = sorted(list(opts_dict.keys()))
-    choices = [{"key": L, "text": str(opts_dict[L])} for L in letters_order]
-
-    # Determine type (for internal analytics only; UI unchanged)
-    qtype = "mcq"
-    if len(choices) == 2:
-        qtype = "tf"
-    elif text.lower().startswith("scenario:"):
-        qtype = "scenario"
-
     return {
         "id": qid,
         "text": text,
         "domain": domain,
         "choices": choices,
-        "correct_key": correct_key,
-        "type": qtype
+        "correct_key": correct_key
     }
 
 def _all_normalized_questions():
     """
-    Merge base/legacy ALL_QUESTIONS with bank questions (data/bank/cpp_questions_v1.json)
-    into normalized runtime items. De-dup by (text, domain, correct_key).
+    Merge legacy/base questions (ALL_QUESTIONS) and bank questions (if present)
+    into normalized runtime items.
     """
+    src = (ALL_QUESTIONS or [])
+    # Also include bank questions if available
+    try:
+        bank_q = _load_json("bank/cpp_questions_v1.json", [])
+        if isinstance(bank_q, list):
+            src = list(src) + bank_q
+    except Exception:
+        pass
+
     out = []
-    seen = set()
-
-    # From legacy/base merged set built earlier
-    for i, q in enumerate(ALL_QUESTIONS or []):
-        nq = _normalize_question_runtime(q, idx=f"base-{i}")
+    for i, q in enumerate(src):
+        nq = _normalize_question_runtime(q, idx=i)
         if nq:
-            key = (nq["text"], nq["domain"], nq["correct_key"])
-            if key not in seen:
-                seen.add(key)
-                out.append(nq)
-
-    # From bank file
-    bank = _load_json("bank/cpp_questions_v1.json", [])
-    for i, q in enumerate(bank or []):
-        nq = _normalize_question_runtime(q, idx=f"bank-{i}")
-        if nq:
-            key = (nq["text"], nq["domain"], nq["correct_key"])
-            if key not in seen:
-                seen.add(key)
-                out.append(nq)
-
+            out.append(nq)
     return out
 
 # ---------- Filters & picks ----------
@@ -2002,7 +1909,7 @@ def quiz_page():
             domain = request.form.get("domain") or "random"
         else:
             # show picker
-            return _render_picker_page("Quiz", "/quiz", counts=[5,10,15,20], include_domain=True)
+            return _render_picker_page("Quiz", "/quiz", counts=[5, 10, 15, 20], include_domain=True)
 
         qset = _pick_questions(count, domain=domain)
         if not qset:
@@ -2142,7 +2049,7 @@ def mock_exam_page():
                 count = 50
             domain = request.form.get("domain") or "random"
         else:
-            return _render_picker_page("Mock Exam", "/mock-exam", counts=[25,50,75,100], include_domain=True)
+            return _render_picker_page("Mock Exam", "/mock-exam", counts=[25, 50, 75, 100], include_domain=True)
 
         qset = _pick_questions(count, domain=domain)
         if not qset:
@@ -2297,32 +2204,14 @@ def _filter_flashcards_domain(cards, domain_key: str | None):
     if not domain_key or domain_key == "random":
         return cards[:]
     dk = str(domain_key).strip().lower()
-    return [c for c in cards if str(c.get("domain","")).strip().lower() == dk]
+    return [c for c in cards if str(c.get("domain", "")).strip().lower() == dk]
 
 @app.route("/flashcards", methods=["GET", "POST"])
 @login_required
 def flashcards_page():
-    # Gate access by plan
-    u = _find_user(session.get("email",""))
-    ok_limit, msg_limit = check_usage_limit(u, "flashcards")
-    if not ok_limit:
-        content = f"""
-        <div class="container">
-          <div class="row justify-content-center"><div class="col-lg-8">
-            <div class="card">
-              <div class="card-header bg-success text-white"><h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3></div>
-              <div class="card-body">
-                <div class="alert alert-warning">{html.escape(msg_limit)}</div>
-                <a class="btn btn-primary" href="/billing"><i class="bi bi-credit-card me-1"></i>Upgrade Plan</a>
-                <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              </div>
-            </div>
-          </div></div>
-        </div>
-        """
-        return base_layout("Flashcards", content)
+    user = _find_user(session.get("email", "")) or {}
 
-    # GET -> picker (domain buttons + count buttons)
+    # GET -> picker (domain buttons + count)
     if request.method == "GET":
         csrf_val = csrf_token()
         domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
@@ -2354,9 +2243,7 @@ def flashcards_page():
 
         <script>
           (function(){{
-            var card = document.currentScript.closest('.card');
-            if (!card) return;
-            var container = card.querySelector('.card-body');
+            var container = document.currentScript.closest('.card').querySelector('.card-body');
             var hidden = container.querySelector('#domain_val');
             container.querySelectorAll('.domain-btn').forEach(function(btn){{
               btn.addEventListener('click', function(){{
@@ -2370,9 +2257,29 @@ def flashcards_page():
         """
         return base_layout("Flashcards", content)
 
-    # POST -> render a client-side session (no server state)
+    # POST -> start a session (gate by plan)
     if not _csrf_ok():
         abort(403)
+
+    ok_limit, msg_limit = check_usage_limit(user, "flashcards")
+    if not ok_limit:
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8">
+            <div class="card">
+              <div class="card-header bg-success text-white">
+                <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
+              </div>
+              <div class="card-body">
+                <div class="alert alert-warning">{html.escape(msg_limit)}</div>
+                <a class="btn btn-primary" href="/billing"><i class="bi bi-credit-card me-1"></i>Upgrade Plan</a>
+                <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """
+        return base_layout("Flashcards", content)
 
     try:
         count = int(request.form.get("count") or 20)
@@ -2439,8 +2346,7 @@ def flashcards_page():
             el.querySelector('.back').classList.add('d-none');
           }}
         }});
-        var idxEl = document.getElementById('idx');
-        if (idxEl) idxEl.textContent = (total ? idx+1 : 0);
+        document.getElementById('idx').textContent = (total ? idx+1 : 0);
       }}
       function flip() {{
         if (!total) return;
@@ -2452,22 +2358,14 @@ def flashcards_page():
       }}
       function next() {{ if (!total) return; i = Math.min(total-1, i+1); show(i); }}
       function prev() {{ if (!total) return; i = Math.max(0, i-1); show(i); }}
-      var f = document.getElementById('flipBtn');
-      var n = document.getElementById('nextBtn');
-      var p = document.getElementById('prevBtn');
-      if (f) f.addEventListener('click', flip);
-      if (n) n.addEventListener('click', next);
-      if (p) p.addEventListener('click', prev);
+      document.getElementById('flipBtn').addEventListener('click', flip);
+      document.getElementById('nextBtn').addEventListener('click', next);
+      document.getElementById('prevBtn').addEventListener('click', prev);
       show(i);
     }})();
     </script>
     """
-    # Log and increment usage (count = number of cards shown)
     _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
-    try:
-        increment_usage(session.get("email",""), "flashcards", max(1, len(cards)))
-    except Exception as _e:
-        logger.warning("flashcards usage increment failed: %s", _e)
     return base_layout("Flashcards", content)
 
 
@@ -2477,7 +2375,7 @@ def flashcards_page():
 def progress_page():
     uid = _user_id()
     attempts = [a for a in _load_json("attempts.json", []) if a.get("user_id") == uid]
-    attempts.sort(key=lambda x: x.get("ts",""), reverse=True)
+    attempts.sort(key=lambda x: x.get("ts", ""), reverse=True)
 
     total_q  = sum(a.get("count", 0) for a in attempts)
     total_ok = sum(a.get("correct", 0) for a in attempts)
@@ -2572,11 +2470,11 @@ def progress_page():
     return base_layout("Progress", content)
 
 
-# ---------- USAGE DASHBOARD (nav link helper) ----------
+# ---------- USAGE DASHBOARD ----------
 @app.get("/usage")
 @login_required
 def usage_dashboard():
-    email = session.get("email","")
+    email = session.get("email", "")
     u = _find_user(email) or {}
     usage = (u.get("usage") or {}).get("monthly", {})
     rows = []
@@ -2622,7 +2520,6 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly", disco
     We also enable allow_promotion_codes=True so users can enter codes on the Stripe page if needed.
     """
     try:
-        # Try to resolve a Stripe Promotion Code (promo_...) from the human-readable code
         discounts_param = None
         if discount_code:
             try:
@@ -2649,7 +2546,7 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly", disco
                 success_url=f"{root}/billing/success?session_id={{CHECKOUT_SESSION_ID}}&plan=monthly",
                 cancel_url=f"{root}/billing",
                 allow_promotion_codes=True,
-                discounts=discounts_param,  # may be None
+                discounts=discounts_param,
                 metadata={
                     "user_email": user_email,
                     "plan": "monthly",
@@ -2670,7 +2567,7 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly", disco
                 success_url=f"{root}/billing/success?session_id={{CHECKOUT_SESSION_ID}}&plan=sixmonth",
                 cancel_url=f"{root}/billing",
                 allow_promotion_codes=True,
-                discounts=discounts_param,  # may be None
+                discounts=discounts_param,
                 metadata={
                     "user_email": user_email,
                     "plan": "sixmonth",
@@ -2691,12 +2588,12 @@ def create_stripe_checkout_session(user_email: str, plan: str = "monthly", disco
 @app.get("/billing")
 @login_required
 def billing_page():
-    user = _find_user(session.get("email",""))
-    sub = user.get("subscription","inactive") if user else "inactive"
-    names = {"monthly":"Monthly Plan","sixmonth":"6-Month Plan","inactive":"Free Plan"}
+    user = _find_user(session.get("email", ""))
+    sub = user.get("subscription", "inactive") if user else "inactive"
+    names = {"monthly": "Monthly Plan", "sixmonth": "6-Month Plan", "inactive": "Free Plan"}
 
     if sub == 'inactive':
-        # Discount code UI lives *only* on Billing page; we append it to checkout links via JS
+        # Discount code UI lives *only* on Billing page; appended to checkout links via JS
         plans_html = """
           <div class="row g-3">
             <div class="col-md-6">
@@ -2731,8 +2628,7 @@ def billing_page():
           <script>
             (function(){{
               function goWithCode(href) {{
-                var codeEl = document.getElementById('discount_code');
-                var code = codeEl ? codeEl.value.trim() : '';
+                var code = (document.getElementById('discount_code')||{{value:''}}).value.trim();
                 if (code) {{
                   var url = new URL(href, window.location.origin);
                   url.searchParams.set('code', code);
@@ -2749,7 +2645,7 @@ def billing_page():
               var apply = document.getElementById('apply_code');
               if (apply) {{
                 apply.addEventListener('click', function(){{
-                  // No-op: user needs to select a plan; this keeps the code field value
+                  // no-op; user still clicks a plan button; this keeps code in field
                 }});
               }}
             }})();
@@ -2786,12 +2682,11 @@ def billing_page():
 @app.get("/billing/checkout")
 @login_required
 def billing_checkout():
-    plan = request.args.get("plan","monthly")
-    user_email = session.get("email","")
+    plan = request.args.get("plan", "monthly")
+    user_email = session.get("email", "")
     if not user_email:
         return redirect(url_for("login_page"))
 
-    # read promo only from query; no suggestions anywhere else
     discount_code = (request.args.get("code") or "").strip()
 
     url = create_stripe_checkout_session(user_email, plan=plan, discount_code=discount_code)
@@ -2803,10 +2698,10 @@ def billing_checkout():
 @login_required
 def billing_success():
     session_id = request.args.get("session_id")
-    plan = request.args.get("plan","monthly")
+    plan = request.args.get("plan", "monthly")
     if session_id:
         try:
-            cs = stripe.checkout.Session.retrieve(session_id, expand=["customer","subscription"])
+            cs = stripe.checkout.Session.retrieve(session_id, expand=["customer", "subscription"])
             meta = cs.get("metadata", {}) if isinstance(cs, dict) else getattr(cs, "metadata", {}) or {}
             email = meta.get("user_email") or session.get("email")
             u = _find_user(email or "")
@@ -2814,13 +2709,13 @@ def billing_success():
                 updates: Dict[str, Any] = {}
                 if plan == "monthly":
                     updates["subscription"] = "monthly"
-                    cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs,"customer", None)) or u.get("stripe_customer_id")
+                    cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs, "customer", None)) or u.get("stripe_customer_id")
                     updates["stripe_customer_id"] = cid
                 elif plan == "sixmonth":
                     updates["subscription"] = "sixmonth"
                     expiry = datetime.utcnow() + timedelta(days=int(meta.get("duration_days", 180) or 180))
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
-                    cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs,"customer", None)) or u.get("stripe_customer_id")
+                    cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs, "customer", None)) or u.get("stripe_customer_id")
                     updates["stripe_customer_id"] = cid
                 if updates:
                     _update_user(u["id"], updates)
@@ -2871,6 +2766,13 @@ def stripe_webhook():
                 logger.info("Updated subscription via webhook: %s -> %s", email, plan)
 
     return "", 200
+
+# CSRF exemption for webhook
+if HAS_CSRF:
+    try:
+        stripe_webhook = csrf.exempt(stripe_webhook)  # type: ignore
+    except Exception:
+        logger.warning("Could not CSRF-exempt /stripe/webhook; continuing without exemption.")
 
 
 # ---------- BILLING DEBUG (admin-only; no secrets) ----------
@@ -2938,7 +2840,7 @@ def admin_login_page():
 @app.post("/admin/login")
 def admin_login_post():
     # If CSRFProtect is active, it will enforce validity.
-    # Fallback manual check when CSRF is not enabled.
+    # Fallback minimal check when disabled.
     if not HAS_CSRF:
         if request.form.get("csrf_token") != csrf_token():
             abort(403)
@@ -2950,7 +2852,7 @@ def admin_login_post():
         return redirect(nxt)
     return redirect(url_for("admin_login_page", next=nxt))
 
-@app.route("/admin/reset-password", methods=["GET","POST"])
+@app.route("/admin/reset-password", methods=["GET", "POST"])
 @login_required
 def admin_reset_password():
     if not is_admin():
@@ -3018,7 +2920,7 @@ def api_dev_ingest():
     in_flash = data.get("flashcards") or []
     in_questions = data.get("questions") or []
 
-    # Load current bank & index
+    # Load current bank & index (helpers are in Section 6)
     bank_fc = _bank_read_flashcards()
     bank_q  = _bank_read_questions()
     idx = _load_content_index()  # {hash: {...}}
@@ -3026,26 +2928,26 @@ def api_dev_ingest():
     # Build quick hash sets for existing
     existing_fc_hashes = set()
     for fc in bank_fc:
-        h = _item_hash_flashcard(fc.get("front",""), fc.get("back",""),
-                                 fc.get("domain","Unspecified"), fc.get("sources") or [])
+        h = _item_hash_flashcard(fc.get("front", ""), fc.get("back", ""),
+                                 fc.get("domain", "Unspecified"), fc.get("sources") or [])
         existing_fc_hashes.add(h)
-        idx.setdefault(h, {"type":"fc",
-                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
+        idx.setdefault(h, {"type": "fc",
+                           "added": idx.get(h, {}).get("added") or datetime.utcnow().isoformat() + "Z"})
 
     existing_q_hashes = set()
     for q in bank_q:
-        h = _item_hash_question(q.get("question",""), q.get("options") or {},
-                                q.get("correct",""), q.get("domain","Unspecified"),
+        h = _item_hash_question(q.get("question", ""), q.get("options") or {},
+                                q.get("correct", ""), q.get("domain", "Unspecified"),
                                 q.get("sources") or [])
         existing_q_hashes.add(h)
-        idx.setdefault(h, {"type":"q",
-                           "added": idx.get(h,{}).get("added") or datetime.utcnow().isoformat()+"Z"})
+        idx.setdefault(h, {"type": "q",
+                           "added": idx.get(h, {}).get("added") or datetime.utcnow().isoformat() + "Z"})
 
     # Process incoming flashcards
     added_fc = 0
     rejected_fc = []
     for raw in in_flash:
-        norm, msg = _norm_bank_flashcard(raw)
+        norm, msg = _norm_bank_flashcard(raw)  # from Section 6
         if not norm:
             rejected_fc.append({"item": raw, "error": msg}); continue
         h = _item_hash_flashcard(norm["front"], norm["back"], norm["domain"], norm["sources"])
@@ -3053,14 +2955,14 @@ def api_dev_ingest():
             continue
         bank_fc.append(norm)
         existing_fc_hashes.add(h)
-        idx[h] = {"type": "fc", "added": datetime.utcnow().isoformat()+"Z"}
+        idx[h] = {"type": "fc", "added": datetime.utcnow().isoformat() + "Z"}
         added_fc += 1
 
     # Process incoming questions
     added_q = 0
     rejected_q = []
     for raw in in_questions:
-        norm, msg = _norm_bank_question(raw)
+        norm, msg = _norm_bank_question(raw)  # from Section 6
         if not norm:
             rejected_q.append({"item": raw, "error": msg}); continue
         h = _item_hash_question(norm["question"], norm["options"], norm["correct"],
@@ -3069,7 +2971,7 @@ def api_dev_ingest():
             continue
         bank_q.append(norm)
         existing_q_hashes.add(h)
-        idx[h] = {"type": "q", "added": datetime.utcnow().isoformat()+"Z"}
+        idx[h] = {"type": "q", "added": datetime.utcnow().isoformat() + "Z"}
         added_q += 1
 
     # Save files atomically
@@ -3100,6 +3002,7 @@ if HAS_CSRF:
     except Exception:
         logger.warning("Could not CSRF-exempt /api/dev/ingest; continuing without exemption.")
 
+
 # ---------- ADMIN: Acceptance checker (bank validator) ----------
 @app.get("/admin/check-bank")
 @login_required
@@ -3116,7 +3019,7 @@ def admin_check_bank():
     for i, fc in enumerate(bank_fc):
         if not isinstance(fc, dict):
             fc_errors.append(f"FC[{i}]: not an object"); continue
-        f = (fc.get("front","")).strip(); b = (fc.get("back","")).strip()
+        f = (fc.get("front", "")).strip(); b = (fc.get("back", "")).strip()
         if not f or not b:
             fc_errors.append(f"FC[{i}]: missing front/back")
         ok, msg = _validate_sources(fc.get("sources") or [])
@@ -3133,16 +3036,16 @@ def admin_check_bank():
     for i, q in enumerate(bank_q):
         if not isinstance(q, dict):
             q_errors.append(f"Q[{i}]: not an object"); continue
-        question = (q.get("question","")).strip()
+        question = (q.get("question", "")).strip()
         opts = q.get("options") or {}
-        correct = (q.get("correct","")).strip().upper()
+        correct = (q.get("correct", "")).strip().upper()
         if not question:
             q_errors.append(f"Q[{i}]: empty question")
-        # options must be A..D and all non-empty (scenario & TF supported downstream; ingestion prefers 4 choices)
-        for L in ["A","B","C","D"]:
+        # options must be A..D and all non-empty
+        for L in ["A", "B", "C", "D"]:
             if not (isinstance(opts, dict) and opts.get(L)):
                 q_errors.append(f"Q[{i}]: missing option {L}")
-        if correct not in ("A","B","C","D"):
+        if correct not in ("A", "B", "C", "D"):
             q_errors.append(f"Q[{i}]: invalid correct {correct}")
         ok, msg = _validate_sources(q.get("sources") or [])
         if not ok:
@@ -3214,8 +3117,7 @@ def admin_check_bank():
             </div>
             <div class="mt-3 d-flex gap-2">
               <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <a class="btn btn-outline-primary" href="/admin/content-balance"><i class="bi bi-bar-chart-line me-1"></i>Content Balance</a>
-              <a class="btn btn-outline-primary" href="/billing/debug"><i class="bi bi-bug me-1"></i>Config Debug</a>
+              <a class="btn btn-outline-primary" href="/admin/content-balance"><i class="bi bi-kanban me-1"></i>Content Balance</a>
             </div>
           </div>
         </div>
@@ -3225,123 +3127,126 @@ def admin_check_bank():
     return base_layout("Bank Checker", content)
 
 
-# ---------- ADMIN: Content Balance (targets & progress) ----------
-# Target allocation (total 900): 50% MCQ, 25% T/F, 25% Scenario
-CONTENT_TARGETS = {
-    "security-principles":  {"total": 198, "mcq": 99, "tf": 50, "scenario": 50},
-    "business-principles":  {"total": 198, "mcq": 99, "tf": 50, "scenario": 50},
-    "investigations":       {"total": 108, "mcq": 54, "tf": 27, "scenario": 27},
-    "personnel-security":   {"total":  90, "mcq": 45, "tf": 22, "scenario": 22},
-    "physical-security":    {"total": 180, "mcq": 90, "tf": 45, "scenario": 45},
-    "information-security": {"total":  54, "mcq": 27, "tf": 14, "scenario": 14},
-    "crisis-management":    {"total":  72, "mcq": 36, "tf": 18, "scenario": 18},
-}
-
-def _classify_question_type(q: dict) -> str:
-    """
-    Heuristic classification:
-      - If stem starts with 'Scenario:' (case-insensitive) -> 'scenario'
-      - Else if it appears to be True/False (options contain True/False keywords OR only A/B are present) -> 'tf'
-      - Else -> 'mcq'
-    """
-    stem = (q.get("question") or "").strip()
-    if re.match(r"^\s*scenario\s*[:\-]", stem, flags=re.IGNORECASE):
-        return "scenario"
-    opts = q.get("options") or {}
-    keys_present = [k for k in ["A","B","C","D"] if (opts.get(k) and str(opts.get(k)).strip())]
-    text_join = " ".join([str(opts.get(k,"")).lower() for k in ["A","B","C","D"]])
-    if ("true" in text_join or "false" in text_join) or len(keys_present) <= 2:
-        return "tf"
-    return "mcq"
-
-def _progress_bar_html(cur: int, tgt: int) -> str:
-    pct = 0 if not tgt else min(100, round(cur*100.0/tgt))
-    cls = "bg-success" if pct >= 100 else ("bg-info" if pct >= 50 else "bg-warning")
-    return f"""
-      <div class="progress" role="progressbar" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">
-        <div class="progress-bar {cls}" style="width:{pct}%">{pct}%</div>
-      </div>
-    """
-
+# ---------- ADMIN: Content Balance dashboard (targets vs. current) ----------
 @app.get("/admin/content-balance")
 @login_required
 def admin_content_balance():
     if not is_admin():
         return redirect(url_for("admin_login_page", next=request.path))
 
+    # Target totals (900 overall, 50/25/25 split)
+    TARGET_TOTAL = 900
+    TYPE_SPLIT = {"mcq": 0.50, "tf": 0.25, "scenario": 0.25}
+    DOMAIN_WEIGHTS = {
+        "security-principles": 0.22,
+        "business-principles": 0.22,
+        "investigations": 0.12,
+        "personnel-security": 0.10,
+        "physical-security": 0.20,
+        "information-security": 0.06,
+        "crisis-management": 0.08,
+    }
+
+    # Targets by domain x type
+    targets = {}
+    for dkey, w in DOMAIN_WEIGHTS.items():
+        d_total = round(TARGET_TOTAL * w)
+        targets[dkey] = {
+            "total": d_total,
+            "mcq": round(d_total * TYPE_SPLIT["mcq"]),
+            "tf": round(d_total * TYPE_SPLIT["tf"]),
+            "scenario": round(d_total * TYPE_SPLIT["scenario"]),
+        }
+
+    # Load questions from bank and infer type when needed
     bank_q = _bank_read_questions()
 
-    # Build counts by domain & type
-    counts: Dict[str, Dict[str, int]] = {k: {"total": 0, "mcq": 0, "tf": 0, "scenario": 0} for k in DOMAINS.keys()}
+    def _infer_qtype(q: dict) -> str:
+        # Prefer explicit field if present
+        qt = (q.get("qtype") or q.get("type") or "").strip().lower()
+        if qt in ("mcq", "tf", "truefalse", "scenario"):
+            return "tf" if qt in ("tf", "truefalse") else qt
+
+        # Heuristics:
+        text = (q.get("question") or "").strip().lower()
+        opts = q.get("options") or {}
+        opt_texts = [str(opts.get(k, "")).strip().lower() for k in ["A", "B", "C", "D"]]
+
+        # True/False if contains "true" and "false" and others look empty or "n/a"
+        tf_words = {"true", "false"}
+        filled = [o for o in opt_texts if o]
+        if set(o.replace(".", "") for o in filled) <= {"true", "false"} and len(filled) <= 2:
+            return "tf"
+        if "scenario:" in text or text.startswith("scenario"):
+            return "scenario"
+        return "mcq"
+
+    # Count current by domain x type
+    current = {}
     for q in bank_q:
-        dom = (q.get("domain") or "Unspecified").strip().lower()
-        if dom not in counts:
-            counts[dom] = {"total": 0, "mcq": 0, "tf": 0, "scenario": 0}
-        qtype = _classify_question_type(q)
-        counts[dom]["total"] += 1
-        if qtype in ("mcq","tf","scenario"):
-            counts[dom][qtype] += 1
+        d = (q.get("domain") or "Unspecified").strip().lower()
+        qt = _infer_qtype(q)
+        dd = current.setdefault(d, {"mcq": 0, "tf": 0, "scenario": 0, "total": 0})
+        dd[qt] = dd.get(qt, 0) + 1
+        dd["total"] += 1
 
-    # Build table rows comparing to targets
-    def row_for_domain(dkey: str) -> str:
-        label = DOMAINS.get(dkey, dkey)
-        tgt = CONTENT_TARGETS.get(dkey, {"total":0,"mcq":0,"tf":0,"scenario":0})
-        cur = counts.get(dkey, {"total":0,"mcq":0,"tf":0,"scenario":0})
-        total_row = f"""
-          <tr class="table-light">
-            <td class="fw-semibold">{html.escape(label)}</td>
-            <td class="text-end">{cur['total']}</td>
-            <td class="text-end">{tgt['total']}</td>
-            <td colspan="3">{_progress_bar_html(cur['total'], tgt['total'])}</td>
-          </tr>
-        """
-        types_row = f"""
-          <tr>
-            <td class="text-muted small ps-4">Breakdown</td>
-            <td class="text-end">{cur['mcq']}/{tgt['mcq']} MCQ</td>
-            <td class="text-end">{cur['tf']}/{tgt['tf']} T/F</td>
-            <td class="text-end">{cur['scenario']}/{tgt['scenario']} Scenario</td>
-            <td colspan="2">
-              <div class="d-flex gap-2">
-                <div class="flex-grow-1">{_progress_bar_html(cur['mcq'], tgt['mcq'])}</div>
-                <div class="flex-grow-1">{_progress_bar_html(cur['tf'], tgt['tf'])}</div>
-                <div class="flex-grow-1">{_progress_bar_html(cur['scenario'], tgt['scenario'])}</div>
+    # Build rows for dashboard
+    def _row_for_domain(dkey):
+        target = targets.get(dkey, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
+        cur = current.get(dkey, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
+
+        def bar(cur_v, tgt_v):
+            pct = int(min(100, round(100.0 * (cur_v / tgt_v), 0))) if tgt_v else 0
+            label = f"{cur_v}/{tgt_v}"
+            return f"""
+              <div class="progress" style="height: 18px;">
+                <div class="progress-bar" role="progressbar" style="width: {pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">{label}</div>
               </div>
-            </td>
+            """
+
+        name = html.escape(DOMAINS.get(dkey, dkey))
+        return f"""
+          <tr>
+            <td class="text-nowrap">{name}</td>
+            <td>{bar(cur.get('mcq',0), target.get('mcq',0))}</td>
+            <td>{bar(cur.get('tf',0), target.get('tf',0))}</td>
+            <td>{bar(cur.get('scenario',0), target.get('scenario',0))}</td>
+            <td>{bar(cur.get('total',0), target.get('total',0))}</td>
           </tr>
         """
-        return total_row + types_row
 
-    rows_html = "".join(row_for_domain(k) for k in DOMAINS.keys()) or "<tr><td colspan='6' class='text-center text-muted'>No data.</td></tr>"
+    domain_order = list(DOMAIN_WEIGHTS.keys())
+    rows_html = "".join(_row_for_domain(d) for d in domain_order)
 
     content = f"""
     <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
+      <div class="row justify-content-center"><div class="col-xxl-10 col-xl-11">
         <div class="card">
           <div class="card-header bg-primary text-white">
-            <h3 class="mb-0"><i class="bi bi-bar-chart-line me-2"></i>Content Balance — Targets vs Current</h3>
+            <h3 class="mb-0"><i class="bi bi-kanban me-2"></i>Content Balance — Targets vs Current</h3>
           </div>
           <div class="card-body">
-            <p class="text-muted">Targets reflect the 900-question goal with domain weights and a 50/25/25 (MCQ/T-F/Scenario) split.</p>
+            <div class="alert alert-info">
+              <div><strong>Targets:</strong> 900 total questions; split by type — 50% MCQ, 25% True/False, 25% Scenario.</div>
+              <div class="mt-1">Domain weights mirror the CPP outline. Use <code>/api/dev/ingest</code> to add content; check <a href="/admin/check-bank">Acceptance Check</a> for validation.</div>
+            </div>
             <div class="table-responsive">
-              <table class="table table-sm align-middle">
+              <table class="table align-middle">
                 <thead>
                   <tr>
                     <th>Domain</th>
-                    <th class="text-end">Current</th>
-                    <th class="text-end">Target</th>
-                    <th class="text-end">T/F</th>
-                    <th class="text-end">Scenario</th>
-                    <th>Progress</th>
+                    <th style="min-width:200px;">MCQ</th>
+                    <th style="min-width:200px;">True/False</th>
+                    <th style="min-width:200px;">Scenario</th>
+                    <th style="min-width:200px;">Total</th>
                   </tr>
                 </thead>
-                <tbody>{rows_html}</tbody>
+                <tbody>
+                  {rows_html}
+                </tbody>
               </table>
             </div>
-            <div class="mt-3 d-flex gap-2">
-              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Checker</a>
-            </div>
+            <a href="/" class="btn btn-outline-secondary mt-2"><i class="bi bi-house me-1"></i>Home</a>
           </div>
         </div>
       </div></div>
@@ -3351,10 +3256,6 @@ def admin_content_balance():
 # =========================
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
-
-# NOTE: This section intentionally provides *helpers only*.
-# Canonical admin routes for ingest, validation, and content balance
-# live in SECTION 5/8 to avoid duplicate endpoint definitions.
 
 # -------- Source whitelist (edit anytime) --------
 ALLOWED_SOURCE_DOMAINS = {
@@ -3369,13 +3270,14 @@ ALLOWED_SOURCE_DOMAINS = {
     "nfpa.org",           # view-only summaries allowed
     "iso.org",            # summaries only
     # After Action Reports (public/official postings)
-    "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov", "phila.gov", "denvergov.org",
-    "boston.gov", "chicago.gov", "seattle.gov", "sandiego.gov", "lacounty.gov",
+    "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov",
+    "phila.gov", "denvergov.org", "boston.gov", "chicago.gov",
+    "seattle.gov", "sandiego.gov", "lacounty.gov",
     "ready.gov"           # FEMA/ICS public summaries & guidance
 }
 # NOTE: Wikipedia intentionally NOT allowed.
 
-from urllib.parse import urlparse
+from urllib.parse import urlparse  # safe to import multiple times in single file
 
 def _url_domain_ok(url: str) -> bool:
     """Return True if URL domain is in the allowed whitelist."""
@@ -3406,11 +3308,11 @@ def _validate_sources(sources: list) -> tuple[bool, str]:
 
 # -------- Hash & de-dup index --------
 def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> str:
-    # Canonical string for deterministic hashing
+    """Stable SHA-256 for flashcards (front/back/domain/sources)."""
     blob = json.dumps({
         "k": "fc",
-        "front": front.strip().lower(),
-        "back": back.strip().lower(),
+        "front": (front or "").strip().lower(),
+        "back": (back or "").strip().lower(),
         "domain": (domain or "Unspecified").strip().lower(),
         "srcs": [{"t": (s.get("title","").strip().lower()),
                   "u": (s.get("url","").strip().lower())} for s in (sources or [])]
@@ -3418,8 +3320,8 @@ def _item_hash_flashcard(front: str, back: str, domain: str, sources: list) -> s
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 def _item_hash_question(question: str, options: dict, correct: str, domain: str, sources: list) -> str:
-    # Keep options in A..D order for stable hashing
-    ordered = {k: str(options.get(k,"")).strip().lower() for k in ["A","B","C","D"]}
+    """Stable SHA-256 for questions (stem/opts/correct/domain/sources)."""
+    ordered = {k: str((options or {}).get(k,"")).strip().lower() for k in ["A","B","C","D"]}
     blob = json.dumps({
         "k": "q",
         "q": (question or "").strip().lower(),
@@ -3431,24 +3333,26 @@ def _item_hash_question(question: str, options: dict, correct: str, domain: str,
     }, sort_keys=True, ensure_ascii=False)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
-def _load_content_index():
+def _load_content_index() -> dict:
+    """Read hashes -> metadata map."""
     return _load_json("bank/content_index.json", {})
 
 def _save_content_index(idx: dict):
-    _save_json("bank/content_index.json", idx)
+    """Persist hashes -> metadata map."""
+    _save_json("bank/content_index.json", idx or {})
 
 # -------- Bank file helpers --------
-def _bank_read_flashcards():
+def _bank_read_flashcards() -> list:
     return _load_json("bank/cpp_flashcards_v1.json", [])
 
-def _bank_read_questions():
+def _bank_read_questions() -> list:
     return _load_json("bank/cpp_questions_v1.json", [])
 
 def _bank_write_flashcards(items: list):
-    _save_json("bank/cpp_flashcards_v1.json", items)
+    _save_json("bank/cpp_flashcards_v1.json", items or [])
 
 def _bank_write_questions(items: list):
-    _save_json("bank/cpp_questions_v1.json", items)
+    _save_json("bank/cpp_questions_v1.json", items or [])
 
 # -------- Normalize incoming shapes to bank schema --------
 def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
@@ -3467,12 +3371,11 @@ def _norm_bank_flashcard(fc_in: dict) -> tuple[dict | None, str]:
     ok, msg = _validate_sources(sources)
     if not ok:
         return None, msg
-    out = {"front": front, "back": back, "domain": domain, "sources": sources}
-    return out, ""
+    return {"front": front, "back": back, "domain": domain, "sources": sources}, ""
 
 def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
     """
-    Input flexible keys -> bank schema (4-choice MCQ):
+    Input flexible keys -> bank schema (4-choice MCQ or T/F-as-2-choice expanded to 4):
     {
       "question": str,
       "options": {"A": "...","B": "...","C": "...","D": "..."},
@@ -3480,30 +3383,53 @@ def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
       "domain": str,
       "sources": [{title,url}]
     }
+    Notes:
+      - If T/F is provided as two choices, we auto-expand to four by duplicating "None" placeholders.
+      - Scenario questions are just longer stems (no special processing needed).
     """
     if not isinstance(q_in, dict):
         return None, "Question must be an object."
     question = (q_in.get("question") or q_in.get("q") or q_in.get("stem") or "").strip()
     domain   = (q_in.get("domain") or q_in.get("category") or "Unspecified").strip()
     sources  = q_in.get("sources") or []
-    # Options can come as dict or list
+    if not question:
+        return None, "Question text required."
+
+    # Options can arrive as dict or list
     raw_opts = q_in.get("options") or q_in.get("choices") or q_in.get("answers")
-    opts = {}
+    opts: dict[str, str] = {}
     if isinstance(raw_opts, dict):
-        for L in ["A","B","C","D"]:
-            v = raw_opts.get(L) or raw_opts.get(L.lower())
-            if not v: return None, f"Missing option {L}"
-            opts[L] = str(v)
-    elif isinstance(raw_opts, list) and len(raw_opts) >= 4:
-        letters = ["A","B","C","D"]
+        # Could be 2-option (T/F) or 4-option MCQ
+        keys = [k for k in raw_opts.keys()]
+        # normalize keys to A.. for first four
+        letters = ["A", "B", "C", "D"]
         for i, L in enumerate(letters):
-            v = raw_opts[i]
-            if isinstance(v, dict):
-                opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "")
+            v = (raw_opts.get(L) or raw_opts.get(L.lower())
+                 or (raw_opts.get(keys[i]) if i < len(keys) else "")) or ""
+            opts[L] = str(v).strip()
+    elif isinstance(raw_opts, list):
+        letters = ["A", "B", "C", "D"]
+        for i, L in enumerate(letters):
+            if i < len(raw_opts):
+                v = raw_opts[i]
+                if isinstance(v, dict):
+                    opts[L] = str(v.get("text") or v.get("label") or v.get("value") or "").strip()
+                else:
+                    opts[L] = str(v).strip()
             else:
-                opts[L] = str(v)
+                opts[L] = ""
     else:
-        return None, "Options must provide 4 choices."
+        return None, "Options must be dict or list with at least 2 (T/F) up to 4 entries."
+
+    # If only A/B provided (True/False), fill C/D with safe placeholders
+    provided = [k for k in ["A","B","C","D"] if (opts.get(k) or "").strip()]
+    if len(provided) < 2:
+        return None, "At least two options required."
+    if len(provided) == 2:
+        # Expand for runtime uniformity
+        opts["C"] = opts.get("C") or "—"
+        opts["D"] = opts.get("D") or "—"
+
     # Correct can be letter or 1-based index
     correct = q_in.get("correct") or q_in.get("answer") or q_in.get("correct_key")
     if isinstance(correct, str) and correct.strip().upper() in ("A","B","C","D"):
@@ -3514,35 +3440,20 @@ def _norm_bank_question(q_in: dict) -> tuple[dict | None, str]:
             correct = ["A","B","C","D"][idx - 1]
         except Exception:
             return None, "Correct must be A/B/C/D or 1..4."
-    # Sources validate
+
+    # Validate sources
     ok, msg = _validate_sources(sources)
     if not ok:
         return None, msg
-    if not question:
-        return None, "Question text required."
+
+    # Final sanity on opts presence
+    for L in ["A","B","C","D"]:
+        if not (opts.get(L) or "").strip():
+            opts[L] = "—"
+
     return {"question": question, "options": opts, "correct": correct, "domain": domain, "sources": sources}, ""
 
-# ---- Tutor settings (persisted file; ENV can override) ----
-def _load_tutor_settings():
-    """
-    Returns {"web_aware": bool}. Default is taken from ENV TUTOR_WEB_AWARE if present,
-    otherwise the value stored in data/tutor_settings.json (default False).
-    """
-    return _load_json(
-        "tutor_settings.json",
-        {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}
-    )
-
-def _save_tutor_settings(cfg: dict):
-    _save_json("tutor_settings.json", cfg or {})
-
-def _tutor_web_enabled() -> bool:
-    env = os.environ.get("TUTOR_WEB_AWARE")
-    if env in ("0", "1"):
-        return env == "1"
-    return bool(_load_tutor_settings().get("web_aware", False))
-
-# ---- Bank-source citation finder (uses only your ingested sources) ----
+# -------- Bank-source citation utilities (used by Tutor in Section 7) --------
 def _bank_all_sources():
     """
     Yields unique source dicts from bank files:
@@ -3552,7 +3463,7 @@ def _bank_all_sources():
     seen = set()
 
     # From flashcards
-    for fc in _load_json("bank/cpp_flashcards_v1.json", []):
+    for fc in _bank_read_flashcards():
         for s in (fc.get("sources") or []):
             t = (s.get("title") or "").strip()
             u = (s.get("url") or "").strip()
@@ -3567,7 +3478,7 @@ def _bank_all_sources():
             yield {"title": t, "url": u, "domain": urlparse(u).netloc.lower(), "from": "flashcard"}
 
     # From questions
-    for q in _load_json("bank/cpp_questions_v1.json", []):
+    for q in _bank_read_questions():
         for s in (q.get("sources") or []):
             t = (s.get("title") or "").strip()
             u = (s.get("url") or "").strip()
@@ -3584,17 +3495,17 @@ def _bank_all_sources():
 def _extract_keywords(text: str) -> set[str]:
     words = re.findall(r"[A-Za-z]{3,}", (text or "").lower())
     stop = {"the","and","for","with","from","this","that","into","over","under",
-            "your","about","have","what","when","where","which"}
+            "your","about","have","what","when","where","which","shall","should"}
     return {w for w in words if w not in stop}
 
 def _score_source(src, kw: set[str]) -> int:
     """
-    Score by keyword overlap in title; small boost for .gov standards.
+    Score by keyword overlap in title; small boost for .gov/standards.
     """
     score = 0
-    title_words = set(re.findall(r"[A-Za-z]{3,}", src["title"].lower()))
+    title_words = set(re.findall(r"[A-Za-z]{3,}", (src.get("title") or "").lower()))
     score += len(title_words & kw) * 3
-    if any(src["domain"].endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
+    if any((src.get("domain","")).endswith(d) for d in ("nist.gov","cisa.gov","fema.gov","gao.gov","osha.gov")):
         score += 2
     return score
 
@@ -3611,7 +3522,8 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
             sc = _score_source(src, kw)
             if sc > 0:
                 candidates.append((sc, src))
-        # If nothing scored > 0, fall back to top N unique sources
+
+        # If nothing scored > 0, fall back to first N unique sources
         if not candidates:
             uniq = []
             seen = set()
@@ -3624,6 +3536,7 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
                 if len(uniq) >= max_n:
                     break
             return uniq
+
         candidates.sort(key=lambda t: t[0], reverse=True)
         top = []
         seen_k = set()
@@ -3640,37 +3553,53 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
         logger.warning("find_bank_citations failed: %s", e)
         return []
 
+# NOTE:
+# - Admin endpoints for ingestion and bank validation are defined ONCE in Section 5/8
+#   to avoid duplicate route registration. This section provides shared helpers only.
 # =========================
 # SECTION 7/8: Tutor (web-aware citations override) + settings UI
 # =========================
 
-# If Section 6 defined helpers like:
-#   - _tutor_web_enabled()
-#   - _bank_all_sources()
-#   - _extract_keywords()
-#   - _score_source()
-#   - _find_bank_citations(query, max_n=3)
-# they are reused here. We override _call_tutor_agent from Section 3 to add
-# lightweight “web-aware” behavior that cites only your ingested/whitelisted sources.
+# NOTE:
+# - This section overrides the baseline _call_tutor_agent defined earlier (Section 3).
+# - It relies on helper utilities introduced in Section 6:
+#     _tutor_web_enabled(), _find_bank_citations(query, max_n), _extract_keywords(), etc.
+# - Routes defined here have unique endpoints to avoid duplication.
 
 def _format_citations_for_prompt(cites: list[dict]) -> str:
+    """
+    Build a compact block of citation lines to pass along with the user prompt.
+    Each line format:
+      [N] Title — domain
+      URL
+    """
     if not cites:
         return ""
     lines = []
     for i, c in enumerate(cites, 1):
         title = (c.get("title") or "").strip()
-        url = (c.get("url") or "").strip()
-        dom = (c.get("domain") or "").strip()
-        lines.append(f"[{i}] {title} — {dom}\n{url}")
+        url_ = (c.get("url") or "").strip()
+        dom_ = (c.get("domain") or "").strip()
+        lines.append(f"[{i}] {title} — {dom_}\n{url_}")
     return "\n".join(lines)
+
+def _append_references_footer(answer: str, sources: list[dict]) -> str:
+    """Append 'References:' list at the end of the answer when web-aware is on."""
+    if not answer or not sources:
+        return answer
+    refs_lines = []
+    for i, s in enumerate(sources, 1):
+        t = (s.get("title") or "").strip()
+        u = (s.get("url") or "").strip()
+        refs_lines.append(f"[{i}] {t} — {u}")
+    return f"{answer}\n\nReferences:\n" + "\n".join(refs_lines)
 
 def _call_tutor_agent(user_query, meta=None):
     """
-    Override of the baseline agent (Section 3):
-    - If web-aware is OFF, behave exactly like the original.
-    - If web-aware is ON, include up to 3 best-matching *ingested bank* sources (no live web),
-      instruct the model to ground its explanation to those sources, and append a compact
-      reference list at the end of the answer.
+    Web-aware override:
+      - When OFF: identical behavior to baseline (Section 3).
+      - When ON: uses *ingested* sources only (no live internet). Up to 3 citations.
+        The sources are provided to the model as context and appended under 'References:'.
     """
     meta = meta or {}
     timeout_s = float(os.environ.get("TUTOR_TIMEOUT", "45"))
@@ -3684,14 +3613,12 @@ def _call_tutor_agent(user_query, meta=None):
     if not OPENAI_API_KEY:
         return False, "Tutor is not configured: missing OPENAI_API_KEY.", {}
 
-    # Branch: web-aware vs baseline
     web_on = _tutor_web_enabled()
     sources = []
     sys_msg = base_system
     user_content = user_query
 
     if web_on:
-        # Rank within user-ingested sources only (no internet). See Section 6 helpers.
         try:
             sources = _find_bank_citations(user_query, max_n=3)
         except Exception as _e:
@@ -3701,8 +3628,9 @@ def _call_tutor_agent(user_query, meta=None):
             base_system
             + "\n\nGROUNDING:\n"
               "- You are provided a small list of relevant, vetted sources (government/standards/AAR style).\n"
-              "- Answer using your expertise and *align with* these sources. If something is uncertain, say so.\n"
-              "- Keep the answer concise and exam-focused; show steps when helpful."
+              "- Answer using your expertise and align with these sources where applicable.\n"
+              "- If something is uncertain, say so briefly.\n"
+              "- Keep the answer concise and exam-focused; show steps only when helpful."
         )
 
         cites_block = _format_citations_for_prompt(sources)
@@ -3747,20 +3675,14 @@ def _call_tutor_agent(user_query, meta=None):
                     msg = (j.get("error") or {}).get("message") or resp.text[:300]
                 except Exception:
                     msg = resp.text[:300]
-                return False, f"Agent error {resp.status_code}: {msg}", {"status": resp.status_code}
+                return False, f"Agent error {resp.status_code}: {msg}", {"status": resp.status_code, "web_aware": web_on}
 
             data = resp.json()
             answer = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            usage = data.get("usage", {})
+            usage = data.get("usage", {}) or {}
 
-            # Append compact references when web-aware is ON and we had any sources
             if web_on and sources and answer:
-                refs_lines = []
-                for i, s in enumerate(sources, 1):
-                    t = (s.get("title") or "").strip()
-                    u = (s.get("url") or "").strip()
-                    refs_lines.append(f"[{i}] {t} — {u}")
-                answer = f"{answer}\n\nReferences:\n" + "\n".join(refs_lines)
+                answer = _append_references_footer(answer, sources)
 
             return True, answer, {"usage": usage, "model": OPENAI_CHAT_MODEL, "web_aware": web_on}
         except Exception as e:
@@ -3768,19 +3690,22 @@ def _call_tutor_agent(user_query, meta=None):
             continue
     return False, f"Network/agent error: {last_err or 'unknown'}", {"web_aware": web_on}
 
-
-# -------- Tutor settings UI (admin) --------
-@app.route("/admin/tutor-settings", methods=["GET", "POST"])
+# -------- Tutor settings UI (admin-only) --------
+@app.route("/admin/tutor-settings", methods=["GET", "POST"], endpoint="admin_tutor_settings_page")
 @login_required
-def admin_tutor_settings():
+def admin_tutor_settings_page():
     if not is_admin():
         return redirect(url_for("admin_login_page", next=request.path))
 
     msg = ""
     cfg = _load_tutor_settings()
+
     if request.method == "POST":
-        # CSRF: if Flask-WTF is active it will enforce; fallback minimal when disabled
-        if not HAS_CSRF:
+        # CSRF: Flask-WTF will enforce if enabled; fallback minimal when disabled
+        if HAS_CSRF:
+            # already enforced by extension
+            pass
+        else:
             if request.form.get("csrf_token") != csrf_token():
                 abort(403)
         web_aware = (request.form.get("web_aware") == "on")
@@ -3819,419 +3744,3 @@ def admin_tutor_settings():
     </div></div></div>
     """
     return base_layout("Tutor Settings", body)
-
-
-# ---- Content Balance (admin-only, single definition with guard) ----
-# Avoid duplicate route registration if this file gets merged or reloaded.
-def _route_exists(rule: str) -> bool:
-    try:
-        return any(r.rule == rule for r in app.url_map.iter_rules())
-    except Exception:
-        return False
-
-def _question_type_from_question(q: dict) -> str:
-    """
-    Heuristic classifier for question type:
-      - 'tf'       -> options dominated by True/False (or stem mentions 'True/False')
-      - 'scenario' -> stem includes 'Scenario:' (or 'Case:')
-      - 'mcq'      -> default
-    """
-    stem = (q.get("question") or "").strip()
-    opts = q.get("options") or {}
-    texts = []
-    for L in ("A", "B", "C", "D"):
-        v = opts.get(L)
-        if v is None:
-            continue
-        texts.append(str(v).strip().lower())
-
-    tf_syn = {"true", "false", "t", "f", "yes", "no", "y", "n"}
-    stem_l = stem.lower()
-
-    # Strong signals for T/F
-    if "true/false" in stem_l:
-        return "tf"
-    # Options dominated by TF synonyms (allow extra noise but require both true & false present)
-    has_true = any(t in {"true", "t", "yes", "y"} for t in texts)
-    has_false = any(t in {"false", "f", "no", "n"} for t in texts)
-    if has_true and has_false and all((t in tf_syn) for t in set(texts)):
-        return "tf"
-
-    # Scenario cues
-    if stem_l.startswith("scenario:") or "scenario:" in stem_l or stem_l.startswith("case:"):
-        return "scenario"
-
-    return "mcq"
-
-# Only register the route once.
-if ("admin_content_balance" not in app.view_functions) and (not _route_exists("/admin/content-balance")):
-    @app.get("/admin/content-balance")
-    @login_required
-    def admin_content_balance():
-        if not is_admin():
-            return redirect(url_for("admin_login_page", next=request.path))
-
-        # Targets per your requested 900-question plan (50/25/25 split).
-        TARGETS = {
-            "security-principles":  {"mcq": 99, "tf": 50, "scenario": 50},
-            "business-principles":  {"mcq": 99, "tf": 50, "scenario": 50},
-            "investigations":       {"mcq": 54, "tf": 27, "scenario": 27},
-            "personnel-security":   {"mcq": 45, "tf": 22, "scenario": 22},
-            "physical-security":    {"mcq": 90, "tf": 45, "scenario": 45},
-            "information-security": {"mcq": 27, "tf": 14, "scenario": 14},
-            "crisis-management":    {"mcq": 36, "tf": 18, "scenario": 18},
-        }
-
-        # Initialize counters for all known domains (default to zeros if new).
-        all_domains = set(TARGETS.keys()) | set(DOMAINS.keys())
-        counts = {d: {"mcq": 0, "tf": 0, "scenario": 0} for d in all_domains}
-
-        # Count questions by domain × type from the bank
-        bank_q = _bank_read_questions()
-        for q in bank_q:
-            dom = (q.get("domain") or "Unspecified").strip().lower()
-            qtype = _question_type_from_question(q)
-            # Normalize domain key if it's one we show in DOMAINS
-            if dom not in counts:
-                counts[dom] = {"mcq": 0, "tf": 0, "scenario": 0}
-            if qtype not in counts[dom]:
-                counts[dom][qtype] = 0
-            counts[dom][qtype] += 1
-
-        def _pb(cur: int, tgt: int) -> str:
-            pct = 0 if tgt <= 0 else min(100, int(round(100 * (cur / tgt))))
-            bar = f"""
-            <div class="progress" style="height: 12px;">
-              <div class="progress-bar" role="progressbar" style="width: {pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">{pct}%</div>
-            </div>
-            """
-            return bar
-
-        # Build table rows
-        def _row_for_domain(dkey: str) -> str:
-            human = DOMAINS.get(dkey, dkey.title())
-            cur = counts.get(dkey, {"mcq": 0, "tf": 0, "scenario": 0})
-            tgt = TARGETS.get(dkey, {"mcq": 0, "tf": 0, "scenario": 0})
-            mcq_c, mcq_t = int(cur.get("mcq", 0)), int(tgt.get("mcq", 0))
-            tf_c, tf_t = int(cur.get("tf", 0)), int(tgt.get("tf", 0))
-            sc_c, sc_t = int(cur.get("scenario", 0)), int(tgt.get("scenario", 0))
-            return f"""
-            <tr>
-              <td class="text-nowrap">{html.escape(human)}</td>
-              <td class="text-end">{mcq_c}/{mcq_t}{_pb(mcq_c, mcq_t)}</td>
-              <td class="text-end">{tf_c}/{tf_t}{_pb(tf_c, tf_t)}</td>
-              <td class="text-end">{sc_c}/{sc_t}{_pb(sc_c, sc_t)}</td>
-            </tr>
-            """
-
-        ordered_domains = [
-            "security-principles",
-            "business-principles",
-            "investigations",
-            "personnel-security",
-            "physical-security",
-            "information-security",
-            "crisis-management",
-        ]
-        # Include any extra domains at the end
-        for extra in sorted(d for d in counts.keys() if d not in ordered_domains):
-            ordered_domains.append(extra)
-
-        rows_html = "".join(_row_for_domain(d) for d in ordered_domains)
-
-        # Totals row
-        tot_cur = {"mcq": 0, "tf": 0, "scenario": 0}
-        tot_tgt = {"mcq": 0, "tf": 0, "scenario": 0}
-        for d in ordered_domains:
-            c = counts.get(d, {})
-            t = TARGETS.get(d, {})
-            tot_cur["mcq"] += int(c.get("mcq", 0))
-            tot_cur["tf"] += int(c.get("tf", 0))
-            tot_cur["scenario"] += int(c.get("scenario", 0))
-            tot_tgt["mcq"] += int(t.get("mcq", 0))
-            tot_tgt["tf"] += int(t.get("tf", 0))
-            tot_tgt["scenario"] += int(t.get("scenario", 0))
-
-        total_row = f"""
-        <tr class="table-secondary fw-semibold">
-          <td>Total</td>
-          <td class="text-end">{tot_cur['mcq']}/{tot_tgt['mcq']}{_pb(tot_cur['mcq'], tot_tgt['mcq'])}</td>
-          <td class="text-end">{tot_cur['tf']}/{tot_tgt['tf']}{_pb(tot_cur['tf'], tot_tgt['tf'])}</td>
-          <td class="text-end">{tot_cur['scenario']}/{tot_tgt['scenario']}{_pb(tot_cur['scenario'], tot_tgt['scenario'])}</td>
-        </tr>
-        """
-
-        content = f"""
-        <div class="container">
-          <div class="row justify-content-center"><div class="col-xl-10">
-            <div class="card">
-              <div class="card-header bg-dark text-white">
-                <h3 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Content Balance</h3>
-              </div>
-              <div class="card-body">
-                <p class="text-muted">
-                  Targets reflect the 900-question plan (50% MCQ, 25% True/False, 25% Scenario) apportioned by domain.
-                </p>
-                <div class="table-responsive">
-                  <table class="table table-sm align-middle">
-                    <thead>
-                      <tr>
-                        <th>Domain</th>
-                        <th class="text-end">MCQ</th>
-                        <th class="text-end">True/False</th>
-                        <th class="text-end">Scenario</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {rows_html}
-                      {total_row}
-                    </tbody>
-                  </table>
-                </div>
-                <div class="mt-3 d-flex gap-2">
-                  <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-                  <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Checker</a>
-                </div>
-              </div>
-            </div>
-          </div></div>
-        </div>
-        """
-        return base_layout("Content Balance", content)
-
-# =========================
-# SECTION 8/8: Startup, health, error pages, and __main__
-# =========================
-
-# ---- Legal / Terms & Conditions ----
-TERMS_VERSION = os.environ.get("TERMS_VERSION", "2025-09-01")
-
-@app.get("/legal/terms")
-def legal_terms_page():
-    body = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-9">
-        <div class="card">
-          <div class="card-header bg-dark text-white">
-            <h3 class="mb-0"><i class="bi bi-file-text me-2"></i>Terms & Conditions</h3>
-          </div>
-          <div class="card-body">
-            <div class="alert alert-warning">
-              <strong>Disclaimer:</strong> This independent study platform is not affiliated with ASIS International.
-              CPP&reg; is a mark of ASIS International, Inc. No refunds once access is granted.
-            </div>
-            <h5>1. Service</h5>
-            <p>This site provides study tools (practice questions, flashcards, and an AI tutor) for individual use.</p>
-            <h5>2. No Affiliation</h5>
-            <p>We are not endorsed by or affiliated with ASIS International. Use at your own discretion.</p>
-            <h5>3. No Refunds</h5>
-            <p>All sales are final. If you have issues, contact support and we will make reasonable efforts to help.</p>
-            <h5>4. Acceptable Use</h5>
-            <p>Do not share accounts or redistribute content without permission.</p>
-            <h5>5. Privacy</h5>
-            <p>We store minimal account and usage data necessary to operate the service.</p>
-            <h5>6. Changes</h5>
-            <p>Terms may be updated; you may be asked to re-accept updated terms to continue using the service.</p>
-            <hr>
-            <div class="d-flex gap-2">
-              <a href="/" class="btn btn-outline-secondary"><i class="bi bi-house me-1"></i>Home</a>
-              <a href="/signup" class="btn btn-primary"><i class="bi bi-person-plus me-1"></i>Create Account</a>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Terms & Conditions", body)
-
-@app.route("/legal/accept", methods=["GET", "POST"])
-def legal_accept_page():
-    # Accepting terms can be reached (1) after login if outdated, or (2) from a pre-login flow
-    msg = ""
-    if request.method == "POST":
-        if not HAS_CSRF:
-            if request.form.get("csrf_token") != csrf_token():
-                abort(403)
-        agreed = (request.form.get("agree") == "on")
-        # determine which user we are updating:
-        # - if already logged in, use session['email']
-        # - else if pending (after login credential check), use session['pending_terms_email']
-        email = session.get("email") or session.get("pending_terms_email") or ""
-        user = _find_user(email)
-        if not user:
-            msg = "No user context found. Please sign in first."
-        elif not agreed:
-            msg = "You must agree to the Terms & Conditions to proceed."
-        else:
-            _update_user(user["id"], {
-                "terms_accept_version": TERMS_VERSION,
-                "terms_accept_ts": datetime.utcnow().isoformat() + "Z"
-            })
-            # If we came from a pending state (pre-session), finalize login session now
-            if "pending_terms_user_id" in session and "user_id" not in session:
-                session["user_id"] = user["id"]
-                session["email"] = user["email"]
-                session["name"] = user.get("name", "")
-                session.pop("pending_terms_user_id", None)
-                session.pop("pending_terms_email", None)
-            return redirect(url_for("home"))
-
-    csrf_val = csrf_token()
-    body = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-        <div class="card">
-          <div class="card-header bg-dark text-white">
-            <h3 class="mb-0"><i class="bi bi-shield-lock me-2"></i>Accept Terms & Conditions</h3>
-          </div>
-          <div class="card-body">
-            {"<div class='alert alert-warning'>" + html.escape(msg) + "</div>" if msg else ""}
-            <p class="text-muted">To continue, please review and accept the latest Terms & Conditions.</p>
-            <p><a href="/legal/terms" target="_blank" rel="noopener">Open the full Terms & Conditions</a></p>
-            <form method="POST">
-              <input type="hidden" name="csrf_token" value="{csrf_val}">
-              <div class="form-check mb-3">
-                <input class="form-check-input" type="checkbox" name="agree" id="agreeBox">
-                <label class="form-check-label" for="agreeBox">
-                  I have read and agree to the full Terms & Conditions (version {html.escape(TERMS_VERSION)}).
-                </label>
-              </div>
-              <button class="btn btn-primary" type="submit"><i class="bi bi-check2-circle me-1"></i>Accept & Continue</button>
-              <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-x-circle me-1"></i>Cancel</a>
-            </form>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Accept Terms", body)
-
-# ---- Anonymous "report issue" (adds an event; no PII) ----
-@app.post("/report-issue")
-def report_issue():
-    try:
-        payload = {
-            "path": request.form.get("path") or request.headers.get("Referer") or "",
-            "note": (request.form.get("note") or "")[:500],
-            "ua": request.headers.get("User-Agent", "")[:200]
-        }
-        _log_event(session.get("user_id") or "anon", "user.report_issue", payload)
-    except Exception as e:
-        logger.warning("report_issue failed: %s", e)
-    return "", 204
-
-# ---- Robots.txt & Favicon ----
-@app.get("/robots.txt")
-def robots_txt():
-    return Response("User-agent: *\nDisallow:\n", mimetype="text/plain")
-
-@app.get("/favicon.ico")
-def favicon_ico():
-    # Tiny inline SVG as favicon (served as SVG)
-    svg = (
-        "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'>"
-        "<rect width='64' height='64' rx='8' fill='#2563eb'/>"
-        "<path d='M16 36l8 8 24-24' stroke='#fff' stroke-width='6' fill='none'/>"
-        "</svg>"
-    )
-    return Response(svg, mimetype="image/svg+xml")
-
-# ---- Friendly 404 page ----
-@app.errorhandler(404)
-def not_found(e):
-    content = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-md-8">
-        <div class="card">
-          <div class="card-header bg-warning text-dark">
-            <h3 class="mb-0"><i class="bi bi-signpost-2 me-2"></i>Page not found</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted mb-3">We couldn't find that page. Try the home page or another section.</p>
-            <a class="btn btn-primary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Not Found", content), 404
-
-# ---- 500 error page (friendly, no stack traces) ----
-@app.errorhandler(500)
-def server_error(e):
-    content = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-md-8">
-        <div class="card">
-          <div class="card-header bg-danger text-white">
-            <h3 class="mb-0"><i class="bi bi-bug me-2"></i>Something went wrong</h3>
-          </div>
-          <div class="card-body">
-            <p class="text-muted mb-3">An unexpected error occurred. Please try again.</p>
-            <a class="btn btn-primary" href="/"><i class="bi bi-arrow-repeat me-1"></i>Retry</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Server Error", content), 500
-
-# ---- Data bootstrapping ----
-def init_sample_data():
-    """
-    Ensure required folders/files exist so the app never 500s on first boot.
-    Non-destructive: only creates files if missing.
-    """
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-
-        bank_dir = os.path.join(DATA_DIR, "bank")
-        os.makedirs(bank_dir, exist_ok=True)
-
-        core_defaults = [
-            ("users.json", []),
-            ("questions.json", []),      # legacy optional
-            ("flashcards.json", []),     # legacy optional
-            ("attempts.json", []),
-            ("events.json", []),
-        ]
-        for name, default in core_defaults:
-            path = os.path.join(DATA_DIR, name)
-            if not os.path.exists(path):
-                _save_json(name, default)
-
-        if not os.path.exists(os.path.join(bank_dir, "cpp_flashcards_v1.json")):
-            _save_json("bank/cpp_flashcards_v1.json", [])
-        if not os.path.exists(os.path.join(bank_dir, "cpp_questions_v1.json")):
-            _save_json("bank/cpp_questions_v1.json", [])
-        if not os.path.exists(os.path.join(bank_dir, "content_index.json")):
-            _save_json("bank/content_index.json", {})
-
-        tutor_path = os.path.join(DATA_DIR, "tutor_settings.json")
-        if not os.path.exists(tutor_path):
-            _save_json("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"})
-    except Exception as e:
-        logger.warning("init_sample_data encountered an issue: %s", e)
-
-# ---- App factory (for gunicorn / WSGI servers) ----
-def create_app():
-    init_sample_data()
-    logger.info("CPP Test Prep v%s starting up", APP_VERSION)
-    logger.info("Debug mode: %s", DEBUG)
-    logger.info("Staging mode: %s", IS_STAGING)
-    logger.info("CSRF protection: %s", "enabled" if HAS_CSRF else "disabled")
-    logger.info("Stripe monthly ID present: %s", bool(STRIPE_MONTHLY_PRICE_ID))
-    logger.info("Stripe 6-month ID present: %s", bool(STRIPE_SIXMONTH_PRICE_ID))
-    logger.info("Stripe webhook secret present: %s", bool(STRIPE_WEBHOOK_SECRET))
-    logger.info("OpenAI key present: %s", bool(OPENAI_API_KEY))
-    return app
-
-# ---- Local runner (Render uses gunicorn `app:app`) ----
-if __name__ == "__main__":
-    init_sample_data()
-    port = int(os.environ.get("PORT", "5000"))
-    logger.info("Running app on port %s", port)
-    app.run(host="0.0.0.0", port=port, debug=DEBUG)
-
-
-
