@@ -3352,6 +3352,10 @@ def admin_content_balance():
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # =========================
 
+# NOTE: This section intentionally provides *helpers only*.
+# Canonical admin routes for ingest, validation, and content balance
+# live in SECTION 5/8 to avoid duplicate endpoint definitions.
+
 # -------- Source whitelist (edit anytime) --------
 ALLOWED_SOURCE_DOMAINS = {
     # Government & standards (non-proprietary)
@@ -3365,9 +3369,8 @@ ALLOWED_SOURCE_DOMAINS = {
     "nfpa.org",           # view-only summaries allowed
     "iso.org",            # summaries only
     # After Action Reports (public/official postings)
-    "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov",
-    "phila.gov", "denvergov.org", "boston.gov", "chicago.gov",
-    "seattle.gov", "sandiego.gov", "lacounty.gov",
+    "ca.gov", "ny.gov", "tx.gov", "wa.gov", "mass.gov", "phila.gov", "denvergov.org",
+    "boston.gov", "chicago.gov", "seattle.gov", "sandiego.gov", "lacounty.gov",
     "ready.gov"           # FEMA/ICS public summaries & guidance
 }
 # NOTE: Wikipedia intentionally NOT allowed.
@@ -3636,136 +3639,6 @@ def _find_bank_citations(query: str, max_n: int = 3) -> list[dict]:
     except Exception as e:
         logger.warning("find_bank_citations failed: %s", e)
         return []
-
-# -------- Content Balance (admin-only UI) --------
-def _infer_question_type(q: dict) -> str:
-    """
-    Heuristic to infer question type:
-      - 'scenario' if stem starts with 'Scenario:' (case-insensitive) or contains 'Scenario:' anywhere.
-      - 'tf' if options include both 'true' and 'false' strings (case-insensitive).
-      - otherwise 'mcq'.
-    """
-    stem = (q.get("question", "") or "").strip().lower()
-    if stem.startswith("scenario:") or "scenario:" in stem:
-        return "scenario"
-    opts = q.get("options") or {}
-    opt_texts = {str(v).strip().lower() for v in [opts.get("A"), opts.get("B"), opts.get("C"), opts.get("D")] if v is not None}
-    if "true" in opt_texts and "false" in opt_texts:
-        return "tf"
-    return "mcq"
-
-# Targets per the user's requested allocation (total 900; 50% MCQ, 25% TF, 25% Scenario)
-_CONTENT_TARGETS = {
-    "security-principles":  {"total": 198, "mcq": 99, "tf": 50, "scenario": 50},
-    "business-principles":  {"total": 198, "mcq": 99, "tf": 50, "scenario": 50},
-    "investigations":       {"total": 108, "mcq": 54, "tf": 27, "scenario": 27},
-    "personnel-security":   {"total":  90, "mcq": 45, "tf": 22, "scenario": 22},
-    "physical-security":    {"total": 180, "mcq": 90, "tf": 45, "scenario": 45},
-    "information-security": {"total":  54, "mcq": 27, "tf": 14, "scenario": 14},
-    "crisis-management":    {"total":  72, "mcq": 36, "tf": 18, "scenario": 18},
-}
-
-@app.get("/admin/content-balance")
-@login_required
-def admin_content_balance():
-    if not is_admin():
-        return redirect(url_for("admin_login_page", next=request.path))
-
-    # Load bank questions
-    bank_q = _bank_read_questions()
-
-    # Aggregate counts: domain -> {total, mcq, tf, scenario}
-    by_dom: dict[str, dict[str, int]] = {}
-    for q in bank_q:
-        dom = (q.get("domain") or "Unspecified").strip().lower()
-        typ = _infer_question_type(q)
-        stats = by_dom.setdefault(dom, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
-        stats["total"] += 1
-        if typ in ("mcq","tf","scenario"):
-            stats[typ] += 1
-        else:
-            stats["mcq"] += 1  # fallback
-
-    # Build rows with progress bars vs targets (only for known domains with targets)
-    def _bar(cur, tgt):
-        pct = 0 if tgt <= 0 else min(100, int(round(100.0 * float(cur) / float(tgt))))
-        cls = "bg-success" if pct >= 100 else ("bg-warning" if pct >= 60 else "bg-secondary")
-        return f"""
-          <div class="progress" style="height:14px;">
-            <div class="progress-bar {cls}" role="progressbar" style="width:{pct}%;" aria-valuenow="{pct}" aria-valuemin="0" aria-valuemax="100">
-              <span class="small">{cur}/{tgt}</span>
-            </div>
-          </div>
-        """
-
-    rows = []
-    # Iterate in a consistent order (targets first), then any extra domains
-    all_domains = list(_CONTENT_TARGETS.keys()) + [d for d in by_dom.keys() if d not in _CONTENT_TARGETS]
-    seen = set()
-    for dk in all_domains:
-        if dk in seen:  # avoid dupes
-            continue
-        seen.add(dk)
-        label = DOMAINS.get(dk, dk.title()) if 'DOMAINS' in globals() else dk.title()
-        stats = by_dom.get(dk, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
-        tgt = _CONTENT_TARGETS.get(dk, {"total": 0, "mcq": 0, "tf": 0, "scenario": 0})
-        rows.append(f"""
-          <tr>
-            <td>{html.escape(label)}</td>
-            <td>{_bar(stats["total"], tgt["total"])}</td>
-            <td>{_bar(stats["mcq"],  tgt["mcq"])}</td>
-            <td>{_bar(stats["tf"],   tgt["tf"])}</td>
-            <td>{_bar(stats["scenario"], tgt["scenario"])}</td>
-          </tr>
-        """)
-
-    table_html = "".join(rows) or "<tr><td colspan='5' class='text-center text-muted'>No questions yet.</td></tr>"
-
-    # Legend & helper text
-    legend = """
-      <div class="small text-muted">
-        Targets reflect 900 total questions with a 50% / 25% / 25% type split across domains:
-        <code>MCQ</code> (Multiple Choice), <code>T/F</code> (True/False as boolean-style items),
-        and <code>Scenario</code> (scenario-driven stems).
-        Scenario items are inferred when the stem includes <em>Scenario:</em>.
-      </div>
-    """
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-secondary text-white">
-            <h3 class="mb-0"><i class="bi bi-diagram-3 me-2"></i>Content Balance</h3>
-          </div>
-          <div class="card-body">
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead>
-                  <tr>
-                    <th style="min-width:180px;">Domain</th>
-                    <th style="min-width:220px;">Total</th>
-                    <th style="min-width:220px;">MCQ</th>
-                    <th style="min-width:220px;">T/F</th>
-                    <th style="min-width:220px;">Scenario</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {table_html}
-                </tbody>
-              </table>
-            </div>
-            {legend}
-            <div class="mt-3 d-flex gap-2">
-              <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <a class="btn btn-outline-primary" href="/admin/check-bank"><i class="bi bi-clipboard-check me-1"></i>Bank Checker</a>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Content Balance", content)
 
 # =========================
 # SECTION 7/8: Tutor (web-aware citations override) + settings UI
@@ -4304,4 +4177,5 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
