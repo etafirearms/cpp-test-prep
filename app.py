@@ -1791,7 +1791,6 @@ def sec4_mock_grade():
     """
     return base_layout("Mock Exam • Results", content)
 
-
 # =========================
 # SECTION 5/8 (OWNED ROUTES): Flashcards, Progress, Usage, Billing/Stripe (+ Debug), Admin Login/Reset
 # =========================
@@ -1810,6 +1809,25 @@ def sec4_mock_grade():
 # - SECTION 6 owns content ingestion & bank validation:
 #     /api/dev/ingest (JSON) and /admin/check-bank (UI) — DO NOT DEFINE THEM HERE.
 # - Endpoint (function) names are all prefixed with `sec5_` to avoid accidental reuse.
+
+# ---------- STRIPE IMPORT & CONFIG (SAFE) ----------
+# We keep runtime graceful if the stripe package or secret key is missing.
+try:
+    import stripe  # type: ignore
+except Exception:  # pragma: no cover
+    stripe = None  # type: ignore
+
+STRIPE_SECRET_KEY = os.environ.get("STRIPE_SECRET_KEY", "")
+
+if stripe is not None:
+    try:
+        stripe.api_key = STRIPE_SECRET_KEY or None  # None is OK; we guard before use
+    except Exception:
+        pass
+
+def _stripe_ready() -> bool:
+    """Return True if stripe lib is importable and a secret key is present."""
+    return (stripe is not None) and bool(STRIPE_SECRET_KEY)
 
 # ---------- FLASHCARDS ----------
 def sec5_normalize_flashcard(item):
@@ -2010,7 +2028,6 @@ def sec5_flashcards_page():
     </script>
     """
     _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
-    _bump_usage("flashcards", len(cards))
     return base_layout("Flashcards", content)
 
 
@@ -2049,7 +2066,7 @@ def sec5_progress_page():
     attempts_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No attempts yet.</td></tr>"
 
     drows = []
-    for dname in sorted(dom.keys()):
+    for dname in sorted(dom.keys()()):
         c = dom[dname]["correct"]; t = dom[dname]["total"]
         drows.append(f"""
           <tr>
@@ -2164,9 +2181,10 @@ def sec5_create_stripe_checkout_session(user_email: str, plan: str = "monthly", 
     If a discount_code is provided, we look up an active Promotion Code in Stripe and apply it.
     We also enable allow_promotion_codes=True so users can enter codes on the Stripe page if needed.
     """
-    if not stripe or not STRIPE_SECRET_KEY:
-        logger.error("Stripe is not configured; missing library or STRIPE_SECRET_KEY")
+    if not _stripe_ready():
+        logger.error("Stripe not configured (library or STRIPE_SECRET_KEY missing).")
         return None
+
     try:
         # Try to resolve a Stripe Promotion Code (promo_...) from the human-readable code
         discounts_param = None
@@ -2294,7 +2312,7 @@ def sec5_billing_page():
               var apply = document.getElementById('apply_code');
               if (apply) {
                 apply.addEventListener('click', function(){
-                  // NOP
+                  // NOP: user still needs to click a plan button; this just keeps the code in the field
                 });
               }
             })();
@@ -2334,7 +2352,7 @@ def sec5_billing_checkout():
     plan = request.args.get("plan","monthly")
     user_email = session.get("email","")
     if not user_email:
-        # FIX: point to real login endpoint
+        # FIX: redirect to Section 1 login owner (was sec3_login_page)
         return redirect(url_for("sec1_login_page", next=request.path))
 
     # read promo only from query; no suggestions anywhere else
@@ -2350,7 +2368,7 @@ def sec5_billing_checkout():
 def sec5_billing_success():
     session_id = request.args.get("session_id")
     plan = request.args.get("plan","monthly")
-    if session_id and stripe and STRIPE_SECRET_KEY:
+    if session_id and _stripe_ready():
         try:
             cs = stripe.checkout.Session.retrieve(session_id, expand=["customer","subscription"])
             meta = cs.get("metadata", {}) if isinstance(cs, dict) else getattr(cs, "metadata", {}) or {}
@@ -2372,6 +2390,8 @@ def sec5_billing_success():
                     _update_user(u["id"], updates)
         except Exception as e:
             logger.warning("Could not finalize success update from session: %s", e)
+    elif session_id and not _stripe_ready():
+        logger.warning("Stripe success callback received but Stripe is not configured.")
 
     content = f"""
     <div class="container"><div class="row justify-content-center"><div class="col-md-6">
@@ -2387,8 +2407,10 @@ def sec5_billing_success():
 # Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook", endpoint="sec5_stripe_webhook")
 def sec5_stripe_webhook():
-    if not stripe:
+    if not _stripe_ready():
+        logger.error("Stripe webhook invoked but Stripe not configured.")
         return "", 400
+
     payload = request.data
     sig = request.headers.get("Stripe-Signature", "")
     try:
@@ -2420,12 +2442,6 @@ def sec5_stripe_webhook():
 
     return "", 200
 
-# If CSRF is enabled, exempt Stripe webhook (external POST)
-if HAS_CSRF:
-    try:
-        sec5_stripe_webhook = csrf.exempt(sec5_stripe_webhook)  # type: ignore
-    except Exception:
-        logger.warning("Could not CSRF-exempt /stripe/webhook; continuing without exemption.")
 
 # ---------- BILLING DEBUG (admin-only; no secrets) ----------
 @app.get("/billing/debug", endpoint="sec5_billing_debug")
@@ -2440,6 +2456,7 @@ def sec5_billing_debug():
         "STRIPE_SIXMONTH_PRICE_ID_present": bool(STRIPE_SIXMONTH_PRICE_ID),
         "STRIPE_WEBHOOK_SECRET_present": bool(STRIPE_WEBHOOK_SECRET),
         "STRIPE_SECRET_KEY_present": bool(STRIPE_SECRET_KEY),
+        "STRIPE_LIBRARY_imported": bool(stripe is not None),
         "OPENAI_CHAT_MODEL": OPENAI_CHAT_MODEL,
         "DATA_DIR": DATA_DIR,
     }
@@ -2465,6 +2482,7 @@ def sec5_billing_debug():
     </div></div></div>
     """
     return base_layout("Billing Debug", content)
+
 
 # ---------- ADMIN LOGIN & PASSWORD RESET ----------
 @app.get("/admin/login", endpoint="sec5_admin_login_page")
@@ -3304,6 +3322,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
