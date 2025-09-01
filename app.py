@@ -1,5 +1,14 @@
 # =========================
-# SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer)
+# SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer) + Public & Auth Routes (OWNER)
+# Route ownership (to prevent duplication elsewhere):
+#   - This section OWNS:
+#       * GET  /          (Home)
+#       * GET  /login     (Login page)
+#       * POST /login     (Login submit)
+#       * GET  /logout    (Logout)
+#       * GET  /legal/terms
+#   - Do NOT define these routes in any other section.
+#   - Endpoint function names in this section are prefixed with `sec1_`.
 # =========================
 
 import os, re, json, time, uuid, hashlib, random, html, logging, requests
@@ -105,6 +114,7 @@ def _load_json(name: str, default):
 def _save_json(name: str, data):
     p = _path(name)
     try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
@@ -142,9 +152,10 @@ def _create_user(email: str, password: str) -> Tuple[bool, str]:
         "email": email,
         "password_hash": generate_password_hash(password),
         "subscription": "inactive",
-        # T&C acceptance (gate enforcement)
+        # T&C acceptance (gate enforcement if you add a banner later)
         "terms_accept_version": "",
-        "terms_accept_ts": ""
+        "terms_accept_ts": "",
+        # Usage envelope created on demand by _bump_usage
     })
     _save_json("users.json", users)
     return True, uid
@@ -153,6 +164,32 @@ def validate_password(pw: str) -> Tuple[bool, str]:
     if not pw or len(pw) < 8:
         return False, "Password must be at least 8 characters."
     return True, ""
+
+# ---- Usage tracking (monthly bucket used by sections 3/4/5) ----
+def _bump_usage(metric_key: str, amount: int = 1):
+    """
+    Safely increments a monthly counter for the current user.
+    metric_key examples: 'quizzes', 'questions', 'tutor_msgs', 'flashcards'
+    """
+    try:
+        uid = session.get("uid")
+        email = session.get("email", "")
+        if not uid or not email:
+            return
+        u = _find_user(email)
+        if not u:
+            return
+        now = datetime.utcnow()
+        month_key = f"{now.year:04d}-{now.month:02d}"
+        usage = u.get("usage") or {}
+        monthly = usage.get("monthly") or {}
+        cur = monthly.get(month_key) or {}
+        cur[metric_key] = int(cur.get(metric_key, 0)) + int(amount)
+        monthly[month_key] = cur
+        usage["monthly"] = monthly
+        _update_user(u["id"], {"usage": usage})
+    except Exception as e:
+        logger.warning("bump_usage failed: %s", e)
 
 # ---- Sessions / Auth guards ----
 def _user_id() -> str:
@@ -163,7 +200,8 @@ def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if not _user_id():
-            return redirect(url_for("sec2_login_page"))
+            # FIX: redirect to the single owner login endpoint in Section 1
+            return redirect(url_for("sec1_login_page", next=request.path))
         return fn(*args, **kwargs)
     return wrapper
 
@@ -196,12 +234,6 @@ DOMAINS = {
 # ---- Domain Buttons helper ----
 def domain_buttons_html(selected_key="random", field_name="domain"):
     # The hidden input stores the selected domain key
-    btns = []
-    for key, label in DOMAINS.items():
-        if key == "random":
-            # Only show as "Random" (not in DOMAINS headings)
-            continue
-    # Keep "random" plus the rest in a nice order
     order = ["random","security-principles","business-principles","investigations",
              "personnel-security","physical-security","information-security","crisis-management"]
     b = []
@@ -210,7 +242,7 @@ def domain_buttons_html(selected_key="random", field_name="domain"):
         active = " active" if selected_key == k else ""
         b.append(f'<button type="button" class="btn btn-outline-success domain-btn{active}" data-value="{html.escape(k)}">{html.escape(lab)}</button>')
     hidden = f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" value="{html.escape(selected_key)}"/>'
-    return f'<div class="d-flex flex-wrap gap-2">{ "".join(b) }</div>{hidden}'
+    return f'<div class="d-flex flex-wrap gap-2">{"".join(b)}</div>{hidden}'
 
 # ---- Global Footer (short, protective disclaimer) ----
 def _footer_html():
@@ -305,6 +337,133 @@ def init_sample_data():
                 _save_json(name, default)
     except Exception as e:
         logger.warning("init_sample_data error: %s", e)
+
+# ---- Legacy content (avoid NameError in Section 5) ----
+# NOTE: This avoids crashes if Section 5 references FLASHCARDS.
+FLASHCARDS = _load_json("flashcards.json", [])
+
+# =========================
+# PUBLIC & AUTH ROUTES (Section 1 is sole owner)
+# =========================
+
+@app.get("/", endpoint="sec1_home_page")
+def sec1_home_page():
+    """Simple landing that mirrors existing navbar design; no UX change."""
+    body = """
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-lg-8">
+        <div class="card">
+          <div class="card-header bg-light"><h3 class="mb-0"><i class="bi bi-house me-2"></i>Welcome</h3></div>
+          <div class="card-body">
+            <p class="text-muted">Use the navigation above to access Flashcards, Quizzes/Mock (via Flashcards & Progress), Usage, Billing, Tutor, or Terms.</p>
+            <div class="d-flex flex-wrap gap-2">
+              <a class="btn btn-primary" href="/flashcards"><i class="bi bi-layers me-1"></i>Flashcards</a>
+              <a class="btn btn-outline-primary" href="/progress"><i class="bi bi-graph-up-arrow me-1"></i>Progress</a>
+              <a class="btn btn-outline-secondary" href="/usage"><i class="bi bi-speedometer2 me-1"></i>Usage</a>
+              <a class="btn btn-outline-warning" href="/billing"><i class="bi bi-credit-card me-1"></i>Billing</a>
+              <a class="btn btn-outline-success" href="/tutor"><i class="bi bi-chat-dots me-1"></i>Tutor</a>
+              <a class="btn btn-outline-dark" href="/legal/terms"><i class="bi bi-file-text me-1"></i>Terms</a>
+            </div>
+          </div>
+        </div>
+      </div></div>
+    </div>
+    """
+    return base_layout("Home", body)
+
+@app.get("/login", endpoint="sec1_login_page")
+def sec1_login_page():
+    """User login — minimal, keeps existing look/feel consistent."""
+    nxt = request.args.get("next") or "/"
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-md-5">
+      <div class="card">
+        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-box-arrow-in-right me-2"></i>Login</h3></div>
+        <div class="card-body">
+          <form method="POST" action="/login">
+            <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+            <input type="hidden" name="next" value="{html.escape(nxt)}"/>
+            <div class="mb-3">
+              <label class="form-label">Email</label>
+              <input type="email" class="form-control" name="email" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" class="form-control" name="password" minlength="8" required>
+            </div>
+            <button class="btn btn-primary" type="submit">Login</button>
+            <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+          </form>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Login", body)
+
+@app.post("/login", endpoint="sec1_login_post")
+def sec1_login_post():
+    """Login submission with CSRF fallback and soft timing."""
+    if not _csrf_ok():
+        abort(403)
+    email = (request.form.get("email") or "").strip().lower()
+    pw = request.form.get("password") or ""
+    nxt = request.form.get("next") or "/"
+
+    # Prevent brute bursts
+    ip = request.headers.get("CF-Connecting-IP") or request.remote_addr or "unknown"
+    if not _rate_ok(f"login:{ip}", per_sec=0.5):
+        time.sleep(0.5)
+
+    u = _find_user(email)
+    if not u or not check_password_hash(u.get("password_hash",""), pw):
+        logger.warning("Failed login attempt: %s", email)
+        # Slightly delay on failure
+        time.sleep(0.25)
+        return redirect(url_for("sec1_login_page", next=nxt))
+
+    # Success
+    session["uid"] = u["id"]
+    session["email"] = u["email"]
+    session.pop("admin_ok", None)  # user login doesn't grant admin
+    _log_event(u["id"], "auth.login", {"ip": ip})
+    return redirect(nxt or "/")
+
+@app.get("/logout", endpoint="sec1_logout")
+def sec1_logout():
+    uid = session.get("uid")
+    if uid:
+        _log_event(uid, "auth.logout", {})
+    session.clear()
+    return redirect("/")
+
+@app.get("/legal/terms", endpoint="sec1_legal_terms_page")
+def sec1_legal_terms_page():
+    """Render Terms & Conditions page content (short, consistent styling)."""
+    today = datetime.utcnow().strftime("%b %d, %Y")
+    content = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-lg-9">
+      <div class="card">
+        <div class="card-header bg-light"><h3 class="mb-0"><i class="bi bi-file-text me-2"></i>CPP-Exam-Prep — Terms &amp; Conditions</h3></div>
+        <div class="card-body">
+          <div class="small text-muted mb-3">Last updated: {html.escape(today)}</div>
+          <p>By creating an account, accessing, or using the Service, you agree to these Terms.
+          We are based in Maricopa County, Arizona, USA. The Service is for educational use only;
+          we are not affiliated with ASIS and do not provide legal, safety, or professional advice.</p>
+          <ul>
+            <li>Content is compiled from open/public sources and admin uploads; proprietary ASIS materials are not distributed.</li>
+            <li>No guarantee of exam outcomes. Verify information with official sources.</li>
+            <li>Subscriptions: monthly auto-renew; six-month one-time. No refunds to the fullest extent permitted by law.</li>
+            <li>Acceptable use forbids scraping, reselling, or violating exam integrity rules.</li>
+            <li>Privacy handled per our site Privacy Policy.</li>
+            <li>Governing law: Arizona; venue: Maricopa County courts.</li>
+          </ul>
+          <p class="text-muted small">This short version mirrors your posted Terms; the full text may appear elsewhere in your site content.</p>
+          <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Terms & Conditions", content)
 
 # ========== SECTION 2/8 — Operational & Security Utilities ==========
 # OWNER NOTE:
@@ -3145,6 +3304,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
