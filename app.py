@@ -1,4 +1,329 @@
-<input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+# =========================
+# SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer)
+# =========================
+
+import os, re, json, time, uuid, hashlib, random, html, logging, requests
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Tuple
+
+from flask import (
+    Flask, request, session, redirect, url_for, abort, jsonify, make_response
+)
+from flask import render_template_string
+from werkzeug.security import generate_password_hash, check_password_hash
+
+# ---- App & Logging ----
+APP_VERSION = "1.0.0"
+IS_STAGING = (os.environ.get("STAGING", "0") == "1")
+DEBUG = (os.environ.get("DEBUG", "0") == "1")
+
+app = Flask(__name__)
+app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+
+logger = logging.getLogger("cpp_prep")
+handler = logging.StreamHandler()
+fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+handler.setFormatter(fmt)
+logger.setLevel(logging.INFO)
+logger.addHandler(handler)
+
+# ---- Paths & Data ----
+DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# ---- Feature Flags / Keys (non-secret display only) ----
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
+OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
+
+STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_MONTHLY_PRICE_ID = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
+STRIPE_SIXMONTH_PRICE_ID = os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+
+# ---- CSRF (harmonized with Flask-WTF) ----
+# If Flask-WTF is available, use its token generator so posted forms match what the middleware expects.
+try:
+    from flask_wtf import CSRFProtect
+    from flask_wtf.csrf import generate_csrf  # <-- important: official generator
+    csrf = CSRFProtect(app)
+    HAS_CSRF = True
+except Exception:
+    csrf = None
+    HAS_CSRF = False
+    # Provide a stub so csrf_token() can call generate_csrf() uniformly
+    def generate_csrf() -> str:
+        return ""
+
+def csrf_token() -> str:
+    """
+    Return the CSRF token to embed in forms.
+    - When Flask-WTF is active, return generate_csrf() (must match CSRFProtect expectations).
+    - Otherwise, fall back to a simple session-stored token.
+    """
+    if HAS_CSRF:
+        # This value is validated by CSRFProtect on POST
+        return generate_csrf()
+    # Minimal fallback (when Flask-WTF isn't installed)
+    val = session.get("_csrf_token")
+    if not val:
+        val = uuid.uuid4().hex
+        session["_csrf_token"] = val
+    return val
+
+def _csrf_ok() -> bool:
+    """
+    When Flask-WTF is active, it enforces CSRF automatically (returns True here).
+    In fallback mode, do a minimal equality check against our session token.
+    """
+    if HAS_CSRF:
+        return True  # CSRFProtect will handle validation and reject bad submits
+    # Minimal fallback
+    return (request.form.get("csrf_token") == session.get("_csrf_token"))
+
+# ---- Simple Rate Limit (per IP/Path) ----
+_RATE = {}
+def _rate_ok(key: str, per_sec: float = 1.0) -> bool:
+    t = time.time()
+    last = _RATE.get(key, 0.0)
+    if (t - last) < (1.0 / per_sec):
+        return False
+    _RATE[key] = t
+    return True
+
+# ---- Security Headers & CSP ----
+CSP = "default-src 'self' https:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https:; script-src 'self' 'unsafe-inline' https:; frame-src https:; connect-src 'self' https:"
+
+@app.after_request
+def sec1_after_request(resp):
+    resp.headers["X-Content-Type-Options"] = "nosniff"
+    resp.headers["X-Frame-Options"] = "DENY"
+    resp.headers["Referrer-Policy"] = "no-referrer-when-downgrade"
+    resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
+    resp.headers["Content-Security-Policy"] = CSP
+    return resp
+
+# ---- JSON helpers ----
+def _path(name: str) -> str:
+    return os.path.join(DATA_DIR, name)
+
+def _load_json(name: str, default):
+    p = _path(name)
+    try:
+        if not os.path.exists(p):
+            return default
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:
+        logger.warning("load_json %s failed: %s", name, e)
+        return default
+
+def _save_json(name: str, data):
+    p = _path(name)
+    try:
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        logger.warning("save_json %s failed: %s", name, e)
+
+# ---- Users store helpers ----
+def _users_all() -> List[dict]:
+    return _load_json("users.json", [])
+
+def _find_user(email: str) -> dict | None:
+    email = (email or "").strip().lower()
+    for u in _users_all():
+        if (u.get("email") or "").lower() == email:
+            return u
+    return None
+
+def _update_user(uid: str, patch: dict):
+    users = _users_all()
+    for u in users:
+        if u.get("id") == uid:
+            u.update(patch or {})
+            break
+    _save_json("users.json", users)
+
+def _create_user(email: str, password: str) -> Tuple[bool, str]:
+    email = (email or "").strip().lower()
+    if not email or not password or len(password) < 8:
+        return False, "Please provide a valid email and a password with at least 8 characters."
+    if _find_user(email):
+        return False, "User already exists."
+    users = _users_all()
+    uid = uuid.uuid4().hex
+    users.append({
+        "id": uid,
+        "email": email,
+        "password_hash": generate_password_hash(password),
+        "subscription": "inactive",
+        # T&C acceptance (gate enforcement)
+        "terms_accept_version": "",
+        "terms_accept_ts": ""
+    })
+    _save_json("users.json", users)
+    return True, uid
+
+def validate_password(pw: str) -> Tuple[bool, str]:
+    if not pw or len(pw) < 8:
+        return False, "Password must be at least 8 characters."
+    return True, ""
+
+# ---- Sessions / Auth guards ----
+def _user_id() -> str:
+    return session.get("uid", "")
+
+def login_required(fn):
+    from functools import wraps
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if not _user_id():
+            return redirect(url_for("sec1_login_page"))  # ensure your actual login endpoint name here
+        return fn(*args, **kwargs)
+    return wrapper
+
+def is_admin() -> bool:
+    return bool(session.get("admin_ok"))
+
+# ---- Events / Usage (minimal) ----
+def _log_event(uid: str, name: str, data: dict | None = None):
+    evts = _load_json("events.json", [])
+    evts.append({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "user_id": uid,
+        "name": name,
+        "data": data or {}
+    })
+    _save_json("events.json", evts)
+
+# ---- Domain labels ----
+DOMAINS = {
+    "random": "Random",
+    "security-principles": "Security Principles & Practices",
+    "business-principles": "Business Principles & Practices",
+    "investigations": "Investigations",
+    "personnel-security": "Personnel Security",
+    "physical-security": "Physical Security",
+    "information-security": "Information Security",
+    "crisis-management": "Crisis Management",
+}
+
+# ---- Domain Buttons helper ----
+def domain_buttons_html(selected_key="random", field_name="domain"):
+    # The hidden input stores the selected domain key
+    btns = []
+    for key, label in DOMAINS.items():
+        if key == "random":
+            # Only show as "Random" (not in DOMAINS headings)
+            continue
+    # Keep "random" plus the rest in a nice order
+    order = ["random","security-principles","business-principles","investigations",
+             "personnel-security","physical-security","information-security","crisis-management"]
+    b = []
+    for k in order:
+        lab = "Random (all)" if k == "random" else DOMAINS.get(k, k)
+        active = " active" if selected_key == k else ""
+        b.append(f'<button type="button" class="btn btn-outline-success domain-btn{active}" data-value="{html.escape(k)}">{html.escape(lab)}</button>')
+    hidden = f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" value="{html.escape(selected_key)}"/>'
+    return f'<div class="d-flex flex-wrap gap-2">{ "".join(b) }</div>{hidden}'
+
+# ---- Global Footer (short, protective disclaimer) ----
+def _footer_html():
+    # Short, clear liability notice – added to all pages to reduce risk.
+    return """
+    <footer class="mt-5 py-3 border-top text-center small text-muted">
+      <div>
+        Educational use only. Not affiliated with ASIS. No legal, safety, or professional advice.
+        Use official sources to verify. No refunds. © CPP-Exam-Prep
+      </div>
+    </footer>
+    """
+
+# ---- Base Layout with bootstrap & footer ----
+def base_layout(title: str, body_html: str) -> str:
+    t = html.escape(title or "CPP Exam Prep")
+    return render_template_string(f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{{{title}}}} — CPP Exam Prep</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    .fc-card .front, .fc-card .back {{ min-height: 120px; padding: 1rem; border: 1px solid #ddd; border-radius: .5rem; }}
+    .fc-card .front {{ background: #f8f9fa; }}
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg bg-light border-bottom">
+    <div class="container">
+      <a class="navbar-brand" href="/"><i class="bi bi-shield-lock"></i> CPP Prep</a>
+      <div class="ms-auto d-flex align-items-center gap-3">
+        <a class="text-decoration-none" href="/flashcards">Flashcards</a>
+        <a class="text-decoration-none" href="/progress">Progress</a>
+        <a class="text-decoration-none" href="/usage">Usage</a>
+        <a class="text-decoration-none" href="/billing">Billing</a>
+        <a class="text-decoration-none" href="/tutor">Tutor</a>
+        <a class="text-decoration-none" href="/legal/terms">Terms</a>
+        {{% if session.get('uid') %}}
+          <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
+        {{% else %}}
+          <a class="btn btn-outline-primary btn-sm" href="/login">Login</a>
+        {{% endif %}}
+      </div>
+    </div>
+  </nav>
+
+  <main class="py-4">
+    {body_html}
+  </main>
+
+  {_footer_html()}
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+    """, title=t)
+
+# ---- Domain weights (for Content Balance) ----
+DOMAIN_TARGETS = {
+    "security-principles": {"total": 198, "MCQ": 99, "TF": 50, "SC": 50},
+    "business-principles": {"total": 198, "MCQ": 99, "TF": 50, "SC": 50},
+    "investigations": {"total": 108, "MCQ": 54, "TF": 27, "SC": 27},
+    "personnel-security": {"total": 90,  "MCQ": 45, "TF": 22, "SC": 22},
+    "physical-security":  {"total": 180, "MCQ": 90, "TF": 45, "SC": 45},
+    "information-security":{"total": 54,  "MCQ": 27, "TF": 14, "SC": 14},
+    "crisis-management":  {"total": 72,  "MCQ": 36, "TF": 18, "SC": 18},
+}
+
+# ---- App init helpers used later ----
+def init_sample_data():
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        # Core files
+        for name, default in [
+            ("users.json", []),
+            ("questions.json", []),      # legacy optional
+            ("flashcards.json", []),     # legacy optional
+            ("attempts.json", []),
+            ("events.json", []),
+            ("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}),
+            ("bank/cpp_flashcards_v1.json", []),
+            ("bank/cpp_questions_v1.json", []),
+            ("bank/content_index.json", {}),
+        ]:
+            p = _path(name)
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            if not os.path.exists(p):
+                _save_json(name, default)
+    except Exception as e:
+        logger.warning("init_sample_data error: %s", e)
+
 
 # ========== SECTION 2/8 — Operational & Security Utilities ==========
 # OWNER NOTE:
@@ -2857,6 +3182,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
