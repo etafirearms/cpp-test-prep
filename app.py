@@ -1851,6 +1851,7 @@ def sec5_flashcards_page():
     </script>
     """
     _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
+    _bump_usage("flashcards", len(cards))
     return base_layout("Flashcards", content)
 
 
@@ -2004,6 +2005,9 @@ def sec5_create_stripe_checkout_session(user_email: str, plan: str = "monthly", 
     If a discount_code is provided, we look up an active Promotion Code in Stripe and apply it.
     We also enable allow_promotion_codes=True so users can enter codes on the Stripe page if needed.
     """
+    if not stripe or not STRIPE_SECRET_KEY:
+        logger.error("Stripe is not configured; missing library or STRIPE_SECRET_KEY")
+        return None
     try:
         # Try to resolve a Stripe Promotion Code (promo_...) from the human-readable code
         discounts_param = None
@@ -2112,29 +2116,29 @@ def sec5_billing_page():
           </div>
 
           <script>
-            (function(){{
-              function goWithCode(href) {{
-                var code = (document.getElementById('discount_code')||{{value:''}}).value.trim();
-                if (code) {{
+            (function(){
+              function goWithCode(href) {
+                var code = (document.getElementById('discount_code')||{value:''}).value.trim();
+                if (code) {
                   var url = new URL(href, window.location.origin);
                   url.searchParams.set('code', code);
                   return url.toString();
-                }}
+                }
                 return href;
-              }}
-              document.querySelectorAll('.upgrade-btn').forEach(function(btn){{
-                btn.addEventListener('click', function(e){{
+              }
+              document.querySelectorAll('.upgrade-btn').forEach(function(btn){
+                btn.addEventListener('click', function(e){
                   e.preventDefault();
                   window.location.href = goWithCode(btn.getAttribute('href'));
-                }});
-              }});
+                });
+              });
               var apply = document.getElementById('apply_code');
-              if (apply) {{
-                apply.addEventListener('click', function(){{
-                  // NOP: user still needs to click a plan button; this just keeps the code in the field
-                }});
-              }}
-            }})();
+              if (apply) {
+                apply.addEventListener('click', function(){
+                  // NOP
+                });
+              }
+            })();
           </script>
         """
     else:
@@ -2171,7 +2175,8 @@ def sec5_billing_checkout():
     plan = request.args.get("plan","monthly")
     user_email = session.get("email","")
     if not user_email:
-        return redirect(url_for("sec3_login_page"))  # owned by Section 3
+        # FIX: point to real login endpoint
+        return redirect(url_for("sec1_login_page", next=request.path))
 
     # read promo only from query; no suggestions anywhere else
     discount_code = (request.args.get("code") or "").strip()
@@ -2186,7 +2191,7 @@ def sec5_billing_checkout():
 def sec5_billing_success():
     session_id = request.args.get("session_id")
     plan = request.args.get("plan","monthly")
-    if session_id:
+    if session_id and stripe and STRIPE_SECRET_KEY:
         try:
             cs = stripe.checkout.Session.retrieve(session_id, expand=["customer","subscription"])
             meta = cs.get("metadata", {}) if isinstance(cs, dict) else getattr(cs, "metadata", {}) or {}
@@ -2223,6 +2228,8 @@ def sec5_billing_success():
 # Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook", endpoint="sec5_stripe_webhook")
 def sec5_stripe_webhook():
+    if not stripe:
+        return "", 400
     payload = request.data
     sig = request.headers.get("Stripe-Signature", "")
     try:
@@ -2254,6 +2261,12 @@ def sec5_stripe_webhook():
 
     return "", 200
 
+# If CSRF is enabled, exempt Stripe webhook (external POST)
+if HAS_CSRF:
+    try:
+        sec5_stripe_webhook = csrf.exempt(sec5_stripe_webhook)  # type: ignore
+    except Exception:
+        logger.warning("Could not CSRF-exempt /stripe/webhook; continuing without exemption.")
 
 # ---------- BILLING DEBUG (admin-only; no secrets) ----------
 @app.get("/billing/debug", endpoint="sec5_billing_debug")
@@ -2267,6 +2280,7 @@ def sec5_billing_debug():
         "STRIPE_MONTHLY_PRICE_ID_present": bool(STRIPE_MONTHLY_PRICE_ID),
         "STRIPE_SIXMONTH_PRICE_ID_present": bool(STRIPE_SIXMONTH_PRICE_ID),
         "STRIPE_WEBHOOK_SECRET_present": bool(STRIPE_WEBHOOK_SECRET),
+        "STRIPE_SECRET_KEY_present": bool(STRIPE_SECRET_KEY),
         "OPENAI_CHAT_MODEL": OPENAI_CHAT_MODEL,
         "DATA_DIR": DATA_DIR,
     }
@@ -2292,7 +2306,6 @@ def sec5_billing_debug():
     </div></div></div>
     """
     return base_layout("Billing Debug", content)
-
 
 # ---------- ADMIN LOGIN & PASSWORD RESET ----------
 @app.get("/admin/login", endpoint="sec5_admin_login_page")
@@ -2382,6 +2395,7 @@ def sec5_admin_reset_password():
     </div></div></div>
     """
     return base_layout("Admin Reset Password", body)
+
 # =========================
 # SECTION 6/8: Content ingestion (+ whitelist, hashing, acceptance checker)
 # One-owner rule for these routes:
@@ -2662,7 +2676,8 @@ if HAS_CSRF:
 @login_required
 def sec6_admin_check_bank():
     if not is_admin():
-        return redirect(url_for("admin_login_page", next=request.path))
+        # FIX: correct endpoint name for admin login
+        return redirect(url_for("sec5_admin_login_page", next=request.path))
 
     bank_fc = _bank_read_flashcards()
     bank_q  = _bank_read_questions()
@@ -3130,5 +3145,6 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
