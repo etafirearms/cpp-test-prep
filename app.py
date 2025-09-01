@@ -950,355 +950,89 @@ def sec3_mock_grade_post():
     """
     return base_layout("Mock Results", content)
 # =========================
-# SECTION 4/8 — Flashcards, Progress, Usage (owner of: /flashcards, /progress, /usage)
-# Naming: all endpoints explicitly namespaced with "sec4_*" to avoid duplicates.
-# One-owner rule: Only this section defines the three routes above.
+# SECTION 4/8: Public pages & Legal Gate (OWNER of "/")
 # =========================
+#
+# Route-ownership note:
+# - This section is the ONLY owner of "/" (root). Do not define "/" in any other section.
+# - Endpoint names are prefixed with "sec4_" to avoid accidental reuse.
+#
+# Purpose:
+# - Serve a Welcome/Disclaimer landing page at "/".
+# - Show T&C link and lightweight CTA buttons (Login / Sign Up).
+# - If a user is logged in and has accepted Terms, show quick links into the app.
+# - This page does NOT bypass the existing hard gate; the hard enforcement still lives in the
+#   auth flows (signup checkbox + post-login /legal/accept redirect if needed).
+#
+# Dependencies:
+# - base_layout(title, body_html) helper already defined earlier.
+# - _find_user(email) helper already defined earlier.
+# - session from Flask.
+# - DO NOT import or redefine terms pages here; /legal/terms is owned by the Legal section.
+#
 
-# ---------- FLASHCARDS ----------
-def _sec4_normalize_flashcard(item):
-    """
-    Accepts shapes like:
-      {"front": "...", "back":"...", "domain":"...", "sources":[{"title": "...", "url":"..."}]}
-    or {"q":"...", "a":"..."} etc.
-    Returns normalized:
-      {"id": "...", "front":"...", "back":"...", "domain":"...", "sources":[...]}
-    """
-    if not item:
-        return None
-    front = (item.get("front") or item.get("q") or item.get("term") or "").strip()
-    back  = (item.get("back") or item.get("a") or item.get("definition") or "").strip()
-    if not front or not back:
-        return None
-    domain = (item.get("domain") or item.get("category") or "Unspecified").strip()
-    sources = item.get("sources") or []
-    cleaned_sources = []
-    for s in sources[:3]:
-        t = (s.get("title") or "").strip()
-        u = (s.get("url") or "").strip()
-        if t and u:
-            cleaned_sources.append({"title": t, "url": u})
-    return {
-        "id": item.get("id") or str(uuid.uuid4()),
-        "front": front, "back": back, "domain": domain,
-        "sources": cleaned_sources
-    }
+@app.get("/")
+def sec4_root_welcome_get():
+    user_email = session.get("email", "")
+    u = _find_user(user_email) if user_email else None
+    terms_ok = bool(u and u.get("terms_accept_version"))
 
-def _sec4_all_flashcards():
-    """
-    Merge legacy FLASHCARDS + optional bank file data/bank/cpp_flashcards_v1.json
-    into normalized flashcards; de-dup by (front, back, domain).
-    """
-    out, seen = [], set()
-    for fc in (FLASHCARDS or []):
-        n = _sec4_normalize_flashcard(fc)
-        if not n: 
-            continue
-        key = (n["front"], n["back"], n["domain"])
-        if key in seen: 
-            continue
-        seen.add(key); out.append(n)
-
-    bank = _load_json("bank/cpp_flashcards_v1.json", [])
-    for fc in (bank or []):
-        n = _sec4_normalize_flashcard(fc)
-        if not n: 
-            continue
-        key = (n["front"], n["back"], n["domain"])
-        if key in seen: 
-            continue
-        seen.add(key); out.append(n)
-    return out
-
-def _sec4_filter_flashcards_domain(cards, domain_key: str | None):
-    if not domain_key or domain_key == "random":
-        return cards[:]
-    dk = str(domain_key).strip().lower()
-    return [c for c in cards if str(c.get("domain","")).strip().lower() == dk]
-
-@app.route("/flashcards", methods=["GET", "POST"], endpoint="sec4_flashcards_page")
-@login_required
-def sec4_flashcards_page():
-    # GET -> picker (domain buttons + count buttons)
-    if request.method == "GET":
-        csrf_val = csrf_token()
-        # NOTE: domain_buttons_html is defined elsewhere (Section 3 UX helpers).
-        domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
-
-        content = f"""
-        <div class="container">
-          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-            <div class="card">
-              <div class="card-header bg-success text-white">
-                <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
-              </div>
-              <div class="card-body">
-                <form method="POST" class="mb-3">
-                  <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-                  <label class="form-label fw-semibold">Domain</label>
-                  {domain_buttons}
-                  <div class="mt-3 mb-2 fw-semibold">How many cards?</div>
-                  <div class="d-flex flex-wrap gap-2">
-                    <button class="btn btn-outline-success" name="count" value="10">10</button>
-                    <button class="btn btn-outline-success" name="count" value="20">20</button>
-                    <button class="btn btn-outline-success" name="count" value="30">30</button>
-                  </div>
-                </form>
-                <div class="text-muted small">Tip: Choose a domain to focus, or Random to mix all.</div>
-              </div>
-            </div>
-          </div></div>
-        </div>
-
-        <script>
-          (function(){{
-            var container = document.currentScript.closest('.card').querySelector('.card-body');
-            var hidden = container.querySelector('#domain_val');
-            container.querySelectorAll('.domain-btn').forEach(function(btn){{
-              btn.addEventListener('click', function(){{
-                container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
-                btn.classList.add('active');
-                if (hidden) hidden.value = btn.getAttribute('data-value');
-              }});
-            }});
-          }})();
-        </script>
+    # CTA block varies a bit if user is logged in and has accepted Terms.
+    if u and terms_ok:
+        # Keep UI minimal and consistent; we don't change the rest of the app UX.
+        ctas = """
+          <div class="d-flex flex-wrap gap-2 mt-3">
+            <a href="/tutor" class="btn btn-primary"><i class="bi bi-mortarboard me-1"></i>Tutor</a>
+            <a href="/quiz" class="btn btn-outline-primary"><i class="bi bi-ui-checks-grid me-1"></i>Quizzes</a>
+            <a href="/flashcards" class="btn btn-outline-success"><i class="bi bi-layers me-1"></i>Flashcards</a>
+            <a href="/progress" class="btn btn-outline-info"><i class="bi bi-graph-up-arrow me-1"></i>Progress</a>
+            <a href="/billing" class="btn btn-outline-warning"><i class="bi bi-credit-card me-1"></i>Billing</a>
+          </div>
         """
-        return base_layout("Flashcards", content)
-
-    # POST -> render a client-side session (no server state)
-    if not _csrf_ok():
-        abort(403)
-
-    try:
-        count = int(request.form.get("count") or 20)
-    except Exception:
-        count = 20
-    if count not in (10, 20, 30):
-        count = 20
-    domain = request.form.get("domain") or "random"
-
-    all_cards = _sec4_all_flashcards()
-    pool = _sec4_filter_flashcards_domain(all_cards, domain)
-    random.shuffle(pool)
-    cards = pool[:max(0, min(count, len(pool)))]
-
-    def _card_div(c):
-        src_bits = ""
-        if c.get("sources"):
-            links = []
-            for s in c["sources"]:
-                title = html.escape(s["title"])
-                url = html.escape(s["url"])
-                links.append(f'<li><a href="{url}" target="_blank" rel="noopener">{title}</a></li>')
-            src_bits = f'<div class="small mt-2"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
-        return f"""
-        <div class="fc-card" data-id="{html.escape(c['id'])}" data-domain="{html.escape(c.get('domain','Unspecified'))}">
-          <div class="front">{html.escape(c['front'])}</div>
-          <div class="back d-none">{html.escape(c['back'])}{src_bits}</div>
-        </div>
+        user_line = f"<div class='small text-muted mt-2'>Signed in as <strong>{html.escape(user_email)}</strong>.</div>"
+    else:
+        ctas = """
+          <div class="d-flex flex-wrap gap-2 mt-3">
+            <a href="/signup" class="btn btn-primary"><i class="bi bi-person-plus me-1"></i>Create Account</a>
+            <a href="/login" class="btn btn-outline-primary"><i class="bi bi-box-arrow-in-right me-1"></i>Log In</a>
+            <a href="/legal/terms" class="btn btn-link">Terms &amp; Conditions</a>
+          </div>
         """
+        user_line = ""
 
-    cards_html = "".join(_card_div(c) for c in cards) or "<div class='text-muted'>No flashcards found. Add content in <code>data/bank/cpp_flashcards_v1.json</code>.</div>"
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-        <div class="card">
-          <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-layers me-2"></i>Flashcards</h3>
-            <a href="/flashcards" class="btn btn-outline-light btn-sm">New Session</a>
-          </div>
-          <div class="card-body">
-            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong> • Cards: {len(cards)}</div>
-            <div id="fc-container">{cards_html}</div>
-
-            <div class="d-flex align-items-center gap-2 mt-3">
-              <button class="btn btn-outline-secondary" id="prevBtn"><i class="bi bi-arrow-left"></i></button>
-              <button class="btn btn-primary" id="flipBtn"><i class="bi bi-arrow-repeat me-1"></i>Flip</button>
-              <button class="btn btn-outline-secondary" id="nextBtn"><i class="bi bi-arrow-right"></i></button>
-              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{len(cards)}</span></div>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-
-    <script>
-    (function() {{
-      var cards = Array.prototype.slice.call(document.querySelectorAll('#fc-container .fc-card'));
-      var i = 0, total = cards.length;
-      function show(idx) {{
-        cards.forEach(function(el, j) {{
-          el.style.display = (j===idx) ? '' : 'none';
-          if (j===idx) {{
-            el.querySelector('.front').classList.remove('d-none');
-            el.querySelector('.back').classList.add('d-none');
-          }}
-        }});
-        document.getElementById('idx').textContent = (total ? idx+1 : 0);
-      }}
-      function flip() {{
-        if (!total) return;
-        var cur = cards[i];
-        var front = cur.querySelector('.front');
-        var back  = cur.querySelector('.back');
-        front.classList.toggle('d-none');
-        back.classList.toggle('d-none');
-      }}
-      function next() {{ if (!total) return; i = Math.min(total-1, i+1); show(i); }}
-      function prev() {{ if (!total) return; i = Math.max(0, i-1); show(i); }}
-      document.getElementById('flipBtn').addEventListener('click', flip);
-      document.getElementById('nextBtn').addEventListener('click', next);
-      document.getElementById('prevBtn').addEventListener('click', prev);
-      show(i);
-    }})();
-    </script>
-    """
-    _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
-    return base_layout("Flashcards", content)
-
-
-# ---------- PROGRESS ----------
-@app.get("/progress", endpoint="sec4_progress_page")
-@login_required
-def sec4_progress_page():
-    uid = _user_id()
-    attempts = [a for a in _load_json("attempts.json", []) if a.get("user_id") == uid]
-    attempts.sort(key=lambda x: x.get("ts",""), reverse=True)
-
-    total_q  = sum(a.get("count", 0) for a in attempts)
-    total_ok = sum(a.get("correct", 0) for a in attempts)
-    best = max([a.get("score_pct", 0.0) for a in attempts], default=0.0)
-    avg  = round(sum([a.get("score_pct", 0.0) for a in attempts]) / len(attempts), 1) if attempts else 0.0
-
-    dom = {}
-    for a in attempts:
-        for dname, stats in (a.get("domains") or {}).items():
-            dd = dom.setdefault(dname, {"correct": 0, "total": 0})
-            dd["correct"] += int(stats.get("correct", 0))
-            dd["total"]   += int(stats.get("total", 0))
-
-    def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
-
-    rows = []
-    for a in attempts[:100]:
-        rows.append(f"""
-          <tr>
-            <td class="text-nowrap">{html.escape(a.get('ts',''))}</td>
-            <td>{html.escape(a.get('mode',''))}</td>
-            <td class="text-end">{a.get('correct',0)}/{a.get('count',0)}</td>
-            <td class="text-end">{a.get('score_pct',0)}%</td>
-          </tr>
-        """)
-    attempts_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No attempts yet.</td></tr>"
-
-    drows = []
-    for dname in sorted(dom.keys()):
-        c = dom[dname]["correct"]; t = dom[dname]["total"]
-        drows.append(f"""
-          <tr>
-            <td>{html.escape(dname)}</td>
-            <td class="text-end">{c}/{t}</td>
-            <td class="text-end">{pct(c,t)}</td>
-          </tr>
-        """)
-    domain_html = "".join(drows) or "<tr><td colspan='3' class='text-center text-muted'>No data.</td></tr>"
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-info text-white"><h3 class="mb-0"><i class="bi bi-graph-up-arrow me-2"></i>Progress</h3></div>
-          <div class="card-body">
-            <div class="row g-3 mb-3">
-              <div class="col-md-3"><div class="p-3 border rounded-3">
-                <div class="small text-muted">Attempts</div><div class="h4 mb-0">{len(attempts)}</div>
-              </div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3">
-                <div class="small text-muted">Questions</div><div class="h4 mb-0">{total_q}</div>
-              </div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3">
-                <div class="small text-muted">Average</div><div class="h4 mb-0">{avg}%</div>
-              </div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3">
-                <div class="small text-muted">Best</div><div class="h4 mb-0">{best:.1f}%</div>
-              </div></div>
-            </div>
-
-            <div class="row g-3">
-              <div class="col-lg-6">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">By Domain</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
-                      <tbody>{domain_html}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-              <div class="col-lg-6">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">Recent Attempts</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>When</th><th>Mode</th><th class="text-end">Score</th><th class="text-end">%</th></tr></thead>
-                      <tbody>{attempts_html}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-house me-1"></i>Home</a>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Progress", content)
-
-
-# ---------- USAGE DASHBOARD (nav link helper) ----------
-@app.get("/usage", endpoint="sec4_usage_dashboard")
-@login_required
-def sec4_usage_dashboard():
-    email = session.get("email","")
-    u = _find_user(email) or {}
-    usage = (u.get("usage") or {}).get("monthly", {})
-    rows = []
-    for month, items in sorted(usage.items()):
-        quizzes = int(items.get("quizzes", 0))
-        questions = int(items.get("questions", 0))
-        tutor = int(items.get("tutor_msgs", 0))
-        flashcards = int(items.get("flashcards", 0))
-        rows.append(f"""
-          <tr>
-            <td>{html.escape(month)}</td>
-            <td class="text-end">{quizzes}</td>
-            <td class="text-end">{questions}</td>
-            <td class="text-end">{tutor}</td>
-            <td class="text-end">{flashcards}</td>
-          </tr>
-        """)
-    tbl = "".join(rows) or "<tr><td colspan='5' class='text-center text-muted'>No usage yet.</td></tr>"
+    # Short, sitewide disclaimer is already placed in base_layout footer per our global footer upgrade.
+    # We still display a concise welcome + disclaimer here to orient first-time visitors.
     body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-8">
-      <div class="card">
-        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-speedometer2 me-2"></i>Usage Dashboard</h3></div>
-        <div class="card-body">
-          <div class="table-responsive">
-            <table class="table table-sm align-middle">
-              <thead><tr><th>Month</th><th class="text-end">Quizzes</th><th class="text-end">Questions</th><th class="text-end">Tutor Msgs</th><th class="text-end">Flashcards</th></tr></thead>
-              <tbody>{tbl}</tbody>
-            </table>
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-lg-8 col-xl-7">
+          <div class="card shadow-sm">
+            <div class="card-header bg-dark text-white">
+              <h3 class="mb-0"><i class="bi bi-shield-check me-2"></i>CPP Exam Prep</h3>
+            </div>
+            <div class="card-body">
+              <p class="lead mb-2">Welcome! This is an independent CPP study tool.</p>
+              <div class="alert alert-warning">
+                <div class="fw-semibold mb-1">Disclaimer</div>
+                <div class="small mb-0">
+                  Not affiliated with or endorsed by ASIS International. Educational use only; no guarantees of exam outcomes.
+                  See the full <a href="/legal/terms">Terms &amp; Conditions</a>.
+                </div>
+              </div>
+              <p class="mb-0">
+                Use the Tutor for guided explanations, take randomized quizzes, and drill flashcards by domain. 
+                Promo/discount codes are only entered during Stripe checkout.
+              </p>
+              {ctas}
+              {user_line}
+            </div>
           </div>
-          <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
         </div>
       </div>
-    </div></div></div>
+    </div>
     """
-    return base_layout("Usage", body)
+    return base_layout("Welcome", body)
+
 # =========================
 # SECTION 5/8 (OWNED ROUTES): Flashcards, Progress, Usage, Billing/Stripe (+ Debug), Admin Login/Reset
 # =========================
@@ -2796,3 +2530,4 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
