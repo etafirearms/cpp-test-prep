@@ -5,6 +5,7 @@
 import os, re, json, time, uuid, hashlib, random, html, logging, requests
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
+from urllib.parse import quote as _urlquote
 
 from flask import (
     Flask, request, session, redirect, url_for, abort, jsonify, make_response
@@ -44,29 +45,21 @@ STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
 # ---- CSRF (harmonized with Flask-WTF) ----
-# If Flask-WTF is available, use its token generator so posted forms match what the middleware expects.
 try:
     from flask_wtf import CSRFProtect
-    from flask_wtf.csrf import generate_csrf  # <-- important: official generator
+    from flask_wtf.csrf import generate_csrf
     csrf = CSRFProtect(app)
     HAS_CSRF = True
 except Exception:
     csrf = None
     HAS_CSRF = False
-    # Provide a stub so csrf_token() can call generate_csrf() uniformly
     def generate_csrf() -> str:
         return ""
 
 def csrf_token() -> str:
-    """
-    Return the CSRF token to embed in forms.
-    - When Flask-WTF is active, return generate_csrf() (must match CSRFProtect expectations).
-    - Otherwise, fall back to a simple session-stored token.
-    """
+    """Return a form token that matches what CSRFProtect expects when enabled."""
     if HAS_CSRF:
-        # This value is validated by CSRFProtect on POST
         return generate_csrf()
-    # Minimal fallback (when Flask-WTF isn't installed)
     val = session.get("_csrf_token")
     if not val:
         val = uuid.uuid4().hex
@@ -74,13 +67,9 @@ def csrf_token() -> str:
     return val
 
 def _csrf_ok() -> bool:
-    """
-    When Flask-WTF is active, it enforces CSRF automatically (returns True here).
-    In fallback mode, do a minimal equality check against our session token.
-    """
+    """When Flask-WTF is active it enforces CSRF; fallback here is a simple equality check."""
     if HAS_CSRF:
-        return True  # CSRFProtect will handle validation and reject bad submits
-    # Minimal fallback
+        return True
     return (request.form.get("csrf_token") == session.get("_csrf_token"))
 
 # ---- Simple Rate Limit (per IP/Path) ----
@@ -160,7 +149,6 @@ def _create_user(email: str, password: str) -> Tuple[bool, str]:
         "email": email,
         "password_hash": generate_password_hash(password),
         "subscription": "inactive",
-        # T&C acceptance (gate enforcement)
         "terms_accept_version": "",
         "terms_accept_ts": ""
     })
@@ -173,6 +161,23 @@ def validate_password(pw: str) -> Tuple[bool, str]:
     return True, ""
 
 # ---- Sessions / Auth guards ----
+def _login_redirect_url(next_path: str | None = None) -> str:
+    """
+    Build a safe login URL:
+    - Prefer a real login endpoint if it exists (e.g., 'sec3_login_page').
+    - Fall back to '/login?next=...'.
+    Never points to admin login.
+    """
+    next_val = next_path or request.path or "/"
+    try:
+        # Try known user login endpoints without raising BuildError
+        for ep in ("sec3_login_page", "login", "login_page", "sec1_login_page", "sec2_login_page"):
+            if ep in app.view_functions:
+                return url_for(ep, next=next_val)
+    except Exception:
+        pass
+    return f"/login?next={_urlquote(next_val)}"
+
 def _user_id() -> str:
     return session.get("uid", "")
 
@@ -181,7 +186,7 @@ def login_required(fn):
     @wraps(fn)
     def wrapper(*args, **kwargs):
         if not _user_id():
-            return redirect(url_for("sec1_login_page"))  # ensure your actual login endpoint name here
+            return redirect(_login_redirect_url(request.path))
         return fn(*args, **kwargs)
     return wrapper
 
@@ -213,13 +218,6 @@ DOMAINS = {
 
 # ---- Domain Buttons helper ----
 def domain_buttons_html(selected_key="random", field_name="domain"):
-    # The hidden input stores the selected domain key
-    btns = []
-    for key, label in DOMAINS.items():
-        if key == "random":
-            # Only show as "Random" (not in DOMAINS headings)
-            continue
-    # Keep "random" plus the rest in a nice order
     order = ["random","security-principles","business-principles","investigations",
              "personnel-security","physical-security","information-security","crisis-management"]
     b = []
@@ -232,7 +230,6 @@ def domain_buttons_html(selected_key="random", field_name="domain"):
 
 # ---- Global Footer (short, protective disclaimer) ----
 def _footer_html():
-    # Short, clear liability notice – added to all pages to reduce risk.
     return """
     <footer class="mt-5 py-3 border-top text-center small text-muted">
       <div>
@@ -305,11 +302,10 @@ DOMAIN_TARGETS = {
 def init_sample_data():
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
-        # Core files
         for name, default in [
             ("users.json", []),
-            ("questions.json", []),      # legacy optional
-            ("flashcards.json", []),     # legacy optional
+            ("questions.json", []),
+            ("flashcards.json", []),
             ("attempts.json", []),
             ("events.json", []),
             ("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}),
@@ -323,6 +319,7 @@ def init_sample_data():
                 _save_json(name, default)
     except Exception as e:
         logger.warning("init_sample_data error: %s", e)
+
 
 
 # ========== SECTION 2/8 — Operational & Security Utilities ==========
@@ -3182,6 +3179,7 @@ if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5000"))
     logger.info("Running app on port %s", port)
     app.run(host="0.0.0.0", port=port, debug=DEBUG)
+
 
 
 
