@@ -726,21 +726,21 @@ if SEC3_REGISTER_ROUTES:
           </div></div>
         </div>
 
-        <script>
+ """
+<script>
   (function(){{
-    var card = document.currentScript.closest('.card');
-    var body = card.querySelector('.card-body');
-    var tHidden = body.querySelector('#type_val');
-    body.querySelectorAll('.type-btn').forEach(function(b){{
-      b.addEventListener('click', function(){{
-        body.querySelectorAll('.type-btn').forEach(function(x){{ x.classList.remove('active'); }});
-        b.classList.add('active');
-        if (tHidden) tHidden.value = b.getAttribute('data-value');
+    var container = document.currentScript.closest('.card').querySelector('.card-body');
+    var hidden = container.querySelector('#domain_val');
+    container.querySelectorAll('.domain-btn').forEach(function(btn){{
+      btn.addEventListener('click', function(){{
+        container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+        btn.classList.add('active');
+        if (hidden) hidden.value = btn.getAttribute('data-value');
       }});
     }});
   }})();
 </script>
-        """
+"""
         _log_event(_user_id(), "legacy.quiz.picker", {})
         return base_layout("Legacy Quiz", content)
 
@@ -3578,4 +3578,5 @@ def sec1_logout():
     return redirect("/")
 
 # ========================= END SECTION 8/8 =========================
+
 
