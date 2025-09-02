@@ -357,279 +357,930 @@ if False:
     def sec1_legal_terms():
         return base_layout("Terms", "<div class='container'>Section 1 Terms (disabled)</div>")
 # =========================
-# SECTION 2/8 — Ops & Security (healthz, robots, favicon)
+# SECTION 2/8 — Operational & Security Utilities
+# Owner notes:
+#   - This section is the ONLY owner of:
+#       * GET /healthz
+#       * GET /robots.txt
+#       * GET /favicon.ico
+#   - Endpoints are prefixed with "sec2_" to avoid collisions.
+#   - Security headers here are applied with `setdefault` only, so they DO NOT
+#     override the definitive CSP & headers set in Section 1.
 # =========================
-# Route ownership (unique in app):
-#   /healthz     [GET]
-#   /robots.txt  [GET]
-#   /favicon.ico [GET]
 
+import time
+from datetime import datetime, timezone
+from flask import jsonify, make_response, Response
+
+# Monotonic start reference for uptime (local to Section 2)
 _SEC2_START_TS = time.time()
 
-@app.after_request
-def sec2_after_request(resp):
-    """
-    Add ops-related headers without clobbering Section 1’s security headers.
-    Only use setdefault here to avoid overriding CSP or other headers.
-    """
-    resp.headers.setdefault("Cache-Control", "no-store")
-    resp.headers.setdefault("X-Powered-By", "CPP-Exam-Prep")
-    return resp
+def _sec2_safe_get(name: str, default=None):
+    """Safely read globals defined in other sections (e.g., Section 1) without import-order issues."""
+    return globals().get(name, default)
 
 @app.get("/healthz", endpoint="sec2_healthz")
 def sec2_healthz():
-    """Lightweight readiness/liveness probe."""
-    uptime = round(time.time() - _SEC2_START_TS, 2)
-    payload = {
-        "ok": True,
-        "version": APP_VERSION,
-        "uptime_sec": uptime,
-        "time_utc": datetime.utcnow().isoformat() + "Z",
-        "staging": IS_STAGING,
-        "debug": DEBUG,
-        "data_dir": DATA_DIR,
-    }
-    return jsonify(payload), 200
+    """
+    Lightweight liveness/readiness probe for Render/ingress health checks.
+    Returns static/low-cost info only (no DB, no network).
+    """
+    now = time.time()
+    uptime_s = int(now - _SEC2_START_TS)
 
-@app.get("/robots.txt", endpoint="sec2_robots")
-def sec2_robots():
-    body = "User-agent: *\nDisallow: /admin/\nDisallow: /billing/debug\n"
+    # Pull shared metadata if available; fall back safely.
+    app_version = _sec2_safe_get("APP_VERSION", "unknown")
+    debug_mode = bool(_sec2_safe_get("DEBUG", False))
+    is_staging = bool(_sec2_safe_get("IS_STAGING", False))
+
+    return jsonify({
+        "ok": True,
+        "service": "cpp-exam-prep",
+        "version": str(app_version),
+        "debug": debug_mode,
+        "staging": is_staging,
+        "started_at": datetime.fromtimestamp(_SEC2_START_TS, tz=timezone.utc).isoformat(),
+        "uptime_seconds": uptime_s,
+    })
+
+@app.get("/robots.txt", endpoint="sec2_robots_txt")
+def sec2_robots_txt():
+    """
+    Minimal robots policy to reduce 404 noise and make crawler intent explicit.
+    """
+    body = "User-agent: *\nDisallow: /admin/\nDisallow: /api/\n"
     resp = make_response(body, 200)
     resp.headers["Content-Type"] = "text/plain; charset=utf-8"
     return resp
 
 @app.get("/favicon.ico", endpoint="sec2_favicon")
 def sec2_favicon():
-    """No custom favicon yet — return 204 to prevent 404 noise."""
-    return ("", 204)
+    """
+    Favicon handler to stop 404 spam. If/when you add a real icon, replace with send_from_directory.
+    Returning 204 is acceptable for browsers.
+    """
+    # Example for later:
+    # from flask import send_from_directory
+    # return send_from_directory("static", "favicon.ico")
+    return Response(status=204)
+
+# ---- Additive Security Headers (idempotent) ---------------------------------
+# Important: Section 1 is the single owner of CSP and core headers. Here we only
+# provide defaults where they are missing. We NEVER overwrite values set earlier.
+@app.after_request
+def sec2_apply_security_headers(resp):
+    # DO NOT overwrite CSP set in Section 1; only provide a default if somehow missing.
+    csp_default = (
+        "default-src 'self'; "
+        "img-src 'self' data: https:; "
+        "style-src 'self' 'unsafe-inline' https:; "
+        "script-src 'self' 'unsafe-inline'; "
+        "font-src 'self' https: data:; "
+        "connect-src 'self' https:; "
+        "frame-ancestors 'none'; "
+        "base-uri 'self'; "
+        "form-action 'self'"
+    )
+    resp.headers.setdefault("Content-Security-Policy", csp_default)
+
+    # Common hardening headers (only set if not already present)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    # Use the stricter variant when we are the one providing the default
+    resp.headers.setdefault("Referrer-Policy", "no-referrer")
+    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
+
+    # HSTS default if HTTPS is expected (true on Render). Section 1 already sets this;
+    # this is just a safety net if order ever changes.
+    if _sec2_safe_get("ENABLE_HSTS", True):
+        resp.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
+    return resp
 # ========================= END SECTION 2/8 =========================
+
 # =========================
-# SECTION 3/8 — Legacy Quizzes (disabled guard to prevent route collisions)
+# SECTION 3/8 — Legacy Quiz & Mock (picker, run, scoring)
+# STATUS: DISABLED BY DEFAULT to prevent route duplication with Section 4
+# PURPOSE: Keep prior implementation available behind a guard for forensic diff/testing.
+# NOTE: Mounted under /legacy/* to avoid collisions with Section 4.
 # =========================
-# Route ownership (legacy):
-#   /quiz, /quiz/*, /mock-exam, /mock-exam/*
-# Per contract: Section 4 owns the real quiz routes. Keep these disabled.
 
-if False:
-    @app.get("/quiz", endpoint="sec3_quiz_disabled")
-    def sec3_quiz_disabled():
-        return "Legacy quiz (disabled)", 410
+# Turn ON only if you explicitly want to compare the legacy engine.
+# Safe: when OFF, nothing is registered and nothing executes.
+SEC3_REGISTER_ROUTES = (os.environ.get("ENABLE_LEGACY_QUIZ", "0") == "1")
 
-    @app.get("/mock-exam", endpoint="sec3_mock_disabled")
-    def sec3_mock_disabled():
-        return "Legacy mock exam (disabled)", 410
-# ========================= END SECTION 3/8 =========================
-# =========================
-# SECTION 4/8 — Intended Quizzes (/quiz & /mock owners)
-# =========================
-# Route ownership (unique in app):
-#   /quiz          [GET]
-#   /quiz/start    [POST]
-#   /quiz/grade    [POST]
-#   /mock          [GET]
-#   /mock/start    [POST]
-#   /mock/grade    [POST]
-#
-# Notes:
-# - Uses domain_buttons_html() from Section 1.
-# - Stores attempts in data/attempts.json for Progress dashboard (Section 5).
-# - No client JS required; all pure HTML forms with CSRF protection.
-# - Avoids server-side session bloat by passing qids and reading from disk at grade time.
+# ---- Local helpers (legacy names, 'sec3_' prefix to avoid global clashes) ----
 
-# ---------- Question helpers ----------
-def sec4_qid(stem: str, options: dict, correct: str, domain: str) -> str:
-    norm_stem = re.sub(r"\s+", " ", (stem or "").strip().lower())
-    dom = (domain or "unspecified").strip().lower()
-    optA = (options.get("A") or "").strip().lower()
-    optB = (options.get("B") or "").strip().lower()
-    optC = (options.get("C") or "").strip().lower()
-    optD = (options.get("D") or "").strip().lower()
-    ans  = (correct or "").strip().upper()
-    raw = json.dumps([norm_stem, dom, optA, optB, optC, optD, ans], ensure_ascii=False)
-    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+def sec3_detect_qtype(q: dict) -> str:
+    """
+    Infer simple type:
+      - 'tf' for two-option true/false-like
+      - 'scenario' if question starts with 'Scenario:' or has scenario cue
+      - 'mcq' otherwise
+    """
+    try:
+        stem = (q.get("question") or "").strip()
+        opts = q.get("options") or {}
+        # T/F if exactly two non-empty options and they resemble True/False
+        opt_texts = [str(opts.get(k, "")).strip().lower()
+                     for k in ["A", "B", "C", "D"] if opts.get(k)]
+        non_empty = [t for t in opt_texts if t]
+        if len(non_empty) == 2:
+            tf_tokens = {"true", "false", "t", "f"}
+            if all(any(tok in t.split() for tok in tf_tokens) for t in non_empty):
+                return "tf"
+        if stem.lower().startswith("scenario:") or "what should" in stem.lower():
+            return "scenario"
+    except Exception:
+        pass
+    return "mcq"
 
-def sec4_normalize_question(q: dict) -> dict | None:
-    """Normalize heterogeneous question shapes to a canonical A..D record."""
-    if not isinstance(q, dict):
-        return None
-    stem = (q.get("question") or q.get("q") or "").strip()
-    if not stem:
-        return None
 
-    # options can be dict or list
-    opts_in = q.get("options") or q.get("choices") or {}
-    opts: dict[str, str] = {}
-    if isinstance(opts_in, dict):
-        for L in ["A", "B", "C", "D"]:
-            v = opts_in.get(L) or opts_in.get(L.lower())
-            if not v:
-                return None
-            opts[L] = str(v).strip()
-    elif isinstance(opts_in, list) and len(opts_in) >= 4:
-        letters = ["A", "B", "C", "D"]
-        for i, L in enumerate(letters):
-            v = opts_in[i]
-            if isinstance(v, dict):
-                text = v.get("text") or v.get("label") or v.get("value")
-            else:
-                text = v
-            if not text:
-                return None
-            opts[L] = str(text).strip()
-    else:
-        return None
+def sec3_filter_questions(domain_key: str, type_key: str) -> list[dict]:
+    """
+    Build the working pool from the 'bank' if available (Section 6), plus legacy data/questions.json.
+    Filter by domain (exact match) and inferred type if provided.
+    """
+    pool: list[dict] = []
 
-    correct = (q.get("correct") or q.get("answer") or "").strip().upper()
-    if correct not in ("A", "B", "C", "D"):
+    # Prefer bank (if Section 6 registered a reader)
+    try:
+        bank_reader = globals().get("_bank_read_questions")
+        if callable(bank_reader):
+            pool.extend(bank_reader() or [])
+    except Exception:
+        pass
+
+    # Legacy fallback
+    try:
+        legacy = _load_json("questions.json", [])
+        if isinstance(legacy, list):
+            pool.extend(legacy)
+    except Exception:
+        pass
+
+    # Domain filter
+    dk = (domain_key or "").strip().lower()
+    if dk and dk not in ("random", "mixed", "all"):
+        pool = [q for q in pool
+                if str((q.get("domain") or "Unspecified")).strip().lower() == dk]
+
+    # Type filter (optional)
+    tkey = (type_key or "mixed").strip().lower()
+    if tkey in ("mcq", "tf", "scenario"):
+        pool = [q for q in pool if sec3_detect_qtype(q) == tkey]
+
+    # Deduplicate by a stable key
+    seen, uniq = set(), []
+    for q in pool:
         try:
-            idx = int(correct)
-            correct = ["A", "B", "C", "D"][idx - 1]
+            h = q.get("_hash")
+            if not h:
+                stem = (q.get("question") or "").strip().lower()
+                dom = (q.get("domain") or "unspecified").strip().lower()
+                correct = (q.get("correct") or "").strip().upper()
+                h = f"{stem}|{dom}|{correct}"
+            if h in seen:
+                continue
+            seen.add(h)
+            uniq.append(q)
         except Exception:
-            return None
-
-    domain = (q.get("domain") or q.get("category") or "Unspecified").strip()
-
-    sources_in = q.get("sources") or []
-    sources: list[dict] = []
-    if isinstance(sources_in, list):
-        for s in sources_in[:3]:
-            t = (s.get("title") or "").strip()
-            u = (s.get("url") or "").strip()
-            if t and u:
-                sources.append({"title": t, "url": u})
-
-    # Prefer provided id but ensure stability
-    qid = q.get("id") or sec4_qid(stem, opts, correct, domain)
-    return {
-        "id": qid,
-        "question": stem,
-        "options": opts,
-        "correct": correct,
-        "domain": domain,
-        "sources": sources
-    }
-
-def sec4_all_questions() -> list[dict]:
-    """Merge legacy questions.json and bank/cpp_questions_v1.json; normalize and dedupe by id."""
-    out: list[dict] = []
-    seen: set[str] = set()
-
-    for src in ("questions.json", "bank/cpp_questions_v1.json"):
-        items = _load_json(src, [])
-        if not isinstance(items, list):
             continue
-        for q in items:
-            n = sec4_normalize_question(q)
-            if not n:
-                continue
-            qid = n["id"]
-            if qid in seen:
-                continue
-            seen.add(qid)
-            out.append(n)
-    return out
+    return uniq
 
-def sec4_filter_by_domain(items: list[dict], dk: str | None) -> list[dict]:
-    if not dk or dk == "random":
-        return items[:]
-    val = str(dk).strip().lower()
-    return [q for q in items if str(q.get("domain", "")).strip().lower() == val]
 
-def sec4_pick(items: list[dict], count: int) -> list[dict]:
-    pool = items[:]
+def sec3_sample(pool: list[dict], n: int) -> list[dict]:
+    pool = pool[:]
     random.shuffle(pool)
-    return pool[:max(0, min(count, len(pool)))]
+    return pool[:max(0, min(n, len(pool)))]
 
-# ---------- Shared quiz renderers ----------
-def _sec4_question_block(q: dict, idx: int) -> str:
-    """Render a single question block with A..D radio options."""
-    stem = html.escape(q["question"])
-    qid = html.escape(q["id"])
-    dom = html.escape(q.get("domain", "Unspecified"))
-    opts = q["options"]
-    def opt_row(letter: str) -> str:
-        lab = html.escape(opts.get(letter, ""))
-        name = f"ans_{qid}"
-        return (
-            f'<div class="form-check">'
-            f'  <input class="form-check-input" type="radio" name="{name}" id="{name}_{letter}" value="{letter}">'
-            f'  <label class="form-check-label" for="{name}_{letter}"><strong>{letter}.</strong> {lab}</label>'
-            f'</div>'
+
+def sec3_render_question_block(q: dict, idx: int) -> str:
+    """Render one legacy question as A..D radio buttons (display-only helper)."""
+    stem = html.escape(q.get("question", "").strip())
+    opts = q.get("options") or {}
+    opts_html = []
+    for L in ["A", "B", "C", "D"]:
+        if not opts.get(L):
+            continue
+        val = html.escape(str(opts[L]))
+        opts_html.append(
+            f"""
+            <div class="form-check">
+              <input class="form-check-input" type="radio" name="q{idx}" id="q{idx}_{L}" value="{L}">
+              <label class="form-check-label" for="q{idx}_{L}">
+                <span class="fw-semibold">{L}.</span> {val}
+              </label>
+            </div>
+            """
         )
+    dom = html.escape(q.get("domain", "Unspecified"))
+    qtype = sec3_detect_qtype(q)
+    meta = f'<div class="small text-muted mt-1">Domain: <span class="fw-semibold">{dom}</span> • Type: {qtype.upper()}</div>'
     return f"""
-      <div class="mb-4 p-3 border rounded-3">
-        <div class="small text-muted mb-1">Q{idx+1} • Domain: {dom}</div>
-        <div class="fw-semibold mb-2">{stem}</div>
-        <input type="hidden" name="qid" value="{qid}">
-        {opt_row('A')}{opt_row('B')}{opt_row('C')}{opt_row('D')}
-      </div>
+    <div class="mb-4 p-3 border rounded-3">
+      <div class="fw-semibold mb-2">{idx+1}. {stem}</div>
+      {''.join(opts_html) if opts_html else '<div class="text-muted">No options found for this item.</div>'}
+      {meta}
+    </div>
     """
 
-def _sec4_results_table(dom_stats: dict) -> str:
-    rows = []
-    for dname in sorted(dom_stats.keys()):
-        stats = dom_stats[dname]
-        c, t = stats.get("correct", 0), stats.get("total", 0)
-        pct = f"{(100.0*c/t):.1f}%" if t else "0.0%"
-        rows.append(
-            f"<tr><td>{html.escape(dname)}</td>"
-            f"<td class='text-end'>{c}/{t}</td>"
-            f"<td class='text-end'>{pct}</td></tr>"
-        )
-    body = "".join(rows) or "<tr><td colspan='3' class='text-center text-muted'>No data.</td></tr>"
-    return (
-        "<div class='table-responsive'><table class='table table-sm align-middle'>"
-        "<thead><tr><th>Domain</th><th class='text-end'>Correct</th><th class='text-end'>%</th></tr></thead>"
-        f"<tbody>{body}</tbody></table></div>"
-    )
 
-def _sec4_grade_and_persist(mode_label: str, answers: dict[str, str], q_lookup: dict[str, dict]) -> tuple[int, int, dict]:
+def sec3_grade(questions: list[dict], answers: dict) -> tuple[int, dict]:
+    """
+    Returns (correct_count, per_domain_stats)
+    per_domain_stats = {domain: {"correct": c, "total": t}}
+    """
     correct = 0
-    total = 0
     dom_stats: dict[str, dict] = {}
-    for qid, ans in answers.items():
-        q = q_lookup.get(qid)
-        if not q:
-            continue
-        total += 1
-        dom = q.get("domain") or "Unspecified"
-        rec = dom_stats.setdefault(dom, {"correct": 0, "total": 0})
-        rec["total"] += 1
-        if ans.upper() == (q.get("correct") or "").upper():
+    for i, q in enumerate(questions):
+        dom_name = (q.get("domain") or "Unspecified")
+        st = dom_stats.setdefault(dom_name, {"correct": 0, "total": 0})
+        st["total"] += 1
+        user_ans = (answers.get(f"q{i}") or "").strip().upper()
+        if user_ans and user_ans == (q.get("correct") or "").strip().upper():
             correct += 1
-            rec["correct"] += 1
+            st["correct"] += 1
+    return correct, dom_stats
 
-    pct = round(100.0 * (correct / total), 1) if total else 0.0
 
-    # Append attempt to attempts.json
-    attempts = _load_json("attempts.json", [])
-    attempts.append({
-        "ts": datetime.utcnow().isoformat() + "Z",
+def sec3_attempt_record(mode: str, questions: list[dict], correct: int, domains: dict) -> dict:
+    """
+    Persist an attempt for /progress. This matches the shape that Section 5 reads.
+    """
+    total = len(questions)
+    pct = round(100.0 * correct / total, 1) if total else 0.0
+    by_types = {"mcq": 0, "tf": 0, "scenario": 0}
+    for q in questions:
+        t = sec3_detect_qtype(q)
+        by_types[t] = by_types.get(t, 0) + 1
+
+    rec = {
+        "ts": datetime.utcnow().isoformat(timespec="seconds") + "Z",
         "user_id": _user_id(),
-        "mode": mode_label,
+        "mode": mode,
         "count": total,
         "correct": correct,
         "score_pct": pct,
-        "domains": dom_stats
-    })
-    _save_json("attempts.json", attempts)
+        "domains": domains,
+        "types": by_types,
+    }
+    data = _load_json("attempts.json", [])
+    if isinstance(data, list):
+        data.append(rec)
+        _save_json("attempts.json", data)
 
-    # Usage counters
+    # Best-effort usage tallies (guarded; the helper may live in a later section)
     try:
         _bump_usage("quizzes", 1)
         _bump_usage("questions", total)
     except Exception:
         pass
 
-    return correct, total, dom_stats
+    _log_event(_user_id(), "legacy.quiz.complete",
+               {"mode": mode, "count": total, "correct": correct, "pct": pct})
+    return rec
 
-# ---------- QUIZ routes ----------
-@app.get("/quiz", endpoint="sec4_quiz_page")
+
+# ---- Route registration (ONLY when explicitly enabled) ----
+if SEC3_REGISTER_ROUTES:
+    # NOTE: We intentionally mount under /legacy/* to avoid collisions with Section 4’s owners.
+
+    @app.get("/legacy/quiz")
+    @login_required
+    def sec3_quiz_picker_get():
+        """Legacy Quiz Picker (domain + type + count)."""
+        csrf_val = csrf_token()
+
+        # Reuse modern domain helper from Section 1 if present
+        try:
+            domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
+        except Exception:
+            # Ultra-minimal fallback if helper is missing
+            domain_buttons = '<input type="hidden" id="domain_val" name="domain" value="random">'
+
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+            <div class="card">
+              <div class="card-header bg-primary text-white">
+                <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Legacy Quiz Builder</h3>
+              </div>
+              <div class="card-body">
+                <form method="POST" action="/legacy/quiz">
+                  <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+
+                  <label class="form-label fw-semibold">Domain</label>
+                  {domain_buttons}
+
+                  <div class="mt-3">
+                    <label class="form-label fw-semibold">Question Type</label>
+                    <div class="d-flex flex-wrap gap-2">
+                      <input type="hidden" id="type_val" name="qtype" value="mixed"/>
+                      <button type="button" class="btn btn-outline-primary type-btn active" data-value="mixed">Mixed</button>
+                      <button type="button" class="btn btn-outline-primary type-btn" data-value="mcq">MCQ</button>
+                      <button type="button" class="btn btn-outline-primary type-btn" data-value="tf">True/False</button>
+                      <button type="button" class="btn btn-outline-primary type-btn" data-value="scenario">Scenario</button>
+                    </div>
+                  </div>
+
+                  <div class="mt-3">
+                    <label class="form-label fw-semibold">How many?</label>
+                    <div class="d-flex gap-2 flex-wrap">
+                      <button class="btn btn-outline-success" name="count" value="10">10</button>
+                      <button class="btn btn-outline-success" name="count" value="20">20</button>
+                      <button class="btn btn-outline-success" name="count" value="30">30</button>
+                      <button class="btn btn-outline-success" name="count" value="50">50</button>
+                    </div>
+                  </div>
+                </form>
+                <div class="text-muted small mt-3">Mounted on /legacy/* to avoid conflicts with the new engine.</div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+
+ """
+<script>
+  (function(){{
+    var container = document.currentScript.closest('.card').querySelector('.card-body');
+    var hidden = container.querySelector('#domain_val');
+    container.querySelectorAll('.domain-btn').forEach(function(btn){{
+      btn.addEventListener('click', function(){{
+        container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+        btn.classList.add('active');
+        if (hidden) hidden.value = btn.getAttribute('data-value');
+      }});
+    }});
+  }})();
+</script>
+"""
+        _log_event(_user_id(), "legacy.quiz.picker", {})
+        return base_layout("Legacy Quiz", content)
+
+
+    @app.post("/legacy/quiz")
+    @login_required
+    def sec3_quiz_start_post():
+        """Legacy Quiz: build one-shot quiz and render it."""
+        if not _csrf_ok():
+            abort(403)
+
+        # Parse inputs (bounded)
+        domain = (request.form.get("domain") or "random").strip()
+        qtype = (request.form.get("qtype") or "mixed").strip().lower()
+        try:
+            count = int(request.form.get("count") or 20)
+        except Exception:
+            count = 20
+        if count not in (10, 20, 30, 50):
+            count = 20
+
+        # Prepare questions
+        pool = sec3_filter_questions(domain, qtype)
+        random.shuffle(pool)
+        questions = sec3_sample(pool, count)
+
+        # Minimal payload for grading
+        payload_items = [{
+            "question": q.get("question", ""),
+            "options": {k: q.get("options", {}).get(k, "") for k in ["A", "B", "C", "D"]},
+            "correct": (q.get("correct") or "").strip().upper(),
+            "domain": q.get("domain", "Unspecified"),
+        } for q in questions]
+        payload = html.escape(json.dumps(payload_items, ensure_ascii=False))
+
+        # Render
+        qblocks = "".join(sec3_render_question_block(q, i) for i, q in enumerate(questions)) or \
+                  "<div class='text-muted'>No questions available.</div>"
+
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-xl-10">
+            <div class="card">
+              <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Legacy Quiz</h3>
+                <a href="/legacy/quiz" class="btn btn-outline-light btn-sm">New Quiz</a>
+              </div>
+              <div class="card-body">
+                <div class="small text-muted mb-3">
+                  Domain: <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong> •
+                  Type: <strong>{html.escape(qtype.capitalize()) if qtype!='mixed' else 'Mixed'}</strong> •
+                  Count: <strong>{len(questions)}</strong>
+                </div>
+                <form method="POST" action="/legacy/quiz/grade">
+                  <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                  <textarea name="payload" class="d-none">{payload}</textarea>
+                  {qblocks}
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-success" type="submit"><i class="bi bi-clipboard-check me-1"></i>Grade</button>
+                    <a class="btn btn-outline-secondary" href="/legacy/quiz"><i class="bi bi-arrow-left me-1"></i>Back</a>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """
+        _log_event(_user_id(), "legacy.quiz.start", {"count": len(questions), "domain": domain, "type": qtype})
+        try:
+            _bump_usage("quizzes", 1)
+            _bump_usage("questions", len(questions))
+        except Exception:
+            pass
+        return base_layout("Legacy Quiz", content)
+
+
+    @app.post("/legacy/quiz/grade")
+    @login_required
+    def sec3_quiz_grade_post():
+        """Legacy Quiz grading."""
+        if not _csrf_ok():
+            abort(403)
+
+        raw = request.form.get("payload") or "[]"
+        try:
+            questions = json.loads(raw)
+            if not isinstance(questions, list):
+                questions = []
+        except Exception:
+            questions = []
+
+        answers = {f"q{i}": (request.form.get(f"q{i}") or "").strip().upper()
+                   for i in range(len(questions))}
+        correct, dom_stats = sec3_grade(questions, answers)
+        rec = sec3_attempt_record("quiz", questions, correct, dom_stats)
+
+        # Build domain table
+        def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
+        drows = []
+        for dname in sorted(dom_stats.keys()):
+            c = dom_stats[dname]["correct"]; t = dom_stats[dname]["total"]
+            drows.append(f"<tr><td>{html.escape(dname)}</td><td class='text-end'>{c}/{t}</td><td class='text-end'>{pct(c,t)}</td></tr>")
+        dtable = "".join(drows) or "<tr><td colspan='3' class='text-center text-muted'>None</td></tr>"
+
+        total = len(questions)
+        pct_str = f"{rec['score_pct']:.1f}%"
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+            <div class="card">
+              <div class="card-header bg-success text-white">
+                <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Legacy Results</h3>
+              </div>
+              <div class="card-body">
+                <div class="row g-3 mb-2">
+                  <div class="col-6"><div class="p-3 border rounded-3">
+                    <div class="small text-muted">Score</div><div class="h4 mb-0">{correct}/{total}</div>
+                  </div></div>
+                  <div class="col-6"><div class="p-3 border rounded-3">
+                    <div class="small text-muted">Percent</div><div class="h4 mb-0">{pct_str}</div>
+                  </div></div>
+                </div>
+
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">By Domain</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
+                      <tbody>{dtable}</tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div class="d-flex gap-2 mt-3">
+                  <a class="btn btn-primary" href="/legacy/quiz"><i class="bi bi-arrow-repeat me-1"></i>New Quiz</a>
+                  <a class="btn btn-outline-secondary" href="/progress"><i class="bi bi-graph-up-arrow me-1"></i>Progress</a>
+                  <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+                </div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """
+        return base_layout("Legacy Quiz Results", content)
+
+
+    @app.get("/legacy/mock-exam")
+    @login_required
+    def sec3_mock_picker_get():
+        """Legacy Mock Exam launcher (fixed counts)."""
+        csrf_val = csrf_token()
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+            <div class="card">
+              <div class="card-header bg-warning text-dark">
+                <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Legacy Mock Exam</h3>
+              </div>
+              <div class="card-body">
+                <form method="POST" action="/legacy/mock-exam">
+                  <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+                  <div class="mb-2 text-muted small">Choose how many questions:</div>
+                  <div class="d-flex gap-2 flex-wrap">
+                    <button class="btn btn-outline-warning" name="count" value="50">50</button>
+                    <button class="btn btn-outline-warning" name="count" value="100">100</button>
+                    <button class="btn btn-outline-warning" name="count" value="150">150</button>
+                  </div>
+                </form>
+                <div class="text-muted small mt-3">Results still appear in your Progress.</div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """
+        return base_layout("Legacy Mock Exam", content)
+
+
+    @app.post("/legacy/mock-exam")
+    @login_required
+    def sec3_mock_start_post():
+        """Legacy Mock Exam start."""
+        if not _csrf_ok():
+            abort(403)
+        try:
+            count = int(request.form.get("count") or 100)
+        except Exception:
+            count = 100
+        if count not in (50, 100, 150):
+            count = 100
+
+        pool = sec3_filter_questions("random", "mixed")
+        random.shuffle(pool)
+        questions = sec3_sample(pool, count)
+
+        payload_items = [{
+            "question": q.get("question", ""),
+            "options": {k: q.get("options", {}).get(k, "") for k in ["A", "B", "C", "D"]},
+            "correct": (q.get("correct") or "").strip().upper(),
+            "domain": q.get("domain", "Unspecified"),
+        } for q in questions]
+        payload = html.escape(json.dumps(payload_items, ensure_ascii=False))
+
+        qblocks = "".join(sec3_render_question_block(q, i) for i, q in enumerate(questions)) or \
+                  "<div class='text-muted'>No questions available.</div>"
+
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-xl-10">
+            <div class="card">
+              <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+                <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Legacy Mock Exam</h3>
+                <a href="/legacy/mock-exam" class="btn btn-outline-dark btn-sm">New Mock</a>
+              </div>
+              <div class="card-body">
+                <div class="small text-muted mb-3">Mixed domains • Mixed types • Count: <strong>{len(questions)}</strong></div>
+                <form method="POST" action="/legacy/mock-exam/grade">
+                  <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                  <textarea name="payload" class="d-none">{payload}</textarea>
+                  {qblocks}
+                  <div class="d-flex gap-2">
+                    <button class="btn btn-success" type="submit"><i class="bi bi-clipboard-check me-1"></i>Grade</button>
+                    <a class="btn btn-outline-secondary" href="/legacy/mock-exam"><i class="bi bi-arrow-left me-1"></i>Back</a>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """
+        _log_event(_user_id(), "legacy.mock.start", {"count": len(questions)})
+        try:
+            _bump_usage("quizzes", 1)
+            _bump_usage("questions", len(questions))
+        except Exception:
+            pass
+        return base_layout("Legacy Mock Exam", content)
+
+
+    @app.post("/legacy/mock-exam/grade")
+    @login_required
+    def sec3_mock_grade_post():
+        """Legacy Mock Exam grading."""
+        if not _csrf_ok():
+            abort(403)
+
+        raw = request.form.get("payload") or "[]"
+        try:
+            questions = json.loads(raw)
+            if not isinstance(questions, list):
+                questions = []
+        except Exception:
+            questions = []
+
+        answers = {f"q{i}": (request.form.get(f"q{i}") or "").strip().upper()
+                   for i in range(len(questions))}
+        correct, dom_stats = sec3_grade(questions, answers)
+        rec = sec3_attempt_record("mock", questions, correct, dom_stats)
+
+        def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
+        drows = []
+        for dname in sorted(dom_stats.keys()):
+            c = dom_stats[dname]["correct"]; t = dom_stats[dname]["total"]
+            drows.append(f"<tr><td>{html.escape(dname)}</td><td class='text-end'>{c}/{t}</td><td class='text-end'>{pct(c,t)}</td></tr>")
+        dtable = "".join(drows) or "<tr><td colspan='3' class='text-center text-muted'>None</td></tr>"
+
+        total = len(questions)
+        pct_str = f"{rec['score_pct']:.1f}%"
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+            <div class="card">
+              <div class="card-header bg-success text-white">
+                <h3 class="mb-0"><i class="bi bi-clipboard-check me-2"></i>Legacy Mock Results</h3>
+              </div>
+              <div class="card-body">
+                <div class="row g-3 mb-2">
+                  <div class="col-6"><div class="p-3 border rounded-3">
+                    <div class="small text-muted">Score</div><div class="h4 mb-0">{correct}/{total}</div>
+                  </div></div>
+                  <div class="col-6"><div class="p-3 border rounded-3">
+                    <div class="small text-muted">Percent</div><div class="h4 mb-0">{pct_str}</div>
+                  </div></div>
+                </div>
+
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">By Domain</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
+                      <tbody>{dtable}</tbody>
+                    </table>
+                  </div>
+                </div>
+
+                <div class="d-flex gap-2 mt-3">
+                  <a class="btn btn-warning" href="/legacy/mock-exam"><i class="bi bi-mortarboard me-1"></i>New Mock</a>
+                  <a class="btn btn-outline-secondary" href="/progress"><i class="bi bi-graph-up-arrow me-1"></i>Progress</a>
+                  <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
+                </div>
+              </div>
+            </div>
+          </div></div>
+        </div>
+        """
+        return base_layout("Legacy Mock Results", content)
+
+# ========================= END SECTION 3/8 =========================
+
+# =========================
+# SECTION 4/8: Quizzes & Mock Exams (picker, runner, grading, attempt logging)
+# One-owner rule: THIS SECTION OWNS the /quiz* and /mock* routes.
+# Endpoint function names are all prefixed with `sec4_` to avoid collisions.
+# =========================
+
+# ---- Local helpers (safe, no conflicts) --------------------------------------
+
+def sec4_now_iso() -> str:
+    try:
+        return datetime.utcnow().isoformat() + "Z"
+    except Exception:
+        return ""
+
+def sec4_domains_map() -> dict:
+    """
+    Prefer the global DOMAINS (from Section 1) if present; otherwise a safe default.
+    """
+    return globals().get("DOMAINS") or {
+        "security-principles": "Security Principles & Practices",
+        "business-principles": "Business Principles & Practices",
+        "investigations": "Investigations",
+        "personnel-security": "Personnel Security",
+        "physical-security": "Physical Security",
+        "information-security": "Information Security",
+        "crisis-management": "Crisis Management",
+    }
+
+def sec4_domain_buttons_html(selected_key: str = "random", field_name: str = "domain") -> str:
+    """
+    Render domain selector buttons + hidden input. We keep this local (sec4_*) to
+    avoid naming overlap and ensure the UI works even if Section 1 changes later.
+    """
+    dom = sec4_domains_map()
+    order = ["random"] + [k for k in dom.keys()]
+    btns = []
+    for key in order:
+        lbl = "Random (all)" if key == "random" else dom.get(key, key)
+        active = " active" if key == selected_key else ""
+        btns.append(
+            f'<button type="button" class="btn btn-outline-primary domain-btn{active}" '
+            f'data-value="{html.escape(key)}">{html.escape(lbl)}</button>'
+        )
+    return (
+        f'<div class="d-flex flex-wrap gap-2">{"".join(btns)}</div>'
+        f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" '
+        f'value="{html.escape(selected_key)}"/>'
+    )
+
+def sec4_load_all_questions() -> list[dict]:
+    """
+    Merge bank questions (if Section 6 registered _bank_read_questions) with any
+    legacy data/questions.json content. Returns a raw, heterogeneous list that
+    downstream functions will normalize.
+    """
+    out: list[dict] = []
+    try:
+        bank_fn = globals().get("_bank_read_questions")
+        if callable(bank_fn):
+            out.extend(bank_fn() or [])
+    except Exception:
+        pass
+    try:
+        out.extend(_load_json("questions.json", []) or [])
+    except Exception:
+        pass
+    return out
+
+def sec4_filter_questions_by_domain(items: list[dict], domain_key: str | None) -> list[dict]:
+    if not domain_key or domain_key == "random":
+        return items[:]
+    dk = str(domain_key).strip().lower()
+    out = []
+    for q in items:
+        dname = (q.get("domain") or q.get("category") or "Unspecified")
+        if str(dname).strip().lower() == dk:
+            out.append(q)
+    return out
+
+def sec4_normalize_question(q: dict) -> dict | None:
+    """
+    Normalize into:
+      {
+        "id": str,
+        "question": str,
+        "options": {"A": "...","B":"...","C":"...","D":"..."},
+        "correct": "A"|"B"|"C"|"D",
+        "domain": str,
+        "sources": [{title,url}, ...]  # optional, at most a few
+      }
+    Rejects invalid question shapes by returning None.
+    """
+    try:
+        if not isinstance(q, dict):
+            return None
+
+        stem = (q.get("question") or q.get("q") or "").strip()
+        if not stem:
+            return None
+
+        # Options: accept dict/A..D or list[4] with text fields
+        opts_in = q.get("options") or q.get("choices") or {}
+        opts: dict[str, str] = {}
+        if isinstance(opts_in, dict):
+            for L in ["A", "B", "C", "D"]:
+                v = opts_in.get(L) or opts_in.get(L.lower())
+                if not v:
+                    return None
+                opts[L] = str(v).strip()
+        elif isinstance(opts_in, list) and len(opts_in) >= 4:
+            letters = ["A", "B", "C", "D"]
+            for i, L in enumerate(letters):
+                v = opts_in[i]
+                if isinstance(v, dict):
+                    text = v.get("text") or v.get("label") or v.get("value")
+                else:
+                    text = v
+                if not text:
+                    return None
+                opts[L] = str(text).strip()
+        else:
+            return None
+
+        # Correct answer: allow "A..D" or 1..4
+        correct = (q.get("correct") or q.get("answer") or "").strip().upper()
+        if correct not in ("A", "B", "C", "D"):
+            try:
+                idx = int(correct)
+                correct = ["A", "B", "C", "D"][idx - 1]
+            except Exception:
+                return None
+
+        dom = (q.get("domain") or q.get("category") or "Unspecified").strip()
+
+        sources = []
+        for s in (q.get("sources") or [])[:3]:
+            t = (s.get("title") or "").strip()
+            u = (s.get("url") or "").strip()
+            if t and u:
+                sources.append({"title": t, "url": u})
+
+        return {
+            "id": q.get("id") or hashlib.sha1(
+                f"{stem}|{json.dumps(opts, sort_keys=True)}|{dom}".encode("utf-8")
+            ).hexdigest(),
+            "question": stem,
+            "options": opts,
+            "correct": correct,
+            "domain": dom,
+            "sources": sources,
+        }
+    except Exception:
+        return None
+
+def sec4_select_questions(all_q: list[dict], count: int) -> list[dict]:
+    pool: list[dict] = []
+    for q in all_q:
+        n = sec4_normalize_question(q)
+        if n:
+            pool.append(n)
+    random.shuffle(pool)
+    return pool[:max(0, min(count, len(pool)))]
+
+def sec4_render_question_block(q: dict, idx: int) -> str:
+    """Render a single question with A..D radio inputs + hidden correctness/meta."""
+    stem = html.escape(q["question"])
+    dom_label = html.escape(q.get("domain", "Unspecified"))
+    opt_html = []
+    name = f"q_{idx}"
+    qid = html.escape(q.get("id", str(idx)))
+    for L in ["A", "B", "C", "D"]:
+        val = html.escape(q["options"].get(L, ""))
+        oid = f"{name}_{L}"
+        opt_html.append(
+            f"""
+            <div class="form-check">
+              <input class="form-check-input" type="radio" id="{oid}" name="{name}" value="{L}" required>
+              <label class="form-check-label" for="{oid}"><strong>{L}.</strong> {val}</label>
+            </div>
+            """
+        )
+    return f"""
+    <div class="border rounded-3 p-3 mb-3">
+      <div class="small text-muted mb-1">Domain: <strong>{dom_label}</strong></div>
+      <div class="fw-semibold mb-2">{stem}</div>
+      {''.join(opt_html)}
+      <input type="hidden" name="{name}_id" value="{qid}">
+      <input type="hidden" name="{name}_correct" value="{q['correct']}">
+      <input type="hidden" name="{name}_domain" value="{html.escape(q.get('domain','Unspecified'))}">
+      <input type="hidden" name="{name}_sources" value="{html.escape(json.dumps(q.get('sources') or []))}">
+    </div>
+    """
+
+def sec4_grade_submission(form: dict, total: int) -> tuple[int, list[dict], dict]:
+    """
+    Returns (correct_count, detailed_rows, per_domain_stats)
+    detailed_rows: [{qid, chosen, correct, domain, sources, is_correct}]
+    per_domain_stats: {domain: {"correct": int, "total": int}}
+    """
+    correct = 0
+    rows: list[dict] = []
+    dom_stats: dict[str, dict] = {}
+
+    for i in range(total):
+        name = f"q_{i}"
+        chosen = (form.get(name) or "").strip().upper()
+        qid = form.get(f"{name}_id") or ""
+        right = (form.get(f"{name}_correct") or "").strip().upper()
+        domain = (form.get(f"{name}_domain") or "Unspecified").strip()
+        sources_json = form.get(f"{name}_sources") or "[]"
+        try:
+            sources = json.loads(sources_json)
+        except Exception:
+            sources = []
+
+        is_ok = (chosen == right)
+        if is_ok:
+            correct += 1
+
+        ds = dom_stats.setdefault(domain, {"correct": 0, "total": 0})
+        ds["total"] += 1
+        if is_ok:
+            ds["correct"] += 1
+
+        rows.append({
+            "qid": qid,
+            "chosen": chosen or "—",
+            "correct": right,
+            "domain": domain,
+            "sources": sources,
+            "is_correct": is_ok,
+        })
+
+    return correct, rows, dom_stats
+
+def sec4_attempt_append(record: dict):
+    """Append an attempt to attempts.json (safe/no-op on failure)."""
+    try:
+        attempts = _load_json("attempts.json", [])
+        attempts.append(record)
+        _save_json("attempts.json", attempts)
+    except Exception as e:
+        try:
+            logger.warning("Could not append attempt: %s", e)
+        except Exception:
+            pass
+
+def sec4_pct(c: int, t: int) -> str:
+    return f"{(100.0 * c / t):.1f}%" if t else "0.0%"
+
+# ---- Routes: QUIZ -------------------------------------------------------------
+
+@app.get("/quiz", endpoint="sec4_quiz_picker")
 @login_required
-def sec4_quiz_page():
+def sec4_quiz_picker():
     csrf_val = csrf_token()
-    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
-    body = f"""
+    dom_buttons = sec4_domain_buttons_html(selected_key="random", field_name="domain")
+
+    content = f"""
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
         <div class="card">
@@ -640,21 +1291,40 @@ def sec4_quiz_page():
             <form method="POST" action="/quiz/start" class="mb-3">
               <input type="hidden" name="csrf_token" value="{csrf_val}"/>
               <label class="form-label fw-semibold">Domain</label>
-              {domain_buttons}
+              {dom_buttons}
               <div class="mt-3 mb-2 fw-semibold">How many questions?</div>
               <div class="d-flex flex-wrap gap-2">
                 <button class="btn btn-outline-primary" name="count" value="10">10</button>
                 <button class="btn btn-outline-primary" name="count" value="20">20</button>
                 <button class="btn btn-outline-primary" name="count" value="30">30</button>
+                <button class="btn btn-outline-primary" name="count" value="50">50</button>
               </div>
             </form>
-            <div class="text-muted small">Tip: Choose a domain to focus or Random to mix all.</div>
+            <div class="text-muted small">Tip: Pick a domain or use Random to mix all.</div>
           </div>
         </div>
       </div></div>
     </div>
+
+    <script>
+      (function(){
+        var container = document.currentScript.closest('.card').querySelector('.card-body');
+        var hidden = container.querySelector('#domain_val');
+        container.querySelectorAll('.domain-btn').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            container.querySelectorAll('.domain-btn').forEach(function(b){ b.classList.remove('active'); });
+            btn.classList.add('active');
+            if (hidden) hidden.value = btn.getAttribute('data-value');
+          });
+        });
+      })();
+    </script>
     """
-    return base_layout("Quiz", body)
+    try:
+        _log_event(_user_id(), "quiz.picker", {})
+    except Exception:
+        pass
+    return base_layout("Quiz", content)
 
 @app.post("/quiz/start", endpoint="sec4_quiz_start")
 @login_required
@@ -666,46 +1336,49 @@ def sec4_quiz_start():
         count = int(request.form.get("count") or 20)
     except Exception:
         count = 20
-    if count not in (10, 20, 30):
+    if count not in (10, 20, 30, 50):
         count = 20
     domain = request.form.get("domain") or "random"
 
-    items = sec4_filter_by_domain(sec4_all_questions(), domain)
-    picked = sec4_pick(items, count)
-    if not picked:
-        body = """
-        <div class="container"><div class="row justify-content-center"><div class="col-md-7">
-          <div class="alert alert-warning">No questions available. Add content in <code>data/questions.json</code> or <code>data/bank/cpp_questions_v1.json</code>.</div>
-          <a class="btn btn-outline-secondary" href="/quiz"><i class="bi bi-arrow-left me-1"></i>Back</a>
-        </div></div></div>
-        """
-        return base_layout("Quiz", body)
+    all_q = sec4_load_all_questions()
+    pool = sec4_filter_questions_by_domain(all_q, domain)
+    chosen = sec4_select_questions(pool, count)
 
-    # Render exam page
     csrf_val = csrf_token()
-    q_blocks = "".join(_sec4_question_block(q, i) for i, q in enumerate(picked))
-    body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-9">
-      <div class="card">
-        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-          <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
-          <a href="/quiz" class="btn btn-outline-light btn-sm">New Quiz</a>
+    cards = [sec4_render_question_block(q, i) for i, q in enumerate(chosen)]
+    dom_name = sec4_domains_map().get(domain, "Random (all)") if domain != "random" else "Random (all)"
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
+            <a href="/quiz" class="btn btn-outline-light btn-sm">New Session</a>
+          </div>
+          <div class="card-body">
+            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> • Questions: {len(chosen)}</div>
+            <form method="POST" action="/quiz/grade" id="quizForm">
+              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+              <input type="hidden" name="mode" value="Quiz"/>
+              <input type="hidden" name="count" value="{len(chosen)}"/>
+              <div>{''.join(cards)}</div>
+              <div class="d-flex align-items-center mt-3">
+                <button class="btn btn-success" type="submit"><i class="bi bi-check2-circle me-1"></i>Submit Answers</button>
+                <a class="btn btn-outline-secondary ms-2" href="/quiz"><i class="bi bi-arrow-left me-1"></i>Back</a>
+              </div>
+            </form>
+          </div>
         </div>
-        <div class="card-body">
-          <div class="small text-muted mb-2">Domain: <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong> • Questions: {len(picked)}</div>
-          <form method="POST" action="/quiz/grade">
-            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-            {q_blocks}
-            <div class="d-flex align-items-center">
-              <button class="btn btn-primary" type="submit"><i class="bi bi-check2-circle me-1"></i>Submit</button>
-              <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div></div></div>
+      </div></div>
+    </div>
     """
-    return base_layout("Quiz", body)
+    try:
+        _log_event(_user_id(), "quiz.start", {"count": len(chosen), "domain": domain})
+        _bump_usage("quizzes", 1); _bump_usage("questions", len(chosen))
+    except Exception:
+        pass
+    return base_layout("Quiz • In Progress", content)
 
 @app.post("/quiz/grade", endpoint="sec4_quiz_grade")
 @login_required
@@ -713,78 +1386,165 @@ def sec4_quiz_grade():
     if not _csrf_ok():
         abort(403)
 
-    # Collect answers
-    answers: dict[str, str] = {}
-    for qid in request.form.getlist("qid"):
-        pick = (request.form.get(f"ans_{qid}") or "").strip().upper()
-        if pick in ("A", "B", "C", "D"):
-            answers[qid] = pick
+    mode = (request.form.get("mode") or "Quiz").strip()
+    try:
+        total = int(request.form.get("count") or 0)
+    except Exception:
+        total = 0
 
-    # Build lookup from disk
-    lookup = {q["id"]: q for q in sec4_all_questions()}
-    got, total, dom_stats = _sec4_grade_and_persist("Quiz", answers, lookup)
-    pct = round(100.0 * (got / total), 1) if total else 0.0
+    correct, rows, dom_stats = sec4_grade_submission(request.form, total)
+    pct = round((100.0 * correct / total), 1) if total else 0.0
 
-    dom_tbl = _sec4_results_table(dom_stats)
-    body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-xl-9">
-      <div class="card">
-        <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-          <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz Results</h3>
-          <a href="/quiz" class="btn btn-outline-light btn-sm">New Quiz</a>
-        </div>
-        <div class="card-body">
-          <div class="row g-3 mb-3">
-            <div class="col-md-4"><div class="p-3 border rounded-3">
-              <div class="small text-muted">Score</div><div class="h4 mb-0">{got}/{total}</div>
-            </div></div>
-            <div class="col-md-4"><div class="p-3 border rounded-3">
-              <div class="small text-muted">Percentage</div><div class="h4 mb-0">{pct}%</div>
-            </div></div>
+    # Build rows
+    def _row_html(r):
+        ic = '<span class="badge bg-success">Correct</span>' if r["is_correct"] else '<span class="badge bg-danger">Wrong</span>'
+        src_bits = ""
+        if r.get("sources"):
+            links = []
+            for s in (r["sources"] or [])[:3]:
+                t = html.escape((s.get("title") or "").strip())
+                u = html.escape((s.get("url") or "").strip())
+                if t and u:
+                    links.append(f'<li><a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
+            if links:
+                src_bits = f'<div class="small mt-1"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
+        return f"""
+        <tr>
+          <td class="text-nowrap">{html.escape(r["domain"])}</td>
+          <td class="text-center">{html.escape(r["chosen"])}</td>
+          <td class="text-center">{html.escape(r["correct"])}</td>
+          <td class="text-center">{ic}{src_bits}</td>
+        </tr>
+        """
+
+    rows_html = "".join(_row_html(r) for r in rows) or "<tr><td colspan='4' class='text-center text-muted'>No answers submitted.</td></tr>"
+
+    # Domain breakdown
+    def _dom_row(dn, st):
+        return f"<tr><td>{html.escape(dn)}</td><td class='text-end'>{st['correct']}/{st['total']}</td><td class='text-end'>{sec4_pct(st['correct'], st['total'])}</td></tr>"
+
+    dom_html = "".join(_dom_row(d, st) for d, st in sorted(dom_stats.items())) or "<tr><td colspan='3' class='text-center text-muted'>No data.</td></tr>"
+
+    # Persist attempt
+    rec = {
+        "user_id": _user_id(),
+        "ts": sec4_now_iso(),
+        "mode": mode,
+        "count": total,
+        "correct": correct,
+        "score_pct": pct,
+        "domains": dom_stats
+    }
+    sec4_attempt_append(rec)
+    try:
+        _log_event(_user_id(), "quiz.finish", {"mode": mode, "count": total, "correct": correct, "score_pct": pct})
+    except Exception:
+        pass
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+            <h3 class="mb-0"><i class="bi bi-clipboard2-check me-2"></i>Results</h3>
+            <a href="/quiz" class="btn btn-outline-light btn-sm">New Quiz</a>
           </div>
-          <div class="p-3 border rounded-3 mb-3">
-            <div class="fw-semibold mb-2">By Domain</div>
-            {dom_tbl}
+          <div class="card-body">
+            <div class="row g-3 mb-3">
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Mode</div><div class="h5 mb-0">{html.escape(mode)}</div></div></div>
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Questions</div><div class="h5 mb-0">{total}</div></div></div>
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Correct</div><div class="h5 mb-0">{correct}</div></div></div>
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Score</div><div class="h5 mb-0">{pct}%</div></div></div>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-lg-5">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">By Domain</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
+                      <tbody>{dom_html}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="col-lg-7">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">Answer Review</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-center">Your</th><th class="text-center">Correct</th><th class="text-center">Result</th></tr></thead>
+                      <tbody>{rows_html}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-3 d-flex gap-2">
+              <a class="btn btn-outline-secondary" href="/progress"><i class="bi bi-graph-up me-1"></i>See Progress</a>
+              <a class="btn btn-outline-primary" href="/mock"><i class="bi bi-journal-check me-1"></i>Try a Mock Exam</a>
+            </div>
           </div>
-          <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
         </div>
-      </div>
-    </div></div></div>
+      </div></div>
+    </div>
     """
-    return base_layout("Quiz Results", body)
+    return base_layout("Quiz • Results", content)
 
-# ---------- MOCK routes ----------
-@app.get("/mock", endpoint="sec4_mock_page")
+# ---- Routes: MOCK EXAM --------------------------------------------------------
+
+@app.get("/mock", endpoint="sec4_mock_picker")
 @login_required
-def sec4_mock_page():
+def sec4_mock_picker():
     csrf_val = csrf_token()
-    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
-    body = f"""
+    dom_buttons = sec4_domain_buttons_html(selected_key="random", field_name="domain")
+
+    content = f"""
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
         <div class="card">
-          <div class="card-header bg-warning">
+          <div class="card-header bg-warning text-dark">
             <h3 class="mb-0"><i class="bi bi-journal-check me-2"></i>Mock Exam</h3>
           </div>
           <div class="card-body">
             <form method="POST" action="/mock/start" class="mb-3">
               <input type="hidden" name="csrf_token" value="{csrf_val}"/>
               <label class="form-label fw-semibold">Domain</label>
-              {domain_buttons}
+              {dom_buttons}
               <div class="mt-3 mb-2 fw-semibold">How many questions?</div>
               <div class="d-flex flex-wrap gap-2">
-                <button class="btn btn-outline-warning" name="count" value="30">30</button>
-                <button class="btn btn-outline-warning" name="count" value="60">60</button>
-                <button class="btn btn-outline-warning" name="count" value="90">90</button>
+                <button class="btn btn-outline-warning" name="count" value="50">50</button>
+                <button class="btn btn-outline-warning" name="count" value="100">100</button>
+                <button class="btn btn-outline-warning" name="count" value="150">150</button>
               </div>
             </form>
-            <div class="text-muted small">Longer session to simulate exam pacing.</div>
+            <div class="text-muted small">Tip: Use Random for a mixed-domain exam.</div>
           </div>
         </div>
       </div></div>
     </div>
+
+    <script>
+      (function(){
+        var container = document.currentScript.closest('.card').querySelector('.card-body');
+        var hidden = container.querySelector('#domain_val');
+        container.querySelectorAll('.domain-btn').forEach(function(btn){
+          btn.addEventListener('click', function(){
+            container.querySelectorAll('.domain-btn').forEach(function(b){ b.classList.remove('active'); });
+            btn.classList.add('active');
+            if (hidden) hidden.value = btn.getAttribute('data-value');
+          });
+        });
+      })();
+    </script>
     """
-    return base_layout("Mock Exam", body)
+    try:
+        _log_event(_user_id(), "mock.picker", {})
+    except Exception:
+        pass
+    return base_layout("Mock Exam", content)
 
 @app.post("/mock/start", endpoint="sec4_mock_start")
 @login_required
@@ -793,48 +1553,52 @@ def sec4_mock_start():
         abort(403)
 
     try:
-        count = int(request.form.get("count") or 60)
+        count = int(request.form.get("count") or 100)
     except Exception:
-        count = 60
-    if count not in (30, 60, 90):
-        count = 60
+        count = 100
+    if count not in (50, 100, 150):
+        count = 100
     domain = request.form.get("domain") or "random"
 
-    items = sec4_filter_by_domain(sec4_all_questions(), domain)
-    picked = sec4_pick(items, count)
-    if not picked:
-        body = """
-        <div class="container"><div class="row justify-content-center"><div class="col-md-7">
-          <div class="alert alert-warning">No questions available. Add content in <code>data/questions.json</code> or <code>data/bank/cpp_questions_v1.json</code>.</div>
-          <a class="btn btn-outline-secondary" href="/mock"><i class="bi bi-arrow-left me-1"></i>Back</a>
-        </div></div></div>
-        """
-        return base_layout("Mock Exam", body)
+    all_q = sec4_load_all_questions()
+    pool = sec4_filter_questions_by_domain(all_q, domain)
+    chosen = sec4_select_questions(pool, count)
 
     csrf_val = csrf_token()
-    q_blocks = "".join(_sec4_question_block(q, i) for i, q in enumerate(picked))
-    body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-10">
-      <div class="card">
-        <div class="card-header bg-warning d-flex justify-content-between align-items-center">
-          <h3 class="mb-0"><i class="bi bi-journal-check me-2"></i>Mock Exam</h3>
-          <a href="/mock" class="btn btn-outline-dark btn-sm">New Mock</a>
+    cards = [sec4_render_question_block(q, i) for i, q in enumerate(chosen)]
+    dom_name = sec4_domains_map().get(domain, "Random (all)") if domain != "random" else "Random (all)"
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
+            <h3 class="mb-0"><i class="bi bi-journal-check me-2"></i>Mock Exam</h3>
+            <a href="/mock" class="btn btn-outline-dark btn-sm">New Mock</a>
+          </div>
+          <div class="card-body">
+            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> • Questions: {len(chosen)}</div>
+            <form method="POST" action="/mock/grade" id="mockForm">
+              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+              <input type="hidden" name="mode" value="Mock"/>
+              <input type="hidden" name="count" value="{len(chosen)}"/>
+              <div>{''.join(cards)}</div>
+              <div class="d-flex align-items-center mt-3">
+                <button class="btn btn-success" type="submit"><i class="bi bi-check2-circle me-1"></i>Submit Answers</button>
+                <a class="btn btn-outline-secondary ms-2" href="/mock"><i class="bi bi-arrow-left me-1"></i>Back</a>
+              </div>
+            </form>
+          </div>
         </div>
-        <div class="card-body">
-          <div class="small text-muted mb-2">Domain: <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong> • Questions: {len(picked)}</div>
-          <form method="POST" action="/mock/grade">
-            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-            {q_blocks}
-            <div class="d-flex align-items-center">
-              <button class="btn btn-warning" type="submit"><i class="bi bi-check2-circle me-1"></i>Submit</button>
-              <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div></div></div>
+      </div></div>
+    </div>
     """
-    return base_layout("Mock Exam", body)
+    try:
+        _log_event(_user_id(), "mock.start", {"count": len(chosen), "domain": domain})
+        _bump_usage("quizzes", 1); _bump_usage("questions", len(chosen))
+    except Exception:
+        pass
+    return base_layout("Mock Exam • In Progress", content)
 
 @app.post("/mock/grade", endpoint="sec4_mock_grade")
 @login_required
@@ -842,50 +1606,131 @@ def sec4_mock_grade():
     if not _csrf_ok():
         abort(403)
 
-    answers: dict[str, str] = {}
-    for qid in request.form.getlist("qid"):
-        pick = (request.form.get(f"ans_{qid}") or "").strip().upper()
-        if pick in ("A", "B", "C", "D"):
-            answers[qid] = pick
+    mode = (request.form.get("mode") or "Mock").strip()
+    try:
+        total = int(request.form.get("count") or 0)
+    except Exception:
+        total = 0
 
-    lookup = {q["id"]: q for q in sec4_all_questions()}
-    got, total, dom_stats = _sec4_grade_and_persist("Mock Exam", answers, lookup)
-    pct = round(100.0 * (got / total), 1) if total else 0.0
+    correct, rows, dom_stats = sec4_grade_submission(request.form, total)
+    pct = round((100.0 * correct / total), 1) if total else 0.0
 
-    dom_tbl = _sec4_results_table(dom_stats)
-    body = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-xl-10">
-      <div class="card">
-        <div class="card-header bg-warning d-flex justify-content-between align-items-center">
-          <h3 class="mb-0"><i class="bi bi-journal-check me-2"></i>Mock Results</h3>
-          <a href="/mock" class="btn btn-outline-dark btn-sm">New Mock</a>
-        </div>
-        <div class="card-body">
-          <div class="row g-3 mb-3">
-            <div class="col-md-4"><div class="p-3 border rounded-3">
-              <div class="small text-muted">Score</div><div class="h4 mb-0">{got}/{total}</div>
-            </div></div>
-            <div class="col-md-4"><div class="p-3 border rounded-3">
-              <div class="small text-muted">Percentage</div><div class="h4 mb-0">{pct}%</div>
-            </div></div>
+    def _row_html(r):
+        ic = '<span class="badge bg-success">Correct</span>' if r["is_correct"] else '<span class="badge bg-danger">Wrong</span>'
+        src_bits = ""
+        if r.get("sources"):
+            links = []
+            for s in (r["sources"] or [])[:3]:
+                t = html.escape((s.get("title") or "").strip())
+                u = html.escape((s.get("url") or "").strip())
+                if t and u:
+                    links.append(f'<li><a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
+            if links:
+                src_bits = f'<div class="small mt-1"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
+        return f"""
+        <tr>
+          <td class="text-nowrap">{html.escape(r["domain"])}</td>
+          <td class="text-center">{html.escape(r["chosen"])}</td>
+          <td class="text-center">{html.escape(r["correct"])}</td>
+          <td class="text-center">{ic}{src_bits}</td>
+        </tr>
+        """
+
+    rows_html = "".join(_row_html(r) for r in rows) or "<tr><td colspan='4' class='text-center text-muted'>No answers submitted.</td></tr>"
+
+    def _dom_row(dn, st):
+        return f"<tr><td>{html.escape(dn)}</td><td class='text-end'>{st['correct']}/{st['total']}</td><td class='text-end'>{sec4_pct(st['correct'], st['total'])}</td></tr>"
+
+    dom_html = "".join(_dom_row(d, st) for d, st in sorted(dom_stats.items())) or "<tr><td colspan='3' class='text-center text-muted'>No data.</td></tr>"
+
+    # Persist attempt
+    rec = {
+        "user_id": _user_id(),
+        "ts": sec4_now_iso(),
+        "mode": mode,
+        "count": total,
+        "correct": correct,
+        "score_pct": pct,
+        "domains": dom_stats
+    }
+    sec4_attempt_append(rec)
+    try:
+        _log_event(_user_id(), "mock.finish", {"mode": mode, "count": total, "correct": correct, "score_pct": pct})
+    except Exception:
+        pass
+
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center"><div class="col-xl-10">
+        <div class="card">
+          <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
+            <h3 class="mb-0"><i class="bi bi-clipboard2-check me-2"></i>Results</h3>
+            <a href="/mock" class="btn btn-outline-light btn-sm">New Mock</a>
           </div>
-          <div class="p-3 border rounded-3 mb-3">
-            <div class="fw-semibold mb-2">By Domain</div>
-            {dom_tbl}
+          <div class="card-body">
+            <div class="row g-3 mb-3">
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Mode</div><div class="h5 mb-0">{html.escape(mode)}</div></div></div>
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Questions</div><div class="h5 mb-0">{total}</div></div></div>
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Correct</div><div class="h5 mb-0">{correct}</div></div></div>
+              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Score</div><div class="h5 mb-0">{pct}%</div></div></div>
+            </div>
+
+            <div class="row g-3">
+              <div class="col-lg-5">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">By Domain</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
+                      <tbody>{dom_html}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+              <div class="col-lg-7">
+                <div class="p-3 border rounded-3">
+                  <div class="fw-semibold mb-2">Answer Review</div>
+                  <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                      <thead><tr><th>Domain</th><th class="text-center">Your</th><th class="text-center">Correct</th><th class="text-center">Result</th></tr></thead>
+                      <tbody>{rows_html}</tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="mt-3 d-flex gap-2">
+              <a class="btn btn-outline-secondary" href="/progress"><i class="bi bi-graph-up me-1"></i>See Progress</a>
+              <a class="btn btn-outline-primary" href="/quiz"><i class="bi bi-ui-checks-grid me-1"></i>Take a Quiz</a>
+            </div>
           </div>
-          <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
         </div>
-      </div>
-    </div></div></div>
+      </div></div>
+    </div>
     """
-    return base_layout("Mock Results", body)
+    return base_layout("Mock Exam • Results", content)
 # ========================= END SECTION 4/8 =========================
-# =========================
-# SECTION 5/8 — Flashcards, Progress, Usage, Billing/Stripe, Admin
-# =========================
-# (Unmodified design; includes the JavaScript brace fix and safe Stripe guards.)
+
+# SECTION 5/8 (OWNED ROUTES): Flashcards, Progress, Usage, Billing/Stripe (+ Debug), Admin Login/Reset
+
+# Route ownership:
+#   /flashcards              [GET, POST]
+#   /progress                [GET]
+#   /usage                   [GET]
+#   /billing                 [GET]
+#   /billing/checkout        [GET]
+#   /billing/success         [GET]
+#   /stripe/webhook          [POST]
+#   /billing/debug           [GET]
+#   /admin/login             [GET, POST]
+#   /admin/reset-password    [GET, POST]
+#
+# NOTE: Section 6 owns content ingestion & bank validation endpoints.
+#       Do NOT define them here.
 
 # ---------- STRIPE IMPORT & CONFIG (SAFE) ----------
+# Keep runtime graceful if stripe library or secret key is missing.
 try:
     import stripe  # type: ignore
 except Exception:
@@ -899,15 +1744,23 @@ STRIPE_WEBHOOK_SECRET   = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 if stripe is not None:
     try:
-        stripe.api_key = STRIPE_SECRET_KEY or None
+        stripe.api_key = STRIPE_SECRET_KEY or None  # None safe; we gate calls with _stripe_ready()
     except Exception:
         pass
 
 def _stripe_ready() -> bool:
+    """Stripe usable only if the library imported AND a secret key is present."""
     return (stripe is not None) and bool(STRIPE_SECRET_KEY)
 
 # ---------- FLASHCARDS ----------
 def sec5_normalize_flashcard(item: dict | None):
+    """
+    Accepts shapes like:
+      {"front": "...", "back":"...", "domain":"...", "sources":[{"title":"...", "url":"..."}]}
+      {"q":"...", "a":"..."} or {"term":"...", "definition":"..."}
+    Returns normalized or None if invalid:
+      {"id":"...", "front":"...", "back":"...", "domain":"...", "sources":[...]}
+    """
     if not item or not isinstance(item, dict):
         return None
     front = (item.get("front") or item.get("q") or item.get("term") or "").strip()
@@ -932,24 +1785,36 @@ def sec5_normalize_flashcard(item: dict | None):
     }
 
 def sec5_all_flashcards() -> list[dict]:
+    """
+    Merge legacy data/flashcards.json + optional bank/cpp_flashcards_v1.json,
+    normalize, and de-duplicate by (front, back, domain).
+    """
     out: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
 
+    # Legacy flashcards file
     legacy = _load_json("flashcards.json", [])
     for fc in (legacy or []):
-        n = sec5_normalize_flashcard(fc); 
-        if not n: continue
+        n = sec5_normalize_flashcard(fc)
+        if not n:
+            continue
         key = (n["front"], n["back"], n["domain"])
-        if key in seen: continue
-        seen.add(key); out.append(n)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
 
+    # Bank flashcards (preferred if present)
     bank = _load_json("bank/cpp_flashcards_v1.json", [])
     for fc in (bank or []):
-        n = sec5_normalize_flashcard(fc); 
-        if not n: continue
+        n = sec5_normalize_flashcard(fc)
+        if not n:
+            continue
         key = (n["front"], n["back"], n["domain"])
-        if key in seen: continue
-        seen.add(key); out.append(n)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(n)
 
     return out
 
@@ -962,6 +1827,7 @@ def sec5_filter_flashcards_domain(cards: list[dict], domain_key: str | None):
 @app.route("/flashcards", methods=["GET", "POST"], endpoint="sec5_flashcards_page")
 @login_required
 def sec5_flashcards_page():
+    # GET -> picker
     if request.method == "GET":
         csrf_val = csrf_token()
         domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
@@ -992,13 +1858,11 @@ def sec5_flashcards_page():
         </div>
 
         <script>
-          (function(){{ 
-            var card = document.currentScript.closest('.card');
-            if (!card) return;
-            var container = card.querySelector('.card-body');
+          (function(){{
+            var container = document.currentScript.closest('.card').querySelector('.card-body');
             var hidden = container.querySelector('#domain_val');
-            container.querySelectorAll('.domain-btn').forEach(function(btn){{ 
-              btn.addEventListener('click', function(){{ 
+            container.querySelectorAll('.domain-btn').forEach(function(btn){{
+              btn.addEventListener('click', function(){{
                 container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
                 btn.classList.add('active');
                 if (hidden) hidden.value = btn.getAttribute('data-value');
@@ -1009,6 +1873,7 @@ def sec5_flashcards_page():
         """
         return base_layout("Flashcards", content)
 
+    # POST -> render a client-side session (no server state)
     if not _csrf_ok():
         abort(403)
 
@@ -1105,10 +1970,12 @@ def sec5_flashcards_page():
     """
     try:
         _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
+        # Optional usage bumps; guarded in case helper is defined in a later section.
         _bump_usage("flashcards", len(cards))
     except Exception:
         pass
     return base_layout("Flashcards", content)
+
 
 # ---------- PROGRESS ----------
 @app.get("/progress", endpoint="sec5_progress_page")
@@ -1119,6 +1986,7 @@ def sec5_progress_page():
     attempts.sort(key=lambda x: x.get("ts", ""), reverse=True)
 
     total_q  = sum(int(a.get("count", 0))   for a in attempts)
+    total_ok = sum(int(a.get("correct", 0)) for a in attempts)
     best = max([float(a.get("score_pct", 0.0)) for a in attempts], default=0.0)
     avg  = round(sum([float(a.get("score_pct", 0.0)) for a in attempts]) / len(attempts), 1) if attempts else 0.0
 
@@ -1131,6 +1999,7 @@ def sec5_progress_page():
 
     def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
 
+    # Recent attempts (max 100 rows)
     rows = []
     for a in attempts[:100]:
         rows.append(f"""
@@ -1143,6 +2012,7 @@ def sec5_progress_page():
         """)
     attempts_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No attempts yet.</td></tr>"
 
+    # By domain
     drows = []
     for dname in sorted(dom.keys()):
         c = dom[dname]["correct"]; t = dom[dname]["total"]
@@ -1168,7 +2038,7 @@ def sec5_progress_page():
                 <div class="small text-muted">Attempts</div><div class="h4 mb-0">{len(attempts)}</div>
               </div></div>
               <div class="col-md-3"><div class="p-3 border rounded-3">
-                <div class="small text muted">Questions</div><div class="h4 mb-0">{total_q}</div>
+                <div class="small text-muted">Questions</div><div class="h4 mb-0">{total_q}</div>
               </div></div>
               <div class="col-md-3"><div class="p-3 border rounded-3">
                 <div class="small text-muted">Average</div><div class="h4 mb-0">{avg}%</div>
@@ -1211,7 +2081,8 @@ def sec5_progress_page():
     """
     return base_layout("Progress", content)
 
-# ---------- USAGE ----------
+
+# ---------- USAGE DASHBOARD ----------
 @app.get("/usage", endpoint="sec5_usage_dashboard")
 @login_required
 def sec5_usage_dashboard():
@@ -1252,12 +2123,18 @@ def sec5_usage_dashboard():
     """
     return base_layout("Usage", body)
 
-# ---------- BILLING / CHECKOUT / SUCCESS / WEBHOOK / DEBUG ----------
-# (same as previously provided; unchanged visuals)
+
+# ---------- BILLING (Stripe) ----------
 def sec5_create_stripe_checkout_session(user_email: str, plan: str = "monthly", discount_code: str | None = None):
+    """
+    Creates a Stripe Checkout Session for either a subscription (monthly) or a
+    one-time payment (sixmonth). If discount_code is provided, try to resolve an
+    active Promotion Code in Stripe and apply it; also enable allow_promotion_codes.
+    """
     if not _stripe_ready():
         logger.error("Stripe not configured (library or STRIPE_SECRET_KEY missing).")
         return None
+
     try:
         discounts_param = None
         if discount_code:
@@ -1326,6 +2203,7 @@ def sec5_billing_page():
     names = {"monthly": "Monthly Plan", "sixmonth": "6-Month Plan", "inactive": "Free Plan"}
 
     if sub == "inactive":
+        # Discount code input is only on the Billing page; appended to checkout link via JS.
         plans_html = """
           <div class="row g-3">
             <div class="col-md-6">
@@ -1358,29 +2236,29 @@ def sec5_billing_page():
           </div>
 
           <script>
-            (function(){{
-              function goWithCode(href) {{
-                var code = (document.getElementById('discount_code')||{{value:''}}).value.trim();
-                if (code) {{
+            (function(){
+              function goWithCode(href) {
+                var code = (document.getElementById('discount_code')||{value:''}).value.trim();
+                if (code) {
                   var url = new URL(href, window.location.origin);
                   url.searchParams.set('code', code);
                   return url.toString();
-                }}
+                }
                 return href;
-              }}
-              document.querySelectorAll('.upgrade-btn').forEach(function(btn){{
-                btn.addEventListener('click', function(e){{
+              }
+              document.querySelectorAll('.upgrade-btn').forEach(function(btn){
+                btn.addEventListener('click', function(e){
                   e.preventDefault();
                   window.location.href = goWithCode(btn.getAttribute('href'));
-                }});
-              }});
+                });
+              });
               var apply = document.getElementById('apply_code');
-              if (apply) {{
-                apply.addEventListener('click', function(){{
+              if (apply) {
+                apply.addEventListener('click', function(){
                   /* no-op: user still clicks a plan to proceed */
-                }});
-              }}
-            }})();
+                });
+              }
+            })();
           </script>
         """
     else:
@@ -1419,12 +2297,17 @@ def sec5_billing_page():
 def sec5_billing_checkout():
     plan = request.args.get("plan", "monthly")
     user_email = session.get("email", "")
+
+    # A user can be logged in (uid set) but lack an email in session; handle gracefully.
     if not user_email:
         return redirect(_login_redirect_url(request.path))
+
     discount_code = (request.args.get("code") or "").strip()
+
     url = sec5_create_stripe_checkout_session(user_email, plan=plan, discount_code=discount_code)
     if url:
         return redirect(url)
+    # If creation failed (e.g., Stripe not configured), return to Billing
     return redirect(url_for("sec5_billing_page"))
 
 @app.get("/billing/success", endpoint="sec5_billing_success")
@@ -1441,6 +2324,7 @@ def sec5_billing_success():
             u = _find_user(email or "")
             if u:
                 updates: Dict[str, Any] = {}
+                # Store customer id either way
                 cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs, "customer", None)) or u.get("stripe_customer_id")
                 updates["stripe_customer_id"] = cid
 
@@ -1470,6 +2354,7 @@ def sec5_billing_success():
     </div></div></div>"""
     return base_layout("Payment Success", content)
 
+# Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook", endpoint="sec5_stripe_webhook")
 def sec5_stripe_webhook():
     if not _stripe_ready():
@@ -1508,7 +2393,8 @@ def sec5_stripe_webhook():
 
     return "", 200
 
-# ---------- ADMIN ----------
+
+# ---------- BILLING DEBUG (admin-only; no secrets) ----------
 @app.get("/billing/debug", endpoint="sec5_billing_debug")
 @login_required
 def sec5_billing_debug():
@@ -1548,6 +2434,8 @@ def sec5_billing_debug():
     """
     return base_layout("Billing Debug", content)
 
+
+# ---------- ADMIN LOGIN & PASSWORD RESET ----------
 @app.get("/admin/login", endpoint="sec5_admin_login_page")
 def sec5_admin_login_page():
     nxt = request.args.get("next") or "/"
@@ -1573,6 +2461,7 @@ def sec5_admin_login_page():
 
 @app.post("/admin/login", endpoint="sec5_admin_login_post")
 def sec5_admin_login_post():
+    # If CSRFProtect is active, it enforces validity. Otherwise, manual check.
     if not HAS_CSRF:
         if request.form.get("csrf_token") != csrf_token():
             abort(403)
@@ -1633,21 +2522,27 @@ def sec5_admin_reset_password():
     </div></div></div>
     """
     return base_layout("Admin Reset Password", body)
-# ========================= END SECTION 5/8 =========================
-# =========================
-# SECTION 6/8 — Content Bank: ingestion, helpers, validation UI
-# =========================
-# Route ownership (unique in app):
-#   /api/dev/ingest   [POST]  -> JSON ingestion (admin or token)
-#   /admin/check-bank [GET]   -> Admin validation dashboard
 
+# SECTION 6/8 — Content Bank: ingestion, helpers, validation UI
+# Route ownership (unique in app):
+#   /api/dev/ingest     [POST]  -> JSON ingestion (admin or token)
+#   /admin/check-bank   [GET]   -> Admin validation dashboard
+#
+# Shared helpers:
+#   _bank_read_questions(), _bank_save_questions()
+#   _bank_read_flashcards(), _bank_save_flashcards()
+#   _bump_usage(kind, amount)
+#   _update_content_index()
+
+# ---------- Constants & paths ----------
 BANK_DIR = _path("bank")
 BANK_QUESTIONS = "bank/cpp_questions_v1.json"
 BANK_FLASHCARDS = "bank/cpp_flashcards_v1.json"
 BANK_INDEX = "bank/content_index.json"
 
-DEV_INGEST_TOKEN = os.environ.get("DEV_INGEST_TOKEN", "")
+DEV_INGEST_TOKEN = os.environ.get("DEV_INGEST_TOKEN", "")  # optional API token for CI/automation
 
+# Ensure bank directory exists at import time
 try:
     os.makedirs(BANK_DIR, exist_ok=True)
 except Exception as _e:
@@ -1662,8 +2557,10 @@ def _bump_usage(kind: str, amount: int = 1):
     uid = _user_id()
     if not uid or amount <= 0:
         return
+    # get user by session email (if present) otherwise by uid
     email = session.get("email", "")
     u = _find_user(email) or None
+    # fallback: find by id
     if not u:
         for x in _users_all():
             if x.get("id") == uid:
@@ -1672,6 +2569,7 @@ def _bump_usage(kind: str, amount: int = 1):
     if not u:
         return
 
+    # month key: YYYY-MM
     now = datetime.utcnow()
     mkey = f"{now.year:04d}-{now.month:02d}"
 
@@ -1688,14 +2586,15 @@ def _bump_usage(kind: str, amount: int = 1):
     elif kind == "flashcards":
         rec["flashcards"] = int(rec.get("flashcards", 0)) + int(amount)
     else:
-        return
+        return  # unknown kind -> no write
 
+    # persist modified user back to users.json
     try:
         _update_user(u["id"], {"usage": usage})
     except Exception as e:
         logger.warning("Could not bump usage for %s: %s", uid, e)
 
-# ---------- Stable hashes ----------
+# ---------- Stable hashes for de-dup ----------
 def _q_stable_hash(stem: str, options: dict, correct: str, domain: str) -> str:
     norm_stem = re.sub(r"\s+", " ", (stem or "").strip().lower())
     dom = (domain or "unspecified").strip().lower()
@@ -1714,7 +2613,7 @@ def _fc_stable_hash(front: str, back: str, domain: str) -> str:
     raw = json.dumps([norm_f, norm_b, dom], ensure_ascii=False)
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
-# ---------- Normalizers ----------
+# ---------- Normalizers (bank canonical form) ----------
 def _sec6_normalize_question_for_bank(q: dict) -> dict | None:
     if not isinstance(q, dict):
         return None
@@ -1820,6 +2719,10 @@ def _bank_save_flashcards(items: list[dict]):
     _save_json(BANK_FLASHCARDS, items or [])
 
 def _update_content_index():
+    """
+    Build a compact content inventory for quick admin checks and tooling.
+    Writes bank/content_index.json
+    """
     q = _bank_read_questions()
     f = _bank_read_flashcards()
     q_dom: dict[str, int] = {}
@@ -1836,7 +2739,10 @@ def _update_content_index():
         "generated_at": datetime.utcnow().isoformat() + "Z",
         "totals": {"questions": len(q), "flashcards": len(f)},
         "domains": {"questions": q_dom, "flashcards": f_dom},
-        "files": {"questions": BANK_QUESTIONS, "flashcards": BANK_FLASHCARDS}
+        "files": {
+            "questions": BANK_QUESTIONS,
+            "flashcards": BANK_FLASHCARDS
+        }
     }
     os.makedirs(os.path.dirname(_path(BANK_INDEX)), exist_ok=True)
     _save_json(BANK_INDEX, idx)
@@ -1851,6 +2757,7 @@ def sec6_admin_check_bank():
     questions = _bank_read_questions()
     flashcards = _bank_read_flashcards()
 
+    # Validate shape and compute duplicates by _hash
     q_dups: dict[str, int] = {}
     f_dups: dict[str, int] = {}
     q_bad, f_bad = [], []
@@ -1892,9 +2799,11 @@ def sec6_admin_check_bank():
         if not _f_valid(x):
             f_bad.append(x)
 
+    # Prepare HTML
     q_dup_count = sum(1 for n in q_dups.values() if n > 1)
     f_dup_count = sum(1 for n in f_dups.values() if n > 1)
 
+    # Update index file (side effect)
     try:
         _update_content_index()
     except Exception as e:
@@ -1911,6 +2820,7 @@ def sec6_admin_check_bank():
     q_dom_tbl = _kv_table((idx.get("domains") or {}).get("questions", {}))
     f_dom_tbl = _kv_table((idx.get("domains") or {}).get("flashcards", {}))
 
+    # Show first few bad entries (escaped JSON)
     def _preview(items: list[dict], limit: int = 5) -> str:
         if not items:
             return "<div class='text-muted'>None</div>"
@@ -1994,14 +2904,34 @@ def sec6_admin_check_bank():
     """
     return base_layout("Admin • Check Bank", body)
 
-# ---------- Ingestion API ----------
+# ---------- Ingestion API (admin or token) ----------
 @app.post("/api/dev/ingest", endpoint="sec6_api_dev_ingest")
 def sec6_api_dev_ingest():
+    """
+    JSON API to ingest new content into the bank.
+    Auth:
+      - If an admin session exists -> allowed.
+      - Else, require header 'X-Ingest-Token: <DEV_INGEST_TOKEN>' (if configured).
+    Payload (application/json):
+      {
+        "questions": [ {question, options{A..D}, correct, domain, sources[]?}, ... ],
+        "flashcards": [ {front, back, domain, sources[]?}, ... ]
+      }
+    Behavior:
+      - Normalize each item into canonical bank shape.
+      - De-duplicate by stable '_hash'.
+      - Append new items, keep existing on collisions.
+      - Rebuild content_index.json.
+      - Returns a summary report.
+    Rate limiting: 1 request / 2 seconds per IP.
+    """
+    # Simple rate limit (per IP + path)
     rip = request.headers.get("X-Forwarded-For", request.remote_addr or "0.0.0.0").split(",")[0].strip()
     rkey = f"ingest:{rip}"
-    if not _rate_ok(rkey, per_sec=0.5):
+    if not _rate_ok(rkey, per_sec=0.5):  # = 1 every 2 seconds
         return jsonify({"ok": False, "error": "rate_limited"}), 429
 
+    # Authz
     token_ok = False
     got = request.headers.get("X-Ingest-Token", "")
     if DEV_INGEST_TOKEN and got and got == DEV_INGEST_TOKEN:
@@ -2022,32 +2952,46 @@ def sec6_api_dev_ingest():
     if not isinstance(q_in, list) and not isinstance(f_in, list):
         return jsonify({"ok": False, "error": "invalid_payload"}), 400
 
+    # Load existing
     q_cur = _bank_read_questions()
     f_cur = _bank_read_flashcards()
 
     q_seen = {x.get("_hash") or _q_stable_hash(x.get("question",""), x.get("options") or {}, x.get("correct",""), x.get("domain","")) for x in q_cur}
     f_seen = {x.get("_hash") or _fc_stable_hash(x.get("front",""), x.get("back",""), x.get("domain","")) for x in f_cur}
 
+    # Normalize & collect
     q_add, q_bad = [], []
     f_add, f_bad = [], []
 
     for x in (q_in if isinstance(q_in, list) else []):
         n = _sec6_normalize_question_for_bank(x)
-        if not n: q_bad.append(x); continue
-        if n["_hash"] in q_seen: continue
-        q_seen.add(n["_hash"]); q_add.append(n)
+        if not n:
+            q_bad.append(x)
+            continue
+        if n["_hash"] in q_seen:
+            continue
+        q_seen.add(n["_hash"])
+        q_add.append(n)
 
     for x in (f_in if isinstance(f_in, list) else []):
         n = _sec6_normalize_flashcard_for_bank(x)
-        if not n: f_bad.append(x); continue
-        if n["_hash"] in f_seen: continue
-        f_seen.add(n["_hash"]); f_add.append(n)
+        if not n:
+            f_bad.append(x)
+            continue
+        if n["_hash"] in f_seen:
+            continue
+        f_seen.add(n["_hash"])
+        f_add.append(n)
 
+    # Persist
     if q_add:
-        _bank_save_questions(q_cur + q_add)
+        q_new = q_cur + q_add
+        _bank_save_questions(q_new)
     if f_add:
-        _bank_save_flashcards(f_cur + f_add)
+        f_new = f_cur + f_add
+        _bank_save_flashcards(f_new)
 
+    # Update index
     try:
         _update_content_index()
     except Exception as e:
@@ -2062,26 +3006,33 @@ def sec6_api_dev_ingest():
             "flashcards": len(_bank_read_flashcards())
         }
     }
+    # Event log (best-effort)
     try:
         _log_event(_user_id(), "bank.ingest", report)
     except Exception:
         pass
 
     return jsonify(report), 200
-# ========================= END SECTION 6/8 =========================
-# =========================
-# SECTION 7/8 — Tutor (Chat Assistant) + OpenAI integration
-# =========================
-# (Same UI; adds safe import guard for 'requests')
 
-def _openai_ready() -> bool:
-    return bool(OPENAI_API_KEY and OPENAI_CHAT_MODEL and OPENAI_API_BASE)
+# SECTION 7/8 — Tutor (Chat Assistant) + OpenAI integration (safe, optional)
+# Route ownership:
+#   /tutor  [GET, POST]
+#
+# Changes in this section:
+# - FIX: Removed backslashes inside f-string expressions by precomputing newline -> <br> replacement.
+# - Safe optional import of 'requests'; graceful fallback if missing.
 
+# ---------- Optional dependency (safe import) ----------
 try:
     import requests  # type: ignore
 except Exception:
     requests = None  # type: ignore
 
+# ---------- OpenAI readiness ----------
+def _openai_ready() -> bool:
+    return bool(OPENAI_API_KEY and OPENAI_CHAT_MODEL and OPENAI_API_BASE)
+
+# ---------- Tutor system prompt ----------
 def _tutor_system_prompt() -> str:
     return (
         "You are CPP Exam Prep Tutor. Help the user study for the ASIS CPP domains. "
@@ -2091,8 +3042,9 @@ def _tutor_system_prompt() -> str:
         "offer to create fresh practice items instead. Keep answers under ~200 words unless the user asks for more."
     )
 
+# ---------- Session history helpers ----------
 _TUTOR_SESS_KEY = "tutor_hist_v1"
-_TUTOR_MAX_TURNS = 12
+_TUTOR_MAX_TURNS = 12   # user+assistant pairs (kept small to limit payload)
 _TUTOR_MAX_INPUT_CHARS = 2000
 
 def _tutor_get_history() -> list[dict]:
@@ -2113,13 +3065,19 @@ def _tutor_append(role: str, content: str) -> None:
     hist.append({"role": role, "content": content})
     _tutor_save_history(hist)
 
+# ---------- OpenAI call (server-side) ----------
 def _tutor_call_openai(user_message: str, prior: list[dict]) -> tuple[bool, str]:
+    """
+    Returns (ok, reply_text). Never raises to the view.
+    Uses Chat Completions for broad compatibility.
+    """
     if not _openai_ready():
         return False, ("Tutor is offline: OpenAI is not configured on this environment. "
                        "Set OPENAI_API_KEY/OPENAI_API_BASE/OPENAI_CHAT_MODEL to enable.")
+
     if requests is None:
-        return False, ("Tutor is offline: HTTP client is unavailable on this environment. "
-                       "Install 'requests' or unset OPENAI_* variables.")
+        return False, ("Tutor is offline: the 'requests' library is not available on this server. "
+                       "Please install it or disable Tutor.")
 
     msgs = [{"role": "system", "content": _tutor_system_prompt()}]
     for m in prior[-(2*_TUTOR_MAX_TURNS):]:
@@ -2128,10 +3086,18 @@ def _tutor_call_openai(user_message: str, prior: list[dict]) -> tuple[bool, str]
     msgs.append({"role": "user", "content": user_message})
 
     url = (OPENAI_API_BASE.rstrip("/") + "/chat/completions")
-    headers = {"Authorization": f"Bearer {OPENAI_API_KEY}", "Content-Type": "application/json"}
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json",
+    }
     payload = {
-        "model": OPENAI_CHAT_MODEL, "messages": msgs, "temperature": 0.2,
-        "top_p": 1.0, "presence_penalty": 0.0, "frequency_penalty": 0.2, "max_tokens": 600,
+        "model": OPENAI_CHAT_MODEL,
+        "messages": msgs,
+        "temperature": 0.2,
+        "top_p": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.2,
+        "max_tokens": 600,
     }
 
     try:
@@ -2152,20 +3118,29 @@ def _tutor_call_openai(user_message: str, prior: list[dict]) -> tuple[bool, str]
         logger.warning("OpenAI call failed: %s", e)
         return False, "Network error while contacting the tutor. Please try again."
 
+# ---------- Render chat UI ----------
 def _tutor_chat_html(history: list[dict], banner: str = "") -> str:
+    """
+    Render a simple, clean chat interface.
+    """
+    # Build bubbles (FIX: precompute newline-><br> to avoid backslashes inside f-strings)
     bubbles = []
     for m in history:
         role = m.get("role")
-        content = html.escape(m.get("content", "").strip())
-        if not content:
+        raw = (m.get("content", "") or "").strip()
+        escaped = html.escape(raw)
+        escaped_with_breaks = escaped.replace("\n", "<br>")
+
+        if not escaped_with_breaks:
             continue
+
         if role == "user":
             bubbles.append(
                 f"""
                 <div class="d-flex justify-content-end my-2">
                   <div class="p-2 rounded-3 border bg-light" style="max-width: 80%;">
                     <div class="small text-muted mb-1">You</div>
-                    <div>{content.replace('\\n','<br>')}</div>
+                    <div>{escaped_with_breaks}</div>
                   </div>
                 </div>
                 """
@@ -2176,7 +3151,7 @@ def _tutor_chat_html(history: list[dict], banner: str = "") -> str:
                 <div class="d-flex justify-content-start my-2">
                   <div class="p-2 rounded-3 border" style="max-width: 80%; background:#fff;">
                     <div class="small text-muted mb-1"><i class="bi bi-robot"></i> Tutor</div>
-                    <div>{content.replace('\\n','<br>')}</div>
+                    <div>{escaped_with_breaks}</div>
                   </div>
                 </div>
                 """
@@ -2216,9 +3191,11 @@ def _tutor_chat_html(history: list[dict], banner: str = "") -> str:
     </div></div></div>
     """
 
+# ---------- Route: Tutor ----------
 @app.route("/tutor", methods=["GET", "POST"], endpoint="sec7_tutor_page")
 @login_required
 def sec7_tutor_page():
+    # GET -> render current chat
     if request.method == "GET":
         banner = ""
         if not _openai_ready():
@@ -2227,11 +3204,13 @@ def sec7_tutor_page():
         body = _tutor_chat_html(_tutor_get_history(), banner=banner)
         return base_layout("Tutor", body)
 
+    # POST -> CSRF
     if not _csrf_ok():
         abort(403)
 
+    # Rate-limit per IP
     rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
-    if not _rate_ok(f"tutor:{rip}", per_sec=0.5):
+    if not _rate_ok(f"tutor:{rip}", per_sec=0.5):   # 1 message / 2s
         body = _tutor_chat_html(_tutor_get_history(), banner="You're sending messages too quickly. Please wait a moment.")
         return base_layout("Tutor", body)
 
@@ -2245,6 +3224,7 @@ def sec7_tutor_page():
         body = _tutor_chat_html([], banner="Chat has been reset.")
         return base_layout("Tutor", body)
 
+    # Normal message
     user_msg = (request.form.get("message") or "").strip()
     if not user_msg:
         body = _tutor_chat_html(_tutor_get_history(), banner="Please enter a message.")
@@ -2252,8 +3232,10 @@ def sec7_tutor_page():
     if len(user_msg) > _TUTOR_MAX_INPUT_CHARS:
         user_msg = user_msg[:_TUTOR_MAX_INPUT_CHARS]
 
+    # Append user first so it shows even if backend fails
     _tutor_append("user", user_msg)
 
+    # Call OpenAI (or fallback)
     ok, reply = _tutor_call_openai(user_msg, _tutor_get_history())
     if not ok:
         _tutor_append("assistant", reply)
@@ -2264,6 +3246,7 @@ def sec7_tutor_page():
         body = _tutor_chat_html(_tutor_get_history(), banner="Tutor responded with an error message.")
         return base_layout("Tutor", body)
 
+    # Success path
     _tutor_append("assistant", reply)
     try:
         _bump_usage("tutor", 1)
@@ -2273,17 +3256,25 @@ def sec7_tutor_page():
 
     body = _tutor_chat_html(_tutor_get_history(), banner="")
     return base_layout("Tutor", body)
-# ========================= END SECTION 7/8 =========================
-# =========================
-# SECTION 8/8 — Home, Terms, User Login/Logout (final glue)
-# =========================
+
+# SECTION 8/8 — Public Login & Logout (final glue)
 # Route ownership (unique in app):
-#   /                [GET]    -> Home
-#   /legal/terms     [GET]    -> Terms page
-#   /login           [GET,POST]  (endpoint names must remain compatible)
-#   /logout          [GET]
+#   /login   [GET, POST]  (endpoint name must remain sec1_login_page for compatibility)
+#   /logout  [GET]
 #
-# IMPORTANT: Keep user login GET endpoint name exactly "sec1_login_page".
+# NOTE:
+# - To avoid route collisions and preserve your current design, this section
+#   does NOT redefine "/" (Home) or "/legal/terms" because they are already
+#   present in Section 1 in your codebase.
+
+# Ensure required data files exist (idempotent, safe on reload)
+try:
+    init_sample_data()
+except Exception as _e:
+    try:
+        logger.warning("init_sample_data at Section 8 failed: %s", _e)
+    except Exception:
+        pass
 
 # ---------- Helpers ----------
 def _safe_next(next_val: str | None) -> str:
@@ -2300,120 +3291,6 @@ def _auth_clear_session() -> None:
     session.pop("uid", None)
     session.pop("email", None)
     session.pop("admin_ok", None)
-
-# ---------- HOME ----------
-@app.get("/", endpoint="sec8_home_page")
-def sec8_home_page():
-    signed_in = bool(session.get("uid"))
-    email = html.escape(session.get("email", "")) if signed_in else ""
-    hero = f"""
-      <div class="p-4 p-md-5 mb-4 bg-light border rounded-3">
-        <div class="container py-3">
-          <h1 class="display-6"><i class="bi bi-shield-lock me-2"></i>CPP Exam Prep</h1>
-          <p class="lead mb-3">
-            Practice quizzes, mock exams, flashcards, and a study tutor — all in one place.
-            Educational use only. Not affiliated with ASIS.
-          </p>
-          <div class="d-flex gap-2">
-            {"<a class='btn btn-primary' href='/quiz'><i class='bi bi-ui-checks-grid me-1'></i>Take a Quiz</a>" if signed_in else "<a class='btn btn-primary' href='/login'><i class='bi bi-box-arrow-in-right me-1'></i>Login</a>"}
-            <a class="btn btn-outline-secondary" href="/flashcards"><i class="bi bi-layers me-1"></i>Flashcards</a>
-            <a class="btn btn-outline-secondary" href="/mock"><i class="bi bi-journal-check me-1"></i>Mock Exam</a>
-          </div>
-          {"<div class='text-muted small mt-2'>Signed in as <strong>" + email + "</strong>.</div>" if signed_in else ""}
-        </div>
-      </div>
-    """
-
-    features = """
-      <div class="row g-3">
-        <div class="col-md-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title"><i class="bi bi-ui-checks-grid me-2"></i>Quizzes</h5>
-              <p class="card-text">Target domains or mix all. Instant scoring with domain breakdowns.</p>
-              <a class="btn btn-outline-primary" href="/quiz">Start a Quiz</a>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title"><i class="bi bi-journal-check me-2"></i>Mock Exams</h5>
-              <p class="card-text">Longer sessions that simulate exam pacing with detailed results.</p>
-              <a class="btn btn-outline-warning" href="/mock">Start a Mock</a>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title"><i class="bi bi-layers me-2"></i>Flashcards</h5>
-              <p class="card-text">Study key concepts with a clean flip experience, by domain.</p>
-              <a class="btn btn-outline-success" href="/flashcards">Open Flashcards</a>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="row g-3 mt-1">
-        <div class="col-md-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title"><i class="bi bi-graph-up-arrow me-2"></i>Progress</h5>
-              <p class="card-text">Your scores and domain stats over time, automatically tracked.</p>
-              <a class="btn btn-outline-info" href="/progress">View Progress</a>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title"><i class="bi bi-speedometer2 me-2"></i>Usage</h5>
-              <p class="card-text">Monthly counts for quizzes, questions, tutor messages, and more.</p>
-              <a class="btn btn-outline-secondary" href="/usage">Usage Dashboard</a>
-            </div>
-          </div>
-        </div>
-        <div class="col-md-4">
-          <div class="card h-100">
-            <div class="card-body">
-              <h5 class="card-title"><i class="bi bi-chat-dots me-2"></i>Tutor</h5>
-              <p class="card-text">Ask questions and get concise explanations tailored to CPP study.</p>
-              <a class="btn btn-outline-secondary" href="/tutor">Open Tutor</a>
-            </div>
-          </div>
-        </div>
-      </div>
-    """
-
-    content = f"""
-      <div class="container">
-        {hero}
-        {features}
-      </div>
-    """
-    return base_layout("Home", content)
-
-# ---------- LEGAL / TERMS ----------
-@app.get("/legal/terms", endpoint="sec8_terms_page")
-def sec8_terms_page():
-    body = """
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-9">
-      <div class="card">
-        <div class="card-header bg-light"><h3 class="mb-0"><i class="bi bi-file-earmark-text me-2"></i>Terms of Use</h3></div>
-        <div class="card-body">
-          <p><strong>Educational Use Only.</strong> This site is not affiliated with ASIS International.
-          Content is provided “as is” without warranties. No legal, compliance, safety, or professional advice.</p>
-          <p>By using the site, you agree to verify information using official sources and take sole responsibility
-          for how you use the content. No refunds. Your use may be logged to improve quality and reliability.</p>
-          <p>Do not attempt to obtain or share real exam content. We provide original practice material only.</p>
-          <p class="text-muted small">© CPP-Exam-Prep</p>
-          <a class="btn btn-outline-secondary" href="/"><i class="bi bi-house me-1"></i>Home</a>
-        </div>
-      </div>
-    </div></div></div>
-    """
-    return base_layout("Terms of Use", body)
 
 # ---------- USER LOGIN ----------
 @app.get("/login", endpoint="sec1_login_page")
@@ -2454,9 +3331,11 @@ def sec1_login_page():
 
 @app.post("/login", endpoint="sec1_login_post")
 def sec1_login_post():
+    # CSRF (Flask-WTF enforces if installed; fallback token check when not installed)
     if not _csrf_ok():
         abort(403)
 
+    # Basic rate limit (per-IP): 1 attempt / 2 seconds
     rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
     if not _rate_ok(f"login:{rip}", per_sec=0.5):
         nxt = _safe_next(request.form.get("next"))
@@ -2470,6 +3349,7 @@ def sec1_login_post():
     if not u or not check_password_hash(u.get("password_hash",""), pw):
         return redirect(url_for("sec1_login_page", next=nxt, error="1"))
 
+    # Success
     _auth_set_session(u)
     try:
         _log_event(_user_id(), "auth.login", {})
@@ -2486,4 +3366,3 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
-# ========================= END SECTION 8/8 =========================
