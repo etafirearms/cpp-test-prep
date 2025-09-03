@@ -1826,11 +1826,11 @@ try:
 except Exception:
     stripe = None  # type: ignore
 
-STRIPE_SECRET_KEY       = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_PUBLISHABLE_KEY  = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
-STRIPE_MONTHLY_PRICE_ID = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
-STRIPE_SIXMONTH_PRICE_ID= os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
-STRIPE_WEBHOOK_SECRET   = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_SECRET_KEY        = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY   = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_MONTHLY_PRICE_ID  = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
+STRIPE_SIXMONTH_PRICE_ID = os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
+STRIPE_WEBHOOK_SECRET    = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 if stripe is not None:
     try:
@@ -1922,6 +1922,7 @@ def sec5_flashcards_page():
         csrf_val = csrf_token()
         domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
 
+        # STABILITY: all braces in <script> are doubled {{ }} so f-string doesn't try to evaluate JS blocks
         content = f"""
         <div class="container">
           <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
@@ -2001,6 +2002,7 @@ def sec5_flashcards_page():
         "<code>data/bank/cpp_flashcards_v1.json</code> or <code>data/flashcards.json</code>.</div>"
     )
 
+    # STABILITY: replace literal bullet with &bull; to avoid odd parsing if a prior f-string breaks
     content = f"""
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
@@ -2012,7 +2014,7 @@ def sec5_flashcards_page():
           <div class="card-body">
             <div class="mb-2 small text-muted">Domain:
               <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong>
-              &bull; Cards: {len(cards)}
+              &nbsp;&bull;&nbsp; Cards: {len(cards)}
             </div>
             <div id="fc-container">{cards_html}</div>
 
@@ -2447,14 +2449,14 @@ def sec5_billing_success():
 # Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook", endpoint="sec5_stripe_webhook")
 def sec5_stripe_webhook():
-    # STABILITY: guard missing secret
-    if not STRIPE_WEBHOOK_SECRET:
-        logger.error("Stripe webhook invoked but STRIPE_WEBHOOK_SECRET is not configured.")
-        return "", 503
-
     if not _stripe_ready():
         logger.error("Stripe webhook invoked but Stripe is not configured.")
         return "", 400
+
+    # STABILITY: fail fast if no webhook secret provided
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("Stripe webhook secret is not configured; refusing to accept webhook.")
+        return "", 503
 
     payload = request.data
     sig = request.headers.get("Stripe-Signature", "")
@@ -2472,6 +2474,9 @@ def sec5_stripe_webhook():
         plan  = meta.get("plan", "")
         customer_id = cs.get("customer")
 
+        # STABILITY: Log only small context at INFO; no payloads or secrets
+        logger.info("Stripe event: %s customer=%s plan=%s", etype, str(customer_id), str(plan))
+
         if email:
             u = _find_user(email)
             if u:
@@ -2484,17 +2489,14 @@ def sec5_stripe_webhook():
                     expiry = datetime.utcnow() + timedelta(days=duration)
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
                 _update_user(u["id"], updates)
-                logger.info("Stripe event: %s customer=%s plan=%s", etype, customer_id, plan)  # STABILITY: minimal info log
-    else:
-        # STABILITY: log only type to avoid noisy payloads
-        logger.info("Stripe event: %s", etype)
+                logger.info("Subscription updated for %s -> %s", email, plan)
 
     return "", 200
 
-# STABILITY: exempt webhook from CSRF if CSRFProtect is active
+# STABILITY: Exempt webhook from CSRF when Flask-WTF is present
 try:
-    if HAS_CSRF and csrf is not None:
-        csrf.exempt(sec5_stripe_webhook)
+    if HAS_CSRF and (csrf is not None):
+        csrf.exempt(sec5_stripe_webhook)  # type: ignore
 except Exception:
     pass
 
@@ -2628,7 +2630,6 @@ def sec5_admin_reset_password():
     """
     return base_layout("Admin Reset Password", body)
 # ========================= END SECTION 5/8 =========================
-
 
 # SECTION 6/8 — Content Bank: ingestion, helpers, validation UI
 # Route ownership (unique in app):
@@ -3473,6 +3474,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
