@@ -1712,8 +1712,10 @@ def sec4_mock_grade():
     return base_layout("Mock Exam • Results", content)
 # ========================= END SECTION 4/8 =========================
 
-# SECTION 5/8 (OWNED ROUTES): Flashcards, Progress, Usage, Billing/Stripe (+ Debug), Admin Login/Reset
-
+# =========================
+# SECTION 5/8 (OWNED ROUTES): Flashcards, Progress, Usage,
+# Billing/Stripe (+ Debug), Admin Login/Reset
+# =========================
 # Route ownership:
 #   /flashcards              [GET, POST]
 #   /progress                [GET]
@@ -1858,12 +1860,12 @@ def sec5_flashcards_page():
         </div>
 
         <script>
-          (function(){{
+          (function() {{
             var container = document.currentScript.closest('.card').querySelector('.card-body');
             var hidden = container.querySelector('#domain_val');
-            container.querySelectorAll('.domain-btn').forEach(function(btn){{
-              btn.addEventListener('click', function(){{
-                container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+            container.querySelectorAll('.domain-btn').forEach(function(btn) {{
+              btn.addEventListener('click', function() {{
+                container.querySelectorAll('.domain-btn').forEach(function(b) {{ b.classList.remove('active'); }});
                 btn.classList.add('active');
                 if (hidden) hidden.value = btn.getAttribute('data-value');
               }});
@@ -1922,7 +1924,7 @@ def sec5_flashcards_page():
           <div class="card-body">
             <div class="mb-2 small text-muted">Domain:
               <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong>
-              • Cards: {len(cards)}
+              &bull; Cards: {len(cards)}
             </div>
             <div id="fc-container">{cards_html}</div>
 
@@ -2236,29 +2238,29 @@ def sec5_billing_page():
           </div>
 
           <script>
-            (function(){
-              function goWithCode(href) {
-                var code = (document.getElementById('discount_code')||{value:''}).value.trim();
-                if (code) {
+            (function() {{
+              function goWithCode(href) {{
+                var code = (document.getElementById('discount_code')||{{value:''}}).value.trim();
+                if (code) {{
                   var url = new URL(href, window.location.origin);
                   url.searchParams.set('code', code);
                   return url.toString();
-                }
+                }}
                 return href;
-              }
-              document.querySelectorAll('.upgrade-btn').forEach(function(btn){
-                btn.addEventListener('click', function(e){
+              }}
+              document.querySelectorAll('.upgrade-btn').forEach(function(btn) {{
+                btn.addEventListener('click', function(e) {{
                   e.preventDefault();
                   window.location.href = goWithCode(btn.getAttribute('href'));
-                });
-              });
+                }});
+              }});
               var apply = document.getElementById('apply_code');
-              if (apply) {
-                apply.addEventListener('click', function(){
+              if (apply) {{
+                apply.addEventListener('click', function() {{
                   /* no-op: user still clicks a plan to proceed */
-                });
-              }
-            })();
+                }});
+              }}
+            }})();
           </script>
         """
     else:
@@ -2522,6 +2524,7 @@ def sec5_admin_reset_password():
     </div></div></div>
     """
     return base_layout("Admin Reset Password", body)
+# ========================= END SECTION 5/8 =========================
 
 # SECTION 6/8 — Content Bank: ingestion, helpers, validation UI
 # Route ownership (unique in app):
@@ -3366,3 +3369,4 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
