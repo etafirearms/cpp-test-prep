@@ -1,3 +1,6 @@
+# STABILITY: Ensure source is parsed as UTF-8 everywhere (avoids invalid char errors on Render)
+# -*- coding: utf-8 -*-
+
 # =========================
 # SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer, Home, Terms)
 # =========================
@@ -3459,5 +3462,6 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
