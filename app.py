@@ -8,10 +8,12 @@ from typing import Any, Dict, List, Tuple
 from urllib.parse import quote as _urlquote
 
 from flask import (
-    Flask, request, session, redirect, url_for, abort, jsonify, make_response
+    Flask, request, session, redirect, url_for, abort, jsonify, make_response, g  # STABILITY: added g for request timing
 )
 from flask import render_template_string
 from werkzeug.security import generate_password_hash, check_password_hash
+# STABILITY: respect proxies (Render) for correct scheme/host handling
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 # ---- App & Logging ----
 APP_VERSION = "1.0.0"
@@ -28,9 +30,37 @@ handler.setFormatter(fmt)
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
-# ---- Paths & Data ----
-DATA_DIR = os.path.join(os.getcwd(), "data")
+# STABILITY: env helpers & hardened config -------------------------------
+def _env_bool(name: str, default: bool = False) -> bool:
+    """Treat '1', 'true', 'yes' (case-insensitive) as truthy."""
+    val = os.environ.get(name, None)
+    if val is None:
+        return default
+    return str(val).strip().lower() in ("1", "true", "yes")
+
+# STABILITY: honor DATA_DIR and Data_Dir with safe fallback
+DATA_DIR = (
+    os.environ.get("DATA_DIR")
+    or os.environ.get("Data_Dir")
+    or os.path.join(os.getcwd(), "data")
+)
 os.makedirs(DATA_DIR, exist_ok=True)
+
+# STABILITY: production secret guard (fail fast)
+if _env_bool("SESSION_COOKIE_SECURE", True) or not DEBUG:
+    if app.secret_key == "dev-secret-change-me":
+        raise RuntimeError("SECRET_KEY must be set to a non-default value in production.")
+
+# STABILITY: trust reverse proxy headers on Render (for https scheme, host, etc.)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
+
+# STABILITY: session & CSRF cookies
+app.config.update(
+    SESSION_COOKIE_SECURE=_env_bool("SESSION_COOKIE_SECURE", True),
+    SESSION_COOKIE_SAMESITE="Lax",
+    WTF_CSRF_TIME_LIMIT=None,
+)
+# -----------------------------------------------------------------------
 
 # ---- Feature Flags / Keys (display-only in this section) ----
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -109,6 +139,25 @@ def sec1_after_request(resp):
     resp.headers["Content-Security-Policy"] = CSP
     return resp
 
+# STABILITY: request timing/logger (minimal & quiet for static)
+@app.before_request
+def _stability_req_start():
+    g._req_start = time.time()
+
+@app.after_request
+def _stability_req_log(resp):
+    try:
+        path = request.path or ""
+        # avoid log spam for trivial assets if any are served later
+        if not path.startswith("/static/"):
+            dur_ms = (time.time() - getattr(g, "_req_start", time.time())) * 1000.0
+            rid = request.headers.get("X-Request-ID") or request.headers.get("X-Request-Id") or ""
+            extra = f" rid={rid}" if rid else ""
+            logger.info("REQ %s %s -> %s in %.1fms%s", request.method, path, resp.status_code, dur_ms, extra)
+    except Exception:
+        pass
+    return resp
+
 # ---- JSON helpers ----
 def _path(name: str) -> str:
     return os.path.join(DATA_DIR, name)
@@ -124,12 +173,17 @@ def _load_json(name: str, default):
         logger.warning("load_json %s failed: %s", name, e)
         return default
 
+# STABILITY: atomic JSON writes to prevent partial/corrupt files
 def _save_json(name: str, data):
     p = _path(name)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        with open(p, "w", encoding="utf-8") as f:
+        tmp = p + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, p)
     except Exception as e:
         logger.warning("save_json %s failed: %s", name, e)
 
@@ -356,6 +410,7 @@ if False:
     @app.get("/legal/terms", endpoint="sec1_legal_terms")
     def sec1_legal_terms():
         return base_layout("Terms", "<div class='container'>Section 1 Terms (disabled)</div>")
+
 # =========================
 # SECTION 2/8 — Operational & Security Utilities
 # Owner notes:
@@ -368,7 +423,7 @@ if False:
 #     override the definitive CSP & headers set in Section 1.
 # =========================
 
-import time
+import time, os  # STABILITY: added os for DATA_DIR checks
 from datetime import datetime, timezone
 from flask import jsonify, make_response, Response
 
@@ -393,12 +448,31 @@ def sec2_healthz():
     debug_mode = bool(_sec2_safe_get("DEBUG", False))
     is_staging = bool(_sec2_safe_get("IS_STAGING", False))
 
+    # STABILITY: include simple DATA_DIR existence/writability checks
+    data_dir = _sec2_safe_get("DATA_DIR", ".")
+    dir_exists = os.path.isdir(data_dir)
+    dir_writable = False
+    if dir_exists:
+        try:
+            probe = os.path.join(data_dir, ".healthz_probe")
+            with open(probe, "w", encoding="utf-8") as f:
+                f.write("ok")
+                f.flush()
+                os.fsync(f.fileno())
+            os.remove(probe)
+            dir_writable = True
+        except Exception:
+            dir_writable = False
+
     return jsonify({
         "ok": True,
         "service": "cpp-exam-prep",
-        "version": str(app_version),
+        "version": str(app_version),           # STABILITY: added
+        "app_version": str(app_version),       # STABILITY: explicit key for clarity
         "debug": debug_mode,
         "staging": is_staging,
+        "data_dir_exists": dir_exists,         # STABILITY: added
+        "data_dir_writable": dir_writable,     # STABILITY: added
         "started_at": datetime.fromtimestamp(_SEC2_START_TS, tz=timezone.utc).isoformat(),
         "uptime_seconds": uptime_s,
     })
@@ -2359,6 +2433,11 @@ def sec5_billing_success():
 # Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook", endpoint="sec5_stripe_webhook")
 def sec5_stripe_webhook():
+    # STABILITY: guard missing secret
+    if not STRIPE_WEBHOOK_SECRET:
+        logger.error("Stripe webhook invoked but STRIPE_WEBHOOK_SECRET is not configured.")
+        return "", 503
+
     if not _stripe_ready():
         logger.error("Stripe webhook invoked but Stripe is not configured.")
         return "", 400
@@ -2391,9 +2470,19 @@ def sec5_stripe_webhook():
                     expiry = datetime.utcnow() + timedelta(days=duration)
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
                 _update_user(u["id"], updates)
-                logger.info("Updated subscription via webhook: %s -> %s", email, plan)
+                logger.info("Stripe event: %s customer=%s plan=%s", etype, customer_id, plan)  # STABILITY: minimal info log
+    else:
+        # STABILITY: log only type to avoid noisy payloads
+        logger.info("Stripe event: %s", etype)
 
     return "", 200
+
+# STABILITY: exempt webhook from CSRF if CSRFProtect is active
+try:
+    if HAS_CSRF and csrf is not None:
+        csrf.exempt(sec5_stripe_webhook)
+except Exception:
+    pass
 
 
 # ---------- BILLING DEBUG (admin-only; no secrets) ----------
@@ -2525,6 +2614,7 @@ def sec5_admin_reset_password():
     """
     return base_layout("Admin Reset Password", body)
 # ========================= END SECTION 5/8 =========================
+
 
 # SECTION 6/8 — Content Bank: ingestion, helpers, validation UI
 # Route ownership (unique in app):
@@ -3369,4 +3459,5 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
