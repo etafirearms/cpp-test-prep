@@ -5,26 +5,51 @@
 # SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer, Home, Terms)
 # =========================
 
+# STABILITY: keep imports largely the same; add ProxyFix and g for request logging & proxy headers.
 import os, re, json, time, uuid, hashlib, random, html, logging
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Tuple
 from urllib.parse import quote as _urlquote
 
 from flask import (
-    Flask, request, session, redirect, url_for, abort, jsonify, make_response, g  # STABILITY: added g for request timing
+    Flask, request, session, redirect, url_for, abort, jsonify, make_response, g
 )
 from flask import render_template_string
 from werkzeug.security import generate_password_hash, check_password_hash
-# STABILITY: respect proxies (Render) for correct scheme/host handling
-from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.middleware.proxy_fix import ProxyFix  # STABILITY: honor X-Forwarded-* on Render
 
 # ---- App & Logging ----
 APP_VERSION = "1.0.0"
-IS_STAGING = (os.environ.get("STAGING", "0") == "1")
-DEBUG = (os.environ.get("DEBUG", "0") == "1")
+
+# STABILITY: env bool helper used throughout
+def _env_bool(val: str | None, default: bool = False) -> bool:
+    s = (val if val is not None else ("1" if default else "0")).strip().lower()
+    return s in ("1", "true", "yes", "y", "on")
+
+IS_STAGING = _env_bool(os.environ.get("STAGING", "0"), default=False)
+DEBUG = _env_bool(os.environ.get("DEBUG", "0"), default=False)
+
+# STABILITY: compute SECRET_KEY & cookie security early and fail fast when unsafe
+SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+SESSION_COOKIE_SECURE_FLAG = _env_bool(os.environ.get("SESSION_COOKIE_SECURE", "1"), default=True)
+if (SESSION_COOKIE_SECURE_FLAG or not DEBUG) and SECRET_KEY == "dev-secret-change-me":
+    raise RuntimeError(
+        "SECURITY: SECRET_KEY must be set to a non-default value when running with "
+        "SESSION_COOKIE_SECURE=1 or when DEBUG is false."
+    )
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+app.secret_key = SECRET_KEY
+
+# STABILITY: session & CSRF config hardening; CSRF time limit off for compatibility
+app.config.update(
+    SESSION_COOKIE_SECURE=SESSION_COOKIE_SECURE_FLAG,
+    SESSION_COOKIE_SAMESITE="Lax",
+    WTF_CSRF_TIME_LIMIT=None,
+)
+
+# STABILITY: trust Render’s proxy headers so request.url_root is https://
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
 logger = logging.getLogger("cpp_prep")
 handler = logging.StreamHandler()
@@ -33,37 +58,14 @@ handler.setFormatter(fmt)
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
-# STABILITY: env helpers & hardened config -------------------------------
-def _env_bool(name: str, default: bool = False) -> bool:
-    """Treat '1', 'true', 'yes' (case-insensitive) as truthy."""
-    val = os.environ.get(name, None)
-    if val is None:
-        return default
-    return str(val).strip().lower() in ("1", "true", "yes")
-
-# STABILITY: honor DATA_DIR and Data_Dir with safe fallback
+# ---- Paths & Data ----
+# STABILITY: DATA_DIR reads env DATA_DIR or legacy Data_Dir, with fallback to ./data
 DATA_DIR = (
     os.environ.get("DATA_DIR")
     or os.environ.get("Data_Dir")
     or os.path.join(os.getcwd(), "data")
 )
 os.makedirs(DATA_DIR, exist_ok=True)
-
-# STABILITY: production secret guard (fail fast)
-if _env_bool("SESSION_COOKIE_SECURE", True) or not DEBUG:
-    if app.secret_key == "dev-secret-change-me":
-        raise RuntimeError("SECRET_KEY must be set to a non-default value in production.")
-
-# STABILITY: trust reverse proxy headers on Render (for https scheme, host, etc.)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
-
-# STABILITY: session & CSRF cookies
-app.config.update(
-    SESSION_COOKIE_SECURE=_env_bool("SESSION_COOKIE_SECURE", True),
-    SESSION_COOKIE_SAMESITE="Lax",
-    WTF_CSRF_TIME_LIMIT=None,
-)
-# -----------------------------------------------------------------------
 
 # ---- Feature Flags / Keys (display-only in this section) ----
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
@@ -142,21 +144,21 @@ def sec1_after_request(resp):
     resp.headers["Content-Security-Policy"] = CSP
     return resp
 
-# STABILITY: request timing/logger (minimal & quiet for static)
+# STABILITY: lightweight request logger (skip /static and /favicon.ico)
 @app.before_request
-def _stability_req_start():
-    g._req_start = time.time()
+def _reqlog_start():
+    g._req_t0 = time.time()
 
 @app.after_request
-def _stability_req_log(resp):
+def _reqlog_end(resp):
     try:
-        path = request.path or ""
-        # avoid log spam for trivial assets if any are served later
-        if not path.startswith("/static/"):
-            dur_ms = (time.time() - getattr(g, "_req_start", time.time())) * 1000.0
-            rid = request.headers.get("X-Request-ID") or request.headers.get("X-Request-Id") or ""
-            extra = f" rid={rid}" if rid else ""
-            logger.info("REQ %s %s -> %s in %.1fms%s", request.method, path, resp.status_code, dur_ms, extra)
+        p = request.path or ""
+        if p.startswith("/static") or p == "/favicon.ico":
+            return resp
+        dur_ms = int((time.time() - getattr(g, "_req_t0", time.time())) * 1000)
+        rid = request.headers.get("X-Request-ID", "")
+        rid_sfx = f" req_id={rid}" if rid else ""
+        logger.info("REQ %s %s -> %s %dms%s", request.method, p, resp.status_code, dur_ms, rid_sfx)
     except Exception:
         pass
     return resp
@@ -176,12 +178,12 @@ def _load_json(name: str, default):
         logger.warning("load_json %s failed: %s", name, e)
         return default
 
-# STABILITY: atomic JSON writes to prevent partial/corrupt files
+# STABILITY: atomic JSON write (write .tmp, fsync, os.replace)
 def _save_json(name: str, data):
     p = _path(name)
+    tmp = f"{p}.tmp"
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        tmp = p + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
             f.flush()
@@ -189,6 +191,11 @@ def _save_json(name: str, data):
         os.replace(tmp, p)
     except Exception as e:
         logger.warning("save_json %s failed: %s", name, e)
+        try:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+        except Exception:
+            pass
 
 # ---- Users store helpers ----
 def _users_all() -> List[dict]:
@@ -308,11 +315,12 @@ def domain_buttons_html(selected_key="random", field_name="domain"):
 
 # ---- Global Footer ----
 def _footer_html():
+    # STABILITY: replace © with &copy; to avoid source-encoding issues in some environments.
     return """
     <footer class="mt-5 py-3 border-top text-center small text-muted">
       <div>
         Educational use only. Not affiliated with ASIS. No legal, safety, or professional advice.
-        Use official sources to verify. No refunds. © CPP-Exam-Prep
+        Use official sources to verify. No refunds. &copy; CPP-Exam-Prep
       </div>
     </footer>
     """
@@ -387,7 +395,8 @@ def init_sample_data():
             ("flashcards.json", []),
             ("attempts.json", []),
             ("events.json", []),
-            ("tutor_settings.json", {"web_aware": os.environ.get("TUTOR_WEB_AWARE", "0") == "1"}),
+            # STABILITY: use _env_bool for TUTOR_WEB_AWARE flag
+            ("tutor_settings.json", {"web_aware": _env_bool(os.environ.get("TUTOR_WEB_AWARE", "0"), default=False)}),
             ("bank/cpp_flashcards_v1.json", []),
             ("bank/cpp_questions_v1.json", []),
             ("bank/content_index.json", {}),
@@ -403,18 +412,83 @@ def init_sample_data():
 init_sample_data()
 
 # ---- Public, unprotected routes owned by Section 1 ----
-# FIX: To preserve one-owner rule (Section 8 owns / and /legal/terms),
-# we disable any duplicates here.
-if False:
-    @app.get("/", endpoint="sec1_home_page")
-    def sec1_home_page():
-        return base_layout("Home", "<div class='container'>Section 1 Home (disabled)</div>")
+# STABILITY: provide real owners for "/" and "/legal/terms" to avoid 404 at root.
 
-    @app.get("/legal/terms", endpoint="sec1_legal_terms")
-    def sec1_legal_terms():
-        return base_layout("Terms", "<div class='container'>Section 1 Terms (disabled)</div>")
+@app.get("/", endpoint="sec1_home_page")
+def sec1_home_page():
+    body = """
+    <div class="container">
+      <div class="py-4">
+        <h1 class="h3 mb-3"><i class="bi bi-shield-lock"></i> CPP Prep</h1>
+        <p class="text-muted mb-4">
+          Self-study AI-assisted prep for the ASIS Certified Protection Professional (CPP) exam.
+          Educational use only; not affiliated with ASIS.
+        </p>
 
-# =========================
+        <div class="row g-3">
+          <div class="col-md-6">
+            <div class="p-3 border rounded-3 h-100">
+              <h2 class="h5 mb-2"><i class="bi bi-ui-checks-grid me-1"></i> Quiz</h2>
+              <p class="mb-2 small text-muted">Practice by domain or mix everything.</p>
+              <a class="btn btn-primary btn-sm" href="/quiz">Go to Quiz</a>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="p-3 border rounded-3 h-100">
+              <h2 class="h5 mb-2"><i class="bi bi-journal-check me-1"></i> Mock Exam</h2>
+              <p class="mb-2 small text-muted">Longer, exam-style sessions.</p>
+              <a class="btn btn-warning btn-sm" href="/mock">Start Mock</a>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="p-3 border rounded-3 h-100">
+              <h2 class="h5 mb-2"><i class="bi bi-layers me-1"></i> Flashcards</h2>
+              <p class="mb-2 small text-muted">Flip through key facts and terms.</p>
+              <a class="btn btn-success btn-sm" href="/flashcards">Open Flashcards</a>
+            </div>
+          </div>
+          <div class="col-md-6">
+            <div class="p-3 border rounded-3 h-100">
+              <h2 class="h5 mb-2"><i class="bi bi-chat-dots me-1"></i> Tutor</h2>
+              <p class="mb-2 small text-muted">Ask questions, get quick explanations.</p>
+              <a class="btn btn-secondary btn-sm" href="/tutor">Ask the Tutor</a>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-4">
+          <a class="btn btn-outline-secondary btn-sm" href="/progress"><i class="bi bi-graph-up me-1"></i> Progress</a>
+          <a class="btn btn-outline-secondary btn-sm" href="/usage"><i class="bi bi-speedometer2 me-1"></i> Usage</a>
+          <a class="btn btn-outline-secondary btn-sm" href="/billing"><i class="bi bi-credit-card me-1"></i> Billing</a>
+          <a class="btn btn-outline-secondary btn-sm" href="/legal/terms"><i class="bi bi-file-earmark-text me-1"></i> Terms</a>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Home", body)
+
+@app.get("/legal/terms", endpoint="sec1_legal_terms")
+def sec1_legal_terms():
+    body = """
+    <div class="container">
+      <div class="py-4">
+        <h1 class="h4 mb-3"><i class="bi bi-file-earmark-text"></i> Terms</h1>
+        <div class="p-3 border rounded-3">
+          <p class="small text-muted mb-2">
+            Educational use only. Not affiliated with ASIS International. This site provides practice
+            content generated from public sources; it does not include actual exam items. No legal,
+            safety, or professional advice. Verify information with official sources.
+          </p>
+          <p class="small text-muted mb-0">
+            Use constitutes acceptance of these terms. No refunds.
+          </p>
+        </div>
+        <a class="btn btn-outline-secondary mt-3" href="/"><i class="bi bi-house me-1"></i> Home</a>
+      </div>
+    </div>
+    """
+    return base_layout("Terms", body)
+
 # =========================
 # SECTION 2/8 — Operational & Security Utilities
 # Owner notes:
@@ -3452,6 +3526,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
