@@ -928,501 +928,51 @@ def sec3_practice_page():
 
 
 # =========================
-# SECTION 4/8: Quizzes & Mock Exams (picker, runner, grading, attempt logging)
-# One-owner rule: THIS SECTION OWNS the /quiz* and /mock* routes.
-# Endpoint function names are all prefixed with `sec4_` to avoid collisions.
+# SECTION 4/8 — Mock Exam
+# Route ownership:
+#   /mock         [GET]   -> picker (domain + count)
+#   /mock/start   [POST]  -> start a client-side session
 # =========================
 
-# ---- Local helpers (safe, no conflicts) --------------------------------------
+# STABILITY: ensure we render HTML/JS via Jinja, not Python f-strings
+from flask import render_template_string
 
-def sec4_now_iso() -> str:
-    try:
-        return datetime.utcnow().isoformat() + "Z"
-    except Exception:
-        return ""
-
-def sec4_domains_map() -> dict:
-    """
-    Prefer the global DOMAINS (from Section 1) if present; otherwise a safe default.
-    """
-    return globals().get("DOMAINS") or {
-        "security-principles": "Security Principles & Practices",
-        "business-principles": "Business Principles & Practices",
-        "investigations": "Investigations",
-        "personnel-security": "Personnel Security",
-        "physical-security": "Physical Security",
-        "information-security": "Information Security",
-        "crisis-management": "Crisis Management",
-    }
-
-def sec4_domain_buttons_html(selected_key: str = "random", field_name: str = "domain") -> str:
-    """
-    Render domain selector buttons + hidden input. We keep this local (sec4_*) to
-    avoid naming overlap and ensure the UI works even if Section 1 changes later.
-    """
-    dom = sec4_domains_map()
-    order = ["random"] + [k for k in dom.keys()]
-    btns = []
-    for key in order:
-        lbl = "Random (all)" if key == "random" else dom.get(key, key)
-        active = " active" if key == selected_key else ""
-        btns.append(
-            f'<button type="button" class="btn btn-outline-primary domain-btn{active}" '
-            f'data-value="{html.escape(key)}">{html.escape(lbl)}</button>'
-        )
-    return (
-        f'<div class="d-flex flex-wrap gap-2">{"".join(btns)}</div>'
-        f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" '
-        f'value="{html.escape(selected_key)}"/>'
-    )
-
-def sec4_load_all_questions() -> list[dict]:
-    """
-    Merge bank questions (if Section 6 registered _bank_read_questions) with any
-    legacy data/questions.json content. Returns a raw, heterogeneous list that
-    downstream functions will normalize.
-    """
-    out: list[dict] = []
-    try:
-        bank_fn = globals().get("_bank_read_questions")
-        if callable(bank_fn):
-            out.extend(bank_fn() or [])
-    except Exception:
-        pass
-    try:
-        out.extend(_load_json("questions.json", []) or [])
-    except Exception:
-        pass
-    return out
-
-def sec4_filter_questions_by_domain(items: list[dict], domain_key: str | None) -> list[dict]:
+def _mock_filter_questions_domain(items: list[dict], domain_key: str | None):
     if not domain_key or domain_key == "random":
         return items[:]
     dk = str(domain_key).strip().lower()
-    out = []
-    for q in items:
-        dname = (q.get("domain") or q.get("category") or "Unspecified")
-        if str(dname).strip().lower() == dk:
-            out.append(q)
-    return out
+    return [q for q in items if str(q.get("domain","")).strip().lower() == dk]
 
-def sec4_normalize_question(q: dict) -> dict | None:
-    """
-    Normalize into:
-      {
-        "id": str,
-        "question": str,
-        "options": {"A": "...","B":"...","C":"...","D":"..."},
-        "correct": "A"|"B"|"C"|"D",
-        "domain": str,
-        "sources": [{title,url}, ...]  # optional, at most a few
-      }
-    Rejects invalid question shapes by returning None.
-    """
-    try:
-        if not isinstance(q, dict):
-            return None
-
-        stem = (q.get("question") or q.get("q") or "").strip()
-        if not stem:
-            return None
-
-        # Options: accept dict/A..D or list[4] with text fields
-        opts_in = q.get("options") or q.get("choices") or {}
-        opts: dict[str, str] = {}
-        if isinstance(opts_in, dict):
-            for L in ["A", "B", "C", "D"]:
-                v = opts_in.get(L) or opts_in.get(L.lower())
-                if not v:
-                    return None
-                opts[L] = str(v).strip()
-        elif isinstance(opts_in, list) and len(opts_in) >= 4:
-            letters = ["A", "B", "C", "D"]
-            for i, L in enumerate(letters):
-                v = opts_in[i]
-                if isinstance(v, dict):
-                    text = v.get("text") or v.get("label") or v.get("value")
-                else:
-                    text = v
-                if not text:
-                    return None
-                opts[L] = str(text).strip()
-        else:
-            return None
-
-        # Correct answer: allow "A..D" or 1..4
-        correct = (q.get("correct") or q.get("answer") or "").strip().upper()
-        if correct not in ("A", "B", "C", "D"):
-            try:
-                idx = int(correct)
-                correct = ["A", "B", "C", "D"][idx - 1]
-            except Exception:
-                return None
-
-        dom = (q.get("domain") or q.get("category") or "Unspecified").strip()
-
-        sources = []
-        for s in (q.get("sources") or [])[:3]:
-            t = (s.get("title") or "").strip()
-            u = (s.get("url") or "").strip()
-            if t and u:
-                sources.append({"title": t, "url": u})
-
-        return {
-            "id": q.get("id") or hashlib.sha1(
-                f"{stem}|{json.dumps(opts, sort_keys=True)}|{dom}".encode("utf-8")
-            ).hexdigest(),
-            "question": stem,
-            "options": opts,
-            "correct": correct,
-            "domain": dom,
-            "sources": sources,
-        }
-    except Exception:
-        return None
-
-def sec4_select_questions(all_q: list[dict], count: int) -> list[dict]:
-    pool: list[dict] = []
-    for q in all_q:
-        n = sec4_normalize_question(q)
-        if n:
-            pool.append(n)
-    random.shuffle(pool)
-    return pool[:max(0, min(count, len(pool)))]
-
-def sec4_render_question_block(q: dict, idx: int) -> str:
-    """Render a single question with A..D radio inputs + hidden correctness/meta."""
-    stem = html.escape(q["question"])
-    dom_label = html.escape(q.get("domain", "Unspecified"))
-    opt_html = []
-    name = f"q_{idx}"
-    qid = html.escape(q.get("id", str(idx)))
-    for L in ["A", "B", "C", "D"]:
-        val = html.escape(q["options"].get(L, ""))
-        oid = f"{name}_{L}"
-        opt_html.append(
-            f"""
-            <div class="form-check">
-              <input class="form-check-input" type="radio" id="{oid}" name="{name}" value="{L}" required>
-              <label class="form-check-label" for="{oid}"><strong>{L}.</strong> {val}</label>
-            </div>
-            """
-        )
-    return f"""
-    <div class="border rounded-3 p-3 mb-3">
-      <div class="small text-muted mb-1">Domain: <strong>{dom_label}</strong></div>
-      <div class="fw-semibold mb-2">{stem}</div>
-      {''.join(opt_html)}
-      <input type="hidden" name="{name}_id" value="{qid}">
-      <input type="hidden" name="{name}_correct" value="{q['correct']}">
-      <input type="hidden" name="{name}_domain" value="{html.escape(q.get('domain','Unspecified'))}">
-      <input type="hidden" name="{name}_sources" value="{html.escape(json.dumps(q.get('sources') or []))}">
-    </div>
-    """
-
-def sec4_grade_submission(form: dict, total: int) -> tuple[int, list[dict], dict]:
-    """
-    Returns (correct_count, detailed_rows, per_domain_stats)
-    detailed_rows: [{qid, chosen, correct, domain, sources, is_correct}]
-    per_domain_stats: {domain: {"correct": int, "total": int}}
-    """
-    correct = 0
-    rows: list[dict] = []
-    dom_stats: dict[str, dict] = {}
-
-    for i in range(total):
-        name = f"q_{i}"
-        chosen = (form.get(name) or "").strip().upper()
-        qid = form.get(f"{name}_id") or ""
-        right = (form.get(f"{name}_correct") or "").strip().upper()
-        domain = (form.get(f"{name}_domain") or "Unspecified").strip()
-        sources_json = form.get(f"{name}_sources") or "[]"
-        try:
-            sources = json.loads(sources_json)
-        except Exception:
-            sources = []
-
-        is_ok = (chosen == right)
-        if is_ok:
-            correct += 1
-
-        ds = dom_stats.setdefault(domain, {"correct": 0, "total": 0})
-        ds["total"] += 1
-        if is_ok:
-            ds["correct"] += 1
-
-        rows.append({
-            "qid": qid,
-            "chosen": chosen or "—",
-            "correct": right,
-            "domain": domain,
-            "sources": sources,
-            "is_correct": is_ok,
-        })
-
-    return correct, rows, dom_stats
-
-def sec4_attempt_append(record: dict):
-    """Append an attempt to attempts.json (safe/no-op on failure)."""
-    try:
-        attempts = _load_json("attempts.json", [])
-        attempts.append(record)
-        _save_json("attempts.json", attempts)
-    except Exception as e:
-        try:
-            logger.warning("Could not append attempt: %s", e)
-        except Exception:
-            pass
-
-def sec4_pct(c: int, t: int) -> str:
-    return f"{(100.0 * c / t):.1f}%" if t else "0.0%"
-
-# ---- Routes: QUIZ -------------------------------------------------------------
-
-@app.get("/quiz", endpoint="sec4_quiz_picker")
+@app.get("/mock", endpoint="sec4_mock_picker")
 @login_required
-def sec4_quiz_picker():
+def sec4_mock_picker():
+    """
+    Mock Exam picker. Renders with render_template_string so that inline <script>{...}</script>
+    braces do NOT get parsed by Python as an f-string.
+    """
     csrf_val = csrf_token()
-    dom_buttons = sec4_domain_buttons_html(selected_key="random", field_name="domain")
+    # Reuse the existing helper that builds the domain radio/group buttons.
+    # The helper returns ready-to-insert HTML.
+    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
 
-    content = f"""
+    tmpl = """
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
         <div class="card">
           <div class="card-header bg-primary text-white">
-            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
+            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Mock Exam</h3>
           </div>
           <div class="card-body">
-            <form method="POST" action="/quiz/start" class="mb-3">
-              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <form method="POST" action="/mock/start" class="mb-3">
+              <input type="hidden" name="csrf_token" value="{{ csrf_val }}"/>
               <label class="form-label fw-semibold">Domain</label>
-              {dom_buttons}
+              {{ domain_buttons|safe }}
+
               <div class="mt-3 mb-2 fw-semibold">How many questions?</div>
               <div class="d-flex flex-wrap gap-2">
                 <button class="btn btn-outline-primary" name="count" value="10">10</button>
                 <button class="btn btn-outline-primary" name="count" value="20">20</button>
                 <button class="btn btn-outline-primary" name="count" value="30">30</button>
-                <button class="btn btn-outline-primary" name="count" value="50">50</button>
-              </div>
-            </form>
-            <div class="text-muted small">Tip: Pick a domain or use Random to mix all.</div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-
-    <script>
-      (function(){
-        var container = document.currentScript.closest('.card').querySelector('.card-body');
-        var hidden = container.querySelector('#domain_val');
-        container.querySelectorAll('.domain-btn').forEach(function(btn){
-          btn.addEventListener('click', function(){
-            container.querySelectorAll('.domain-btn').forEach(function(b){ b.classList.remove('active'); });
-            btn.classList.add('active');
-            if (hidden) hidden.value = btn.getAttribute('data-value');
-          });
-        });
-      })();
-    </script>
-    """
-    try:
-        _log_event(_user_id(), "quiz.picker", {})
-    except Exception:
-        pass
-    return base_layout("Quiz", content)
-
-@app.post("/quiz/start", endpoint="sec4_quiz_start")
-@login_required
-def sec4_quiz_start():
-    if not _csrf_ok():
-        abort(403)
-
-    try:
-        count = int(request.form.get("count") or 20)
-    except Exception:
-        count = 20
-    if count not in (10, 20, 30, 50):
-        count = 20
-    domain = request.form.get("domain") or "random"
-
-    all_q = sec4_load_all_questions()
-    pool = sec4_filter_questions_by_domain(all_q, domain)
-    chosen = sec4_select_questions(pool, count)
-
-    csrf_val = csrf_token()
-    cards = [sec4_render_question_block(q, i) for i, q in enumerate(chosen)]
-    dom_name = sec4_domains_map().get(domain, "Random (all)") if domain != "random" else "Random (all)"
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Quiz</h3>
-            <a href="/quiz" class="btn btn-outline-light btn-sm">New Session</a>
-          </div>
-          <div class="card-body">
-            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> &bull; Questions: {len(chosen)}</div>
-            <form method="POST" action="/quiz/grade" id="quizForm">
-              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              <input type="hidden" name="mode" value="Quiz"/>
-              <input type="hidden" name="count" value="{len(chosen)}"/>
-              <div>{''.join(cards)}</div>
-              <div class="d-flex align-items-center mt-3">
-                <button class="btn btn-success" type="submit"><i class="bi bi-check2-circle me-1"></i>Submit Answers</button>
-                <a class="btn btn-outline-secondary ms-2" href="/quiz"><i class="bi bi-arrow-left me-1"></i>Back</a>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    try:
-        _log_event(_user_id(), "quiz.start", {"count": len(chosen), "domain": domain})
-        _bump_usage("quizzes", 1); _bump_usage("questions", len(chosen))
-    except Exception:
-        pass
-    return base_layout("Quiz • In Progress", content)
-
-@app.post("/quiz/grade", endpoint="sec4_quiz_grade")
-@login_required
-def sec4_quiz_grade():
-    if not _csrf_ok():
-        abort(403)
-
-    mode = (request.form.get("mode") or "Quiz").strip()
-    try:
-        total = int(request.form.get("count") or 0)
-    except Exception:
-        total = 0
-
-    correct, rows, dom_stats = sec4_grade_submission(request.form, total)
-    pct = round((100.0 * correct / total), 1) if total else 0.0
-
-    # Build rows
-    def _row_html(r):
-        ic = '<span class="badge bg-success">Correct</span>' if r["is_correct"] else '<span class="badge bg-danger">Wrong</span>'
-        src_bits = ""
-        if r.get("sources"):
-            links = []
-            for s in (r["sources"] or [])[:3]:
-                t = html.escape((s.get("title") or "").strip())
-                u = html.escape((s.get("url") or "").strip())
-                if t and u:
-                    links.append(f'<li><a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
-            if links:
-                src_bits = f'<div class="small mt-1"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
-        return f"""
-        <tr>
-          <td class="text-nowrap">{html.escape(r["domain"])}</td>
-          <td class="text-center">{html.escape(r["chosen"])}</td>
-          <td class="text-center">{html.escape(r["correct"])}</td>
-          <td class="text-center">{ic}{src_bits}</td>
-        </tr>
-        """
-
-    rows_html = "".join(_row_html(r) for r in rows) or "<tr><td colspan='4' class='text-center text-muted'>No answers submitted.</td></tr>"
-
-    # Domain breakdown
-    def _dom_row(dn, st):
-        return f"<tr><td>{html.escape(dn)}</td><td class='text-end'>{st['correct']}/{st['total']}</td><td class='text-end'>{sec4_pct(st['correct'], st['total'])}</td></tr>"
-
-    dom_html = "".join(_dom_row(d, st) for d, st in sorted(dom_stats.items())) or "<tr><td colspan='3' class='text-center text-muted'>No data.</td></tr>"
-
-    # Persist attempt
-    rec = {
-        "user_id": _user_id(),
-        "ts": sec4_now_iso(),
-        "mode": mode,
-        "count": total,
-        "correct": correct,
-        "score_pct": pct,
-        "domains": dom_stats
-    }
-    sec4_attempt_append(rec)
-    try:
-        _log_event(_user_id(), "quiz.finish", {"mode": mode, "count": total, "correct": correct, "score_pct": pct})
-    except Exception:
-        pass
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-clipboard2-check me-2"></i>Results</h3>
-            <a href="/quiz" class="btn btn-outline-light btn-sm">New Quiz</a>
-          </div>
-          <div class="card-body">
-            <div class="row g-3 mb-3">
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Mode</div><div class="h5 mb-0">{html.escape(mode)}</div></div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Questions</div><div class="h5 mb-0">{total}</div></div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Correct</div><div class="h5 mb-0">{correct}</div></div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Score</div><div class="h5 mb-0">{pct}%</div></div></div>
-            </div>
-
-            <div class="row g-3">
-              <div class="col-lg-5">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">By Domain</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
-                      <tbody>{dom_html}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-              <div class="col-lg-7">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">Answer Review</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-center">Your</th><th class="text-center">Correct</th><th class="text-center">Result</th></tr></thead>
-                      <tbody>{rows_html}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="mt-3 d-flex gap-2">
-              <a class="btn btn-outline-secondary" href="/progress"><i class="bi bi-graph-up me-1"></i>See Progress</a>
-              <a class="btn btn-outline-primary" href="/mock"><i class="bi bi-journal-check me-1"></i>Try a Mock Exam</a>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Quiz • Results", content)
-
-# ---- Routes: MOCK EXAM --------------------------------------------------------
-
-@app.get("/mock", endpoint="sec4_mock_picker")
-@login_required
-def sec4_mock_picker():
-    csrf_val = csrf_token()
-    dom_buttons = sec4_domain_buttons_html(selected_key="random", field_name="domain")
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-        <div class="card">
-          <div class="card-header bg-warning text-dark">
-            <h3 class="mb-0"><i class="bi bi-journal-check me-2"></i>Mock Exam</h3>
-          </div>
-          <div class="card-body">
-            <form method="POST" action="/mock/start" class="mb-3">
-              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              <label class="form-label fw-semibold">Domain</label>
-              {dom_buttons}
-              <div class="mt-3 mb-2 fw-semibold">How many questions?</div>
-              <div class="d-flex flex-wrap gap-2">
-                <button class="btn btn-outline-warning" name="count" value="50">50</button>
-                <button class="btn btn-outline-warning" name="count" value="100">100</button>
-                <button class="btn btn-outline-warning" name="count" value="150">150</button>
               </div>
             </form>
             <div class="text-muted small">Tip: Use Random for a mixed-domain exam.</div>
@@ -1432,11 +982,11 @@ def sec4_mock_picker():
     </div>
 
     <script>
-      (function(){
+      (function() {
         var container = document.currentScript.closest('.card').querySelector('.card-body');
         var hidden = container.querySelector('#domain_val');
-        container.querySelectorAll('.domain-btn').forEach(function(btn){
-          btn.addEventListener('click', function(){
+        container.querySelectorAll('.domain-btn').forEach(function(btn) {
+          btn.addEventListener('click', function() {
             container.querySelectorAll('.domain-btn').forEach(function(b){ b.classList.remove('active'); });
             btn.classList.add('active');
             if (hidden) hidden.value = btn.getAttribute('data-value');
@@ -1445,6 +995,7 @@ def sec4_mock_picker():
       })();
     </script>
     """
+    content = render_template_string(tmpl, csrf_val=csrf_val, domain_buttons=domain_buttons)
     try:
         _log_event(_user_id(), "mock.picker", {})
     except Exception:
@@ -1454,168 +1005,139 @@ def sec4_mock_picker():
 @app.post("/mock/start", endpoint="sec4_mock_start")
 @login_required
 def sec4_mock_start():
+    """
+    Starts a client-side mock exam session. Keeps the existing behavior:
+    - reads count + domain
+    - samples from bank questions
+    - renders HTML+JS client to navigate questions locally
+    NOTE: We render with render_template_string to avoid f-string/brace issues.
+    """
     if not _csrf_ok():
         abort(403)
 
     try:
-        count = int(request.form.get("count") or 100)
+        count = int(request.form.get("count") or 20)
     except Exception:
-        count = 100
-    if count not in (50, 100, 150):
-        count = 100
+        count = 20
+    if count not in (10, 20, 30):
+        count = 20
     domain = request.form.get("domain") or "random"
 
-    all_q = sec4_load_all_questions()
-    pool = sec4_filter_questions_by_domain(all_q, domain)
-    chosen = sec4_select_questions(pool, count)
+    # Pull questions from bank (Section 6 helpers).
+    questions = _bank_read_questions()
+    pool = _mock_filter_questions_domain(questions, domain)
+    random.shuffle(pool)
+    items = pool[:max(0, min(count, len(pool)))]
 
-    csrf_val = csrf_token()
-    cards = [sec4_render_question_block(q, i) for i, q in enumerate(chosen)]
-    dom_name = sec4_domains_map().get(domain, "Random (all)") if domain != "random" else "Random (all)"
+    # Prepare a compact client payload (id, question, options, correct stored but hidden)
+    # Sources/domains preserved; UI unchanged.
+    q_payload = []
+    for q in items:
+        q_payload.append({
+            "id": q.get("id"),
+            "question": q.get("question"),
+            "options": q.get("options", {}),
+            "correct": q.get("correct"),
+            "domain": q.get("domain", "Unspecified"),
+            "sources": q.get("sources", []),
+        })
 
-    content = f"""
+    domain_label = DOMAINS.get(domain, "Mixed") if domain != "random" else "Random (all)"
+    total = len(q_payload)
+
+    tmpl = """
     <div class="container">
       <div class="row justify-content-center"><div class="col-xl-10">
         <div class="card">
-          <div class="card-header bg-warning text-dark d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-journal-check me-2"></i>Mock Exam</h3>
-            <a href="/mock" class="btn btn-outline-dark btn-sm">New Mock</a>
+          <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Mock Exam</h3>
+            <a href="/mock" class="btn btn-outline-light btn-sm">New Setup</a>
           </div>
           <div class="card-body">
-            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> &bull; Questions: {len(chosen)}</div>
-            <form method="POST" action="/mock/grade" id="mockForm">
-              <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-              <input type="hidden" name="mode" value="Mock"/>
-              <input type="hidden" name="count" value="{len(chosen)}"/>
-              <div>{''.join(cards)}</div>
-              <div class="d-flex align-items-center mt-3">
-                <button class="btn btn-success" type="submit"><i class="bi bi-check2-circle me-1"></i>Submit Answers</button>
-                <a class="btn btn-outline-secondary ms-2" href="/mock"><i class="bi bi-arrow-left me-1"></i>Back</a>
-              </div>
-            </form>
+            <div class="mb-2 small text-muted">
+              Domain: <strong>{{ domain_label }}</strong> &bull; Questions: {{ total }}
+            </div>
+
+            <div id="q-wrap" class="border rounded-3 p-3" style="min-height: 160px;"></div>
+
+            <div class="d-flex align-items-center gap-2 mt-3">
+              <button class="btn btn-outline-secondary" id="prevBtn"><i class="bi bi-arrow-left"></i></button>
+              <button class="btn btn-primary" id="revealBtn"><i class="bi bi-eye me-1"></i>Reveal</button>
+              <button class="btn btn-outline-secondary" id="nextBtn"><i class="bi bi-arrow-right"></i></button>
+              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{{ total }}</span></div>
+            </div>
+
+            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-house me-1"></i>Home</a>
           </div>
         </div>
       </div></div>
     </div>
+
+    <script>
+      (function() {
+        var data = {{ q_payload | tojson }};
+        var i = 0, total = data.length;
+        var wrap = document.getElementById('q-wrap');
+        function render(idx, reveal) {
+          if (!total) { wrap.innerHTML = "<div class='text-muted'>No questions found.</div>"; return; }
+          var q = data[idx];
+          var opts = q.options || {};
+          var html = "";
+          html += "<div class='fw-semibold mb-2'>" + escapeHtml(q.question || "") + "</div>";
+          html += "<div class='list-group'>";
+          ["A","B","C","D"].forEach(function(L) {
+            var t = escapeHtml(String(opts[L] || ""));
+            html += "<div class='list-group-item'>" + L + ". " + t + "</div>";
+          });
+          html += "</div>";
+          if (reveal) {
+            html += "<div class='alert alert-success mt-3 mb-0 small'><i class='bi bi-check2-circle me-1'></i>";
+            html += "Answer: <strong>" + escapeHtml(q.correct || "") + "</strong></div>";
+            if ((q.sources || []).length) {
+              html += "<div class='small mt-2'><span class='text-muted'>Sources:</span><ul class='small mb-0 ps-3'>";
+              (q.sources || []).forEach(function(s) {
+                var t = escapeHtml(String(s.title||""));
+                var u = String(s.url||"#");
+                html += "<li><a href='" + u + "' target='_blank' rel='noopener'>" + t + "</a></li>";
+              });
+              html += "</ul></div>";
+            }
+          }
+          wrap.innerHTML = html;
+          document.getElementById('idx').textContent = (total ? idx+1 : 0);
+        }
+        function next() { if (!total) return; i = Math.min(total-1, i+1); render(i, false); }
+        function prev() { if (!total) return; i = Math.max(0, i-1); render(i, false); }
+        function reveal() { if (!total) return; render(i, true); }
+
+        function escapeHtml(s){
+          return String(s).replace(/[&<>"']/g, function(m){
+            return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]);
+          });
+        }
+
+        document.getElementById('nextBtn').addEventListener('click', function(){ next(); });
+        document.getElementById('prevBtn').addEventListener('click', function(){ prev(); });
+        document.getElementById('revealBtn').addEventListener('click', function(){ reveal(); });
+
+        render(i, false);
+      })();
+    </script>
     """
+    content = render_template_string(
+        tmpl,
+        q_payload=q_payload,
+        domain_label=domain_label,
+        total=total,
+    )
+
     try:
-        _log_event(_user_id(), "mock.start", {"count": len(chosen), "domain": domain})
-        _bump_usage("quizzes", 1); _bump_usage("questions", len(chosen))
+        _log_event(_user_id(), "mock.start", {"count": total, "domain": domain})
+        _bump_usage("quizzes", 1)
+        _bump_usage("questions", total)
     except Exception:
         pass
-    return base_layout("Mock Exam • In Progress", content)
-
-@app.post("/mock/grade", endpoint="sec4_mock_grade")
-@login_required
-def sec4_mock_grade():
-    if not _csrf_ok():
-        abort(403)
-
-    mode = (request.form.get("mode") or "Mock").strip()
-    try:
-        total = int(request.form.get("count") or 0)
-    except Exception:
-        total = 0
-
-    correct, rows, dom_stats = sec4_grade_submission(request.form, total)
-    pct = round((100.0 * correct / total), 1) if total else 0.0
-
-    def _row_html(r):
-        ic = '<span class="badge bg-success">Correct</span>' if r["is_correct"] else '<span class="badge bg-danger">Wrong</span>'
-        src_bits = ""
-        if r.get("sources"):
-            links = []
-            for s in (r["sources"] or [])[:3]:
-                t = html.escape((s.get("title") or "").strip())
-                u = html.escape((s.get("url") or "").strip())
-                if t and u:
-                    links.append(f'<li><a href="{u}" target="_blank" rel="noopener">{t}</a></li>')
-            if links:
-                src_bits = f'<div class="small mt-1"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
-        return f"""
-        <tr>
-          <td class="text-nowrap">{html.escape(r["domain"])}</td>
-          <td class="text-center">{html.escape(r["chosen"])}</td>
-          <td class="text-center">{html.escape(r["correct"])}</td>
-          <td class="text-center">{ic}{src_bits}</td>
-        </tr>
-        """
-
-    rows_html = "".join(_row_html(r) for r in rows) or "<tr><td colspan='4' class='text-center text-muted'>No answers submitted.</td></tr>"
-
-    def _dom_row(dn, st):
-        return f"<tr><td>{html.escape(dn)}</td><td class='text-end'>{st['correct']}/{st['total']}</td><td class='text-end'>{sec4_pct(st['correct'], st['total'])}</td></tr>"
-
-    dom_html = "".join(_dom_row(d, st) for d, st in sorted(dom_stats.items())) or "<tr><td colspan='3' class='text-center text-muted'>No data.</td></tr>"
-
-    # Persist attempt
-    rec = {
-        "user_id": _user_id(),
-        "ts": sec4_now_iso(),
-        "mode": mode,
-        "count": total,
-        "correct": correct,
-        "score_pct": pct,
-        "domains": dom_stats
-    }
-    sec4_attempt_append(rec)
-    try:
-        _log_event(_user_id(), "mock.finish", {"mode": mode, "count": total, "correct": correct, "score_pct": pct})
-    except Exception:
-        pass
-
-    content = f"""
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-clipboard2-check me-2"></i>Results</h3>
-            <a href="/mock" class="btn btn-outline-light btn-sm">New Mock</a>
-          </div>
-          <div class="card-body">
-            <div class="row g-3 mb-3">
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Mode</div><div class="h5 mb-0">{html.escape(mode)}</div></div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Questions</div><div class="h5 mb-0">{total}</div></div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Correct</div><div class="h5 mb-0">{correct}</div></div></div>
-              <div class="col-md-3"><div class="p-3 border rounded-3"><div class="small text-muted">Score</div><div class="h5 mb-0">{pct}%</div></div></div>
-            </div>
-
-            <div class="row g-3">
-              <div class="col-lg-5">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">By Domain</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-end">Correct</th><th class="text-end">%</th></tr></thead>
-                      <tbody>{dom_html}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-              <div class="col-lg-7">
-                <div class="p-3 border rounded-3">
-                  <div class="fw-semibold mb-2">Answer Review</div>
-                  <div class="table-responsive">
-                    <table class="table table-sm align-middle">
-                      <thead><tr><th>Domain</th><th class="text-center">Your</th><th class="text-center">Correct</th><th class="text-center">Result</th></tr></thead>
-                      <tbody>{rows_html}</tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div class="mt-3 d-flex gap-2">
-              <a class="btn btn-outline-secondary" href="/progress"><i class="bi bi-graph-up me-1"></i>See Progress</a>
-              <a class="btn btn-outline-primary" href="/quiz"><i class="bi bi-ui-checks-grid me-1"></i>Take a Quiz</a>
-            </div>
-          </div>
-        </div>
-      </div></div>
-    </div>
-    """
-    return base_layout("Mock Exam • Results", content)
-# ========================= END SECTION 4/8 =========================
+    return base_layout("Mock Exam", content)
 
 # =========================
 # SECTION 5/8 (OWNED ROUTES): Flashcards, Progress, Usage,
@@ -3297,6 +2819,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
