@@ -1894,28 +1894,38 @@ def sec4_mock_grade():
 #       Do NOT define them here.
 
 # ---------- STRIPE IMPORT & CONFIG (SAFE) ----------
+# Keep runtime graceful if stripe library or secret key is missing.
 try:
     import stripe  # type: ignore
 except Exception:
     stripe = None  # type: ignore
 
-STRIPE_SECRET_KEY        = os.environ.get("STRIPE_SECRET_KEY", "")
-STRIPE_PUBLISHABLE_KEY   = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
-STRIPE_MONTHLY_PRICE_ID  = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
-STRIPE_SIXMONTH_PRICE_ID = os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
-STRIPE_WEBHOOK_SECRET    = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+STRIPE_SECRET_KEY       = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PUBLISHABLE_KEY  = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
+STRIPE_MONTHLY_PRICE_ID = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
+STRIPE_SIXMONTH_PRICE_ID= os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
+STRIPE_WEBHOOK_SECRET   = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 if stripe is not None:
     try:
+        # STABILITY: gate with _stripe_ready() elsewhere; setting None is safe.
         stripe.api_key = STRIPE_SECRET_KEY or None
     except Exception:
         pass
 
 def _stripe_ready() -> bool:
+    """Stripe usable only if the library imported AND a secret key is present."""
     return (stripe is not None) and bool(STRIPE_SECRET_KEY)
 
 # ---------- FLASHCARDS ----------
 def sec5_normalize_flashcard(item: dict | None):
+    """
+    Accepts shapes like:
+      {"front": "...", "back":"...", "domain":"...", "sources":[{"title":"...", "url":"..."}]}
+      {"q":"...", "a":"..."} or {"term":"...", "definition":"..."}
+    Returns normalized or None if invalid:
+      {"id":"...", "front":"...", "back":"...", "domain":"...", "sources":[...]}
+    """
     if not item or not isinstance(item, dict):
         return None
     front = (item.get("front") or item.get("q") or item.get("term") or "").strip()
@@ -1940,9 +1950,14 @@ def sec5_normalize_flashcard(item: dict | None):
     }
 
 def sec5_all_flashcards() -> list[dict]:
+    """
+    Merge legacy data/flashcards.json + optional bank/cpp_flashcards_v1.json,
+    normalize, and de-duplicate by (front, back, domain).
+    """
     out: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
 
+    # Legacy flashcards file
     legacy = _load_json("flashcards.json", [])
     for fc in (legacy or []):
         n = sec5_normalize_flashcard(fc)
@@ -1954,6 +1969,7 @@ def sec5_all_flashcards() -> list[dict]:
         seen.add(key)
         out.append(n)
 
+    # Bank flashcards (preferred if present)
     bank = _load_json("bank/cpp_flashcards_v1.json", [])
     for fc in (bank or []):
         n = sec5_normalize_flashcard(fc)
@@ -1976,29 +1992,12 @@ def sec5_filter_flashcards_domain(cards: list[dict], domain_key: str | None):
 @app.route("/flashcards", methods=["GET", "POST"], endpoint="sec5_flashcards_page")
 @login_required
 def sec5_flashcards_page():
-    # GET -> picker
+    # GET -> picker (rendered via Jinja to avoid Python f-string brace pitfalls)
     if request.method == "GET":
         csrf_val = csrf_token()
         domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
 
-        # Build JS as a plain string to avoid f-string brace parsing
-        picker_js = """
-<script>
-(function() {
-  var container = document.currentScript.closest('.card').querySelector('.card-body');
-  var hidden = container.querySelector('#domain_val');
-  container.querySelectorAll('.domain-btn').forEach(function(btn) {
-    btn.addEventListener('click', function() {
-      container.querySelectorAll('.domain-btn').forEach(function(b) { b.classList.remove('active'); });
-      btn.classList.add('active');
-      if (hidden) hidden.value = btn.getAttribute('data-value');
-    });
-  });
-})();
-</script>
-""".strip()
-
-        content = f"""
+        tpl = """
         <div class="container">
           <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
             <div class="card">
@@ -2007,9 +2006,9 @@ def sec5_flashcards_page():
               </div>
               <div class="card-body">
                 <form method="POST" class="mb-3">
-                  <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+                  <input type="hidden" name="csrf_token" value="{{ csrf_val }}"/>
                   <label class="form-label fw-semibold">Domain</label>
-                  {domain_buttons}
+                  {{ domain_buttons|safe }}
                   <div class="mt-3 mb-2 fw-semibold">How many cards?</div>
                   <div class="d-flex flex-wrap gap-2">
                     <button class="btn btn-outline-success" name="count" value="10">10</button>
@@ -2023,9 +2022,23 @@ def sec5_flashcards_page():
           </div></div>
         </div>
 
-        {picker_js}
+        {% raw %}
+        <script>
+          (function() {
+            var container = document.currentScript.closest('.card').querySelector('.card-body');
+            var hidden = container.querySelector('#domain_val');
+            container.querySelectorAll('.domain-btn').forEach(function(btn) {
+              btn.addEventListener('click', function() {
+                container.querySelectorAll('.domain-btn').forEach(function(b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+                if (hidden) hidden.value = btn.getAttribute('data-value');
+              });
+            });
+          })();
+        </script>
+        {% endraw %}
         """
-        return base_layout("Flashcards", content)
+        return base_layout("Flashcards", render_template_string(tpl, csrf_val=csrf_val, domain_buttons=domain_buttons))
 
     # POST -> render a client-side session (no server state)
     if not _csrf_ok():
@@ -2052,12 +2065,18 @@ def sec5_flashcards_page():
                 title = html.escape(s["title"])
                 url = html.escape(s["url"])
                 links.append(f'<li><a href="{url}" target="_blank" rel="noopener">{title}</a></li>')
-            src_bits = f'<div class="small mt-2"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3'> + "".join(links) + '</ul></div>'
+            src_bits = f'<div class="small mt-2"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
         return (
-            '<div class="fc-card" data-id="' + html.escape(c['id']) + '" data-domain="' + html.escape(c.get('domain','Unspecified')) + '">'
-            '<div class="front">' + html.escape(c['front']) + '</div>'
-            '<div class="back d-none">' + html.escape(c['back']) + src_bits + '</div>'
-            '</div>'
+            '<div class="fc-card" data-id="{}" data-domain="{}">'
+            '<div class="front">{}</div>'
+            '<div class="back d-none">{}{}'
+            '</div></div>'
+        ).format(
+            html.escape(c['id']),
+            html.escape(c.get('domain','Unspecified')),
+            html.escape(c['front']),
+            html.escape(c['back']),
+            src_bits
         )
 
     cards_html = "".join(_card_div(c) for c in cards) or (
@@ -2065,41 +2084,8 @@ def sec5_flashcards_page():
         "<code>data/bank/cpp_flashcards_v1.json</code> or <code>data/flashcards.json</code>.</div>"
     )
 
-    # Build JS as a plain string to avoid f-string brace parsing
-    session_js = """
-<script>
-(function() {
-  var cards = Array.prototype.slice.call(document.querySelectorAll('#fc-container .fc-card'));
-  var i = 0, total = cards.length;
-  function show(idx) {
-    cards.forEach(function(el, j) {
-      el.style.display = (j===idx) ? '' : 'none';
-      if (j===idx) {
-        el.querySelector('.front').classList.remove('d-none');
-        el.querySelector('.back').classList.add('d-none');
-      }
-    });
-    document.getElementById('idx').textContent = (total ? idx+1 : 0);
-  }
-  function flip() {
-    if (!total) return;
-    var cur = cards[i];
-    var front = cur.querySelector('.front');
-    var back  = cur.querySelector('.back');
-    front.classList.toggle('d-none');
-    back.classList.toggle('d-none');
-  }
-  function next() { if (!total) return; i = Math.min(total-1, i+1); show(i); }
-  function prev() { if (!total) return; i = Math.max(0, i-1); show(i); }
-  document.getElementById('flipBtn').addEventListener('click', flip);
-  document.getElementById('nextBtn').addEventListener('click', next);
-  document.getElementById('prevBtn').addEventListener('click', prev);
-  show(i);
-})();
-</script>
-""".strip()
-
-    content = f"""
+    domain_label = (DOMAINS.get(domain, 'Mixed') if domain != 'random' else 'Random (all)')
+    tpl2 = """
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
         <div class="card">
@@ -2109,30 +2095,65 @@ def sec5_flashcards_page():
           </div>
           <div class="card-body">
             <div class="mb-2 small text-muted">Domain:
-              <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong>
-              &nbsp;&bull;&nbsp; Cards: {len(cards)}
+              <strong>{{ domain_label }}</strong>
+              &bull; Cards: {{ total }}
             </div>
-            <div id="fc-container">{cards_html}</div>
+            <div id="fc-container">{{ cards_html|safe }}</div>
 
             <div class="d-flex align-items-center gap-2 mt-3">
               <button class="btn btn-outline-secondary" id="prevBtn"><i class="bi bi-arrow-left"></i></button>
               <button class="btn btn-primary" id="flipBtn"><i class="bi bi-arrow-repeat me-1"></i>Flip</button>
               <button class="btn btn-outline-secondary" id="nextBtn"><i class="bi bi-arrow-right"></i></button>
-              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{len(cards)}</span></div>
+              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{{ total }}</span></div>
             </div>
           </div>
         </div>
       </div></div>
     </div>
 
-    {session_js}
+    {% raw %}
+    <script>
+    (function() {
+      var cards = Array.prototype.slice.call(document.querySelectorAll('#fc-container .fc-card'));
+      var i = 0, total = cards.length;
+      function show(idx) {
+        cards.forEach(function(el, j) {
+          el.style.display = (j===idx) ? '' : 'none';
+          if (j===idx) {
+            el.querySelector('.front').classList.remove('d-none');
+            el.querySelector('.back').classList.add('d-none');
+          }
+        });
+        document.getElementById('idx').textContent = (total ? idx+1 : 0);
+      }
+      function flip() {
+        if (!total) return;
+        var cur = cards[i];
+        var front = cur.querySelector('.front');
+        var back  = cur.querySelector('.back');
+        front.classList.toggle('d-none');
+        back.classList.toggle('d-none');
+      }
+      function next() { if (!total) return; i = Math.min(total-1, i+1); show(i); }
+      function prev() { if (!total) return; i = Math.max(0, i-1); show(i); }
+      document.getElementById('flipBtn').addEventListener('click', flip);
+      document.getElementById('nextBtn').addEventListener('click', next);
+      document.getElementById('prevBtn').addEventListener('click', prev);
+      show(i);
+    })();
+    </script>
+    {% endraw %}
     """
     try:
         _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
+        # Optional usage bumps
         _bump_usage("flashcards", len(cards))
     except Exception:
         pass
-    return base_layout("Flashcards", content)
+
+    return base_layout("Flashcards", render_template_string(
+        tpl2, domain_label=domain_label, total=len(cards), cards_html=cards_html
+    ))
 
 
 # ---------- PROGRESS ----------
@@ -2157,6 +2178,7 @@ def sec5_progress_page():
 
     def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
 
+    # Recent attempts (max 100 rows)
     rows = []
     for a in attempts[:100]:
         rows.append(f"""
@@ -2169,6 +2191,7 @@ def sec5_progress_page():
         """)
     attempts_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No attempts yet.</td></tr>"
 
+    # By domain
     drows = []
     for dname in sorted(dom.keys()):
         c = dom[dname]["correct"]; t = dom[dname]["total"]
@@ -2282,6 +2305,11 @@ def sec5_usage_dashboard():
 
 # ---------- BILLING (Stripe) ----------
 def sec5_create_stripe_checkout_session(user_email: str, plan: str = "monthly", discount_code: str | None = None):
+    """
+    Creates a Stripe Checkout Session for either a subscription (monthly) or a
+    one-time payment (sixmonth). If discount_code is provided, try to resolve an
+    active Promotion Code in Stripe and apply it; also enable allow_promotion_codes.
+    """
     if not _stripe_ready():
         logger.error("Stripe not configured (library or STRIPE_SECRET_KEY missing).")
         return None
@@ -2354,6 +2382,7 @@ def sec5_billing_page():
     names = {"monthly": "Monthly Plan", "sixmonth": "6-Month Plan", "inactive": "Free Plan"}
 
     if sub == "inactive":
+        # Discount code input is only on the Billing page; appended to checkout link via JS.
         plans_html = """
           <div class="row g-3">
             <div class="col-md-6">
@@ -2384,38 +2413,33 @@ def sec5_billing_page():
             </div>
             <div class="form-text">Codes can also be entered on the Stripe checkout page.</div>
           </div>
-        """.strip()
 
-        billing_js = """
-<script>
-(function() {
-  function goWithCode(href) {
-    var el = document.getElementById('discount_code');
-    var code = el ? el.value.trim() : '';
-    if (code) {
-      var url = new URL(href, window.location.origin);
-      url.searchParams.set('code', code);
-      return url.toString();
-    }
-    return href;
-  }
-  document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
-    btn.addEventListener('click', function(e) {
-      e.preventDefault();
-      window.location.href = goWithCode(btn.getAttribute('href'));
-    });
-  });
-  var apply = document.getElementById('apply_code');
-  if (apply) {
-    apply.addEventListener('click', function() {
-      /* no-op: user still clicks a plan to proceed */
-    });
-  }
-})();
-</script>
-""".strip()
-
-        plans_html = plans_html + "\n\n" + billing_js
+          <script>
+            (function() {
+              function goWithCode(href) {
+                var code = (document.getElementById('discount_code')||{value:''}).value.trim();
+                if (code) {
+                  var url = new URL(href, window.location.origin);
+                  url.searchParams.set('code', code);
+                  return url.toString();
+                }
+                return href;
+              }
+              document.querySelectorAll('.upgrade-btn').forEach(function(btn) {
+                btn.addEventListener('click', function(e) {
+                  e.preventDefault();
+                  window.location.href = goWithCode(btn.getAttribute('href'));
+                });
+              });
+              var apply = document.getElementById('apply_code');
+              if (apply) {
+                apply.addEventListener('click', function() {
+                  /* no-op: user still clicks a plan to proceed */
+                });
+              }
+            })();
+          </script>
+        """
     else:
         plans_html = """
           <div class="alert alert-info border-0">
@@ -2452,13 +2476,17 @@ def sec5_billing_page():
 def sec5_billing_checkout():
     plan = request.args.get("plan", "monthly")
     user_email = session.get("email", "")
+
+    # A user can be logged in (uid set) but lack an email in session; handle gracefully.
     if not user_email:
         return redirect(_login_redirect_url(request.path))
+
     discount_code = (request.args.get("code") or "").strip()
 
     url = sec5_create_stripe_checkout_session(user_email, plan=plan, discount_code=discount_code)
     if url:
         return redirect(url)
+    # If creation failed (e.g., Stripe not configured), return to Billing
     return redirect(url_for("sec5_billing_page"))
 
 @app.get("/billing/success", endpoint="sec5_billing_success")
@@ -2475,6 +2503,7 @@ def sec5_billing_success():
             u = _find_user(email or "")
             if u:
                 updates: Dict[str, Any] = {}
+                # Store customer id either way
                 cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs, "customer", None)) or u.get("stripe_customer_id")
                 updates["stripe_customer_id"] = cid
 
@@ -2511,8 +2540,9 @@ def sec5_stripe_webhook():
         logger.error("Stripe webhook invoked but Stripe is not configured.")
         return "", 400
 
+    # STABILITY: if webhook secret missing, fail fast & do not attempt verification.
     if not STRIPE_WEBHOOK_SECRET:
-        logger.error("Stripe webhook secret is not configured; refusing to accept webhook.")
+        logger.error("Stripe webhook secret not configured; refusing to handle webhook.")
         return "", 503
 
     payload = request.data
@@ -2530,7 +2560,6 @@ def sec5_stripe_webhook():
         email = meta.get("user_email")
         plan  = meta.get("plan", "")
         customer_id = cs.get("customer")
-        logger.info("Stripe event: %s customer=%s plan=%s", etype, str(customer_id), str(plan))
 
         if email:
             u = _find_user(email)
@@ -2544,16 +2573,17 @@ def sec5_stripe_webhook():
                     expiry = datetime.utcnow() + timedelta(days=duration)
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
                 _update_user(u["id"], updates)
-                logger.info("Subscription updated for %s -> %s", email, plan)
+                logger.info("Stripe webhook processed: type=%s customer=%s plan=%s", etype, str(customer_id), plan)
 
     return "", 200
 
-# Exempt webhook from CSRF if Flask-WTF is active
+# STABILITY: Exempt webhook from CSRF if Flask-WTF is present.
 try:
-    if HAS_CSRF and (csrf is not None):
-        csrf.exempt(sec5_stripe_webhook)  # type: ignore
+    if HAS_CSRF and csrf is not None:
+        csrf.exempt(sec5_stripe_webhook)
 except Exception:
     pass
+
 
 # ---------- BILLING DEBUG (admin-only; no secrets) ----------
 @app.get("/billing/debug", endpoint="sec5_billing_debug")
@@ -2595,6 +2625,7 @@ def sec5_billing_debug():
     """
     return base_layout("Billing Debug", content)
 
+
 # ---------- ADMIN LOGIN & PASSWORD RESET ----------
 @app.get("/admin/login", endpoint="sec5_admin_login_page")
 def sec5_admin_login_page():
@@ -2621,6 +2652,7 @@ def sec5_admin_login_page():
 
 @app.post("/admin/login", endpoint="sec5_admin_login_post")
 def sec5_admin_login_post():
+    # If CSRFProtect is active, it enforces validity. Otherwise, manual check.
     if not HAS_CSRF:
         if request.form.get("csrf_token") != csrf_token():
             abort(403)
@@ -3526,6 +3558,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
