@@ -535,6 +535,7 @@ def sec2_apply_security_headers(resp):
 # ========================= END SECTION 2/8 =========================
 
 # =========================
+# =========================
 # SECTION 3/8 — Legacy Quiz & Mock (picker, run, scoring)
 # STATUS: DISABLED BY DEFAULT to prevent route duplication with Section 4
 # PURPOSE: Keep prior implementation available behind a guard for forensic diff/testing.
@@ -652,7 +653,7 @@ def sec3_render_question_block(q: dict, idx: int) -> str:
         )
     dom = html.escape(q.get("domain", "Unspecified"))
     qtype = sec3_detect_qtype(q)
-    meta = f'<div class="small text-muted mt-1">Domain: <span class="fw-semibold">{dom}</span> • Type: {qtype.upper()}</div>'
+    meta = f'<div class="small text-muted mt-1">Domain: <span class="fw-semibold">{dom}</span> &bull; Type: {qtype.upper()}</div>'
     return f"""
     <div class="mb-4 p-3 border rounded-3">
       <div class="fw-semibold mb-2">{idx+1}. {stem}</div>
@@ -735,6 +736,7 @@ if SEC3_REGISTER_ROUTES:
             # Ultra-minimal fallback if helper is missing
             domain_buttons = '<input type="hidden" id="domain_val" name="domain" value="random">'
 
+        # STABILITY: script is embedded inside the f-string. No stray/dangling string literals.
         content = f"""
         <div class="container">
           <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
@@ -776,21 +778,23 @@ if SEC3_REGISTER_ROUTES:
           </div></div>
         </div>
 
- """
-<script>
-  (function(){{
-    var container = document.currentScript.closest('.card').querySelector('.card-body');
-    var hidden = container.querySelector('#domain_val');
-    container.querySelectorAll('.domain-btn').forEach(function(btn){{
-      btn.addEventListener('click', function(){{
-        container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
-        btn.classList.add('active');
-        if (hidden) hidden.value = btn.getAttribute('data-value');
-      }});
-    }});
-  }})();
-</script>
-"""
+        <script>
+          (function(){{
+            var card = document.currentScript.closest('.card');
+            if (!card) return;
+            var container = card.querySelector('.card-body');
+            if (!container) return;
+            var hidden = container.querySelector('#domain_val');
+            container.querySelectorAll('.domain-btn').forEach(function(btn){{
+              btn.addEventListener('click', function(){{
+                container.querySelectorAll('.domain-btn').forEach(function(b){{ b.classList.remove('active'); }});
+                btn.classList.add('active');
+                if (hidden) hidden.value = btn.getAttribute('data-value');
+              }});
+            }});
+          }})();
+        </script>
+        """
         _log_event(_user_id(), "legacy.quiz.picker", {})
         return base_layout("Legacy Quiz", content)
 
@@ -830,6 +834,7 @@ if SEC3_REGISTER_ROUTES:
         qblocks = "".join(sec3_render_question_block(q, i) for i, q in enumerate(questions)) or \
                   "<div class='text-muted'>No questions available.</div>"
 
+        # STABILITY: ASCII-safe bullets via &bull;
         content = f"""
         <div class="container">
           <div class="row justify-content-center"><div class="col-xl-10">
@@ -840,8 +845,8 @@ if SEC3_REGISTER_ROUTES:
               </div>
               <div class="card-body">
                 <div class="small text-muted mb-3">
-                  Domain: <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong> •
-                  Type: <strong>{html.escape(qtype.capitalize()) if qtype!='mixed' else 'Mixed'}</strong> •
+                  Domain: <strong>{html.escape(DOMAINS.get(domain, 'Mixed')) if domain!='random' else 'Random (all)'}</strong> &bull;
+                  Type: <strong>{html.escape(qtype.capitalize()) if qtype!='mixed' else 'Mixed'}</strong> &bull;
                   Count: <strong>{len(questions)}</strong>
                 </div>
                 <form method="POST" action="/legacy/quiz/grade">
@@ -996,6 +1001,7 @@ if SEC3_REGISTER_ROUTES:
         qblocks = "".join(sec3_render_question_block(q, i) for i, q in enumerate(questions)) or \
                   "<div class='text-muted'>No questions available.</div>"
 
+        # STABILITY: ASCII-safe bullets via &bull;
         content = f"""
         <div class="container">
           <div class="row justify-content-center"><div class="col-xl-10">
@@ -1005,7 +1011,7 @@ if SEC3_REGISTER_ROUTES:
                 <a href="/legacy/mock-exam" class="btn btn-outline-dark btn-sm">New Mock</a>
               </div>
               <div class="card-body">
-                <div class="small text-muted mb-3">Mixed domains • Mixed types • Count: <strong>{len(questions)}</strong></div>
+                <div class="small text-muted mb-3">Mixed domains &bull; Mixed types &bull; Count: <strong>{len(questions)}</strong></div>
                 <form method="POST" action="/legacy/mock-exam/grade">
                   <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
                   <textarea name="payload" class="d-none">{payload}</textarea>
@@ -1096,7 +1102,6 @@ if SEC3_REGISTER_ROUTES:
         </div>
         """
         return base_layout("Legacy Mock Results", content)
-
 # ========================= END SECTION 3/8 =========================
 
 # =========================
@@ -1434,7 +1439,7 @@ def sec4_quiz_start():
             <a href="/quiz" class="btn btn-outline-light btn-sm">New Session</a>
           </div>
           <div class="card-body">
-            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> • Questions: {len(chosen)}</div>
+            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> &bull; Questions: {len(chosen)}</div>
             <form method="POST" action="/quiz/grade" id="quizForm">
               <input type="hidden" name="csrf_token" value="{csrf_val}"/>
               <input type="hidden" name="mode" value="Quiz"/>
@@ -1654,7 +1659,7 @@ def sec4_mock_start():
             <a href="/mock" class="btn btn-outline-dark btn-sm">New Mock</a>
           </div>
           <div class="card-body">
-            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> • Questions: {len(chosen)}</div>
+            <div class="mb-2 small text-muted">Domain: <strong>{html.escape(dom_name)}</strong> &bull; Questions: {len(chosen)}</div>
             <form method="POST" action="/mock/grade" id="mockForm">
               <input type="hidden" name="csrf_token" value="{csrf_val}"/>
               <input type="hidden" name="mode" value="Mock"/>
@@ -3462,6 +3467,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
