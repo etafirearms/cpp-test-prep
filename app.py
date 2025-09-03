@@ -415,6 +415,7 @@ if False:
         return base_layout("Terms", "<div class='container'>Section 1 Terms (disabled)</div>")
 
 # =========================
+# =========================
 # SECTION 2/8 — Operational & Security Utilities
 # Owner notes:
 #   - This section is the ONLY owner of:
@@ -426,7 +427,9 @@ if False:
 #     override the definitive CSP & headers set in Section 1.
 # =========================
 
-import time, os  # STABILITY: added os for DATA_DIR checks
+# STABILITY: local imports (explicit here to avoid cross-section coupling issues)
+import os
+import time
 from datetime import datetime, timezone
 from flask import jsonify, make_response, Response
 
@@ -451,33 +454,37 @@ def sec2_healthz():
     debug_mode = bool(_sec2_safe_get("DEBUG", False))
     is_staging = bool(_sec2_safe_get("IS_STAGING", False))
 
-    # STABILITY: include simple DATA_DIR existence/writability checks
-    data_dir = _sec2_safe_get("DATA_DIR", ".")
-    dir_exists = os.path.isdir(data_dir)
-    dir_writable = False
-    if dir_exists:
+    # STABILITY: Determine DATA_DIR from Section 1, then check existence & writability.
+    data_dir = _sec2_safe_get("DATA_DIR", os.path.join(os.getcwd(), "data"))
+    data_dir_exists = bool(data_dir and os.path.isdir(data_dir))
+
+    data_dir_writable = False
+    if data_dir_exists:
         try:
-            probe = os.path.join(data_dir, ".healthz_probe")
-            with open(probe, "w", encoding="utf-8") as f:
+            # Try a tiny write/delete to confirm actual write permissions.
+            test_name = f".healthz_{int(now)}_{os.getpid()}.tmp"
+            test_path = os.path.join(data_dir, test_name)
+            with open(test_path, "w", encoding="utf-8") as f:
                 f.write("ok")
                 f.flush()
                 os.fsync(f.fileno())
-            os.remove(probe)
-            dir_writable = True
+            os.remove(test_path)
+            data_dir_writable = True
         except Exception:
-            dir_writable = False
+            data_dir_writable = False
 
     return jsonify({
         "ok": True,
         "service": "cpp-exam-prep",
-        "version": str(app_version),           # STABILITY: added
-        "app_version": str(app_version),       # STABILITY: explicit key for clarity
+        "version": str(app_version),         # kept for backward compatibility
+        "app_version": str(app_version),     # STABILITY: explicit field as requested
         "debug": debug_mode,
         "staging": is_staging,
-        "data_dir_exists": dir_exists,         # STABILITY: added
-        "data_dir_writable": dir_writable,     # STABILITY: added
         "started_at": datetime.fromtimestamp(_SEC2_START_TS, tz=timezone.utc).isoformat(),
         "uptime_seconds": uptime_s,
+        # STABILITY: new health fields
+        "data_dir_exists": data_dir_exists,
+        "data_dir_writable": data_dir_writable,
     })
 
 @app.get("/robots.txt", endpoint="sec2_robots_txt")
@@ -534,7 +541,6 @@ def sec2_apply_security_headers(resp):
     return resp
 # ========================= END SECTION 2/8 =========================
 
-# =========================
 # =========================
 # SECTION 3/8 — Legacy Quiz & Mock (picker, run, scoring)
 # STATUS: DISABLED BY DEFAULT to prevent route duplication with Section 4
@@ -3467,6 +3473,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
