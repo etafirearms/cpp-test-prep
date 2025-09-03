@@ -1893,7 +1893,11 @@ def sec4_mock_grade():
 # NOTE: Section 6 owns content ingestion & bank validation endpoints.
 #       Do NOT define them here.
 
+# STABILITY: import for template rendering without f-strings around JS
+from flask import render_template_string
+
 # ---------- STRIPE IMPORT & CONFIG (SAFE) ----------
+# Keep runtime graceful if stripe library or secret key is missing.
 try:
     import stripe  # type: ignore
 except Exception:
@@ -1907,15 +1911,23 @@ STRIPE_WEBHOOK_SECRET    = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
 
 if stripe is not None:
     try:
-        stripe.api_key = STRIPE_SECRET_KEY or None
+        stripe.api_key = STRIPE_SECRET_KEY or None  # None safe; gate calls with _stripe_ready()
     except Exception:
         pass
 
 def _stripe_ready() -> bool:
+    """Stripe usable only if the library imported AND a secret key is present."""
     return (stripe is not None) and bool(STRIPE_SECRET_KEY)
 
 # ---------- FLASHCARDS ----------
 def sec5_normalize_flashcard(item: dict | None):
+    """
+    Accepts shapes like:
+      {"front": "...", "back":"...", "domain":"...", "sources":[{"title":"...", "url":"..."}]}
+      {"q":"...", "a":"..."} or {"term":"...", "definition":"..."}
+    Returns normalized or None if invalid:
+      {"id":"...", "front":"...", "back":"...", "domain":"...", "sources":[...]}
+    """
     if not item or not isinstance(item, dict):
         return None
     front = (item.get("front") or item.get("q") or item.get("term") or "").strip()
@@ -1940,9 +1952,14 @@ def sec5_normalize_flashcard(item: dict | None):
     }
 
 def sec5_all_flashcards() -> list[dict]:
+    """
+    Merge legacy data/flashcards.json + optional bank/cpp_flashcards_v1.json,
+    normalize, and de-duplicate by (front, back, domain).
+    """
     out: list[dict] = []
     seen: set[tuple[str, str, str]] = set()
 
+    # Legacy flashcards file
     legacy = _load_json("flashcards.json", [])
     for fc in (legacy or []):
         n = sec5_normalize_flashcard(fc)
@@ -1954,6 +1971,7 @@ def sec5_all_flashcards() -> list[dict]:
         seen.add(key)
         out.append(n)
 
+    # Bank flashcards (preferred if present)
     bank = _load_json("bank/cpp_flashcards_v1.json", [])
     for fc in (bank or []):
         n = sec5_normalize_flashcard(fc)
@@ -1964,6 +1982,7 @@ def sec5_all_flashcards() -> list[dict]:
             continue
         seen.add(key)
         out.append(n)
+
     return out
 
 def sec5_filter_flashcards_domain(cards: list[dict], domain_key: str | None):
@@ -1972,13 +1991,15 @@ def sec5_filter_flashcards_domain(cards: list[dict], domain_key: str | None):
     dk = str(domain_key).strip().lower()
     return [c for c in cards if str(c.get("domain", "")).strip().lower() == dk]
 
-from flask import render_template_string as _rts  # STABILITY: Jinja rendering for HTML+JS
-
 @app.route("/flashcards", methods=["GET", "POST"], endpoint="sec5_flashcards_page")
 @login_required
 def sec5_flashcards_page():
-    # GET -> picker (no f-string; Jinja string)
+    # GET -> picker
     if request.method == "GET":
+        csrf_val = csrf_token()
+        domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
+
+        # STABILITY: Use render_template_string to avoid Python f-string parsing of JS braces
         tpl = """
         <div class="container">
           <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
@@ -1988,7 +2009,7 @@ def sec5_flashcards_page():
               </div>
               <div class="card-body">
                 <form method="POST" class="mb-3">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}"/>
+                  <input type="hidden" name="csrf_token" value="{{ csrf_val }}"/>
                   <label class="form-label fw-semibold">Domain</label>
                   {{ domain_buttons|safe }}
                   <div class="mt-3 mb-2 fw-semibold">How many cards?</div>
@@ -2005,29 +2026,22 @@ def sec5_flashcards_page():
         </div>
 
         <script>
-        (function() {
-          var container = document.currentScript.closest('.card').querySelector('.card-body');
-          var hidden = container.querySelector('#domain_val');
-          container.querySelectorAll('.domain-btn').forEach(function(btn) {
-            btn.addEventListener('click', function() {
-              container.querySelectorAll('.domain-btn').forEach(function(b) { b.classList.remove('active'); });
-              btn.classList.add('active');
-              if (hidden) hidden.value = btn.getAttribute('data-value');
+          (function() {
+            var container = document.currentScript.closest('.card').querySelector('.card-body');
+            var hidden = container.querySelector('#domain_val');
+            container.querySelectorAll('.domain-btn').forEach(function(btn) {
+              btn.addEventListener('click', function() {
+                container.querySelectorAll('.domain-btn').forEach(function(b) { b.classList.remove('active'); });
+                btn.classList.add('active');
+                if (hidden) hidden.value = btn.getAttribute('data-value');
+              });
             });
-          });
-        })();
+          })();
         </script>
         """
-        return base_layout(
-            "Flashcards",
-            _rts(
-                tpl,
-                csrf_token=csrf_token(),
-                domain_buttons=domain_buttons_html(selected_key="random", field_name="domain"),
-            ),
-        )
+        return base_layout("Flashcards", render_template_string(tpl, csrf_val=csrf_val, domain_buttons=domain_buttons))
 
-    # POST -> render a client-side session (no server state) — no f-strings with JS
+    # POST -> render a client-side session (no server state)
     if not _csrf_ok():
         abort(403)
 
@@ -2043,8 +2057,30 @@ def sec5_flashcards_page():
     pool = sec5_filter_flashcards_domain(all_cards, domain)
     random.shuffle(pool)
     cards = pool[:max(0, min(count, len(pool)))]
-    domain_label = DOMAINS.get(domain, "Mixed")
 
+    def _card_div(c: dict) -> str:
+        src_bits = ""
+        if c.get("sources"):
+            links = []
+            for s in c["sources"]:
+                title = html.escape(s["title"])
+                url = html.escape(s["url"])
+                links.append(f'<li><a href="{url}" target="_blank" rel="noopener">{title}</a></li>')
+            src_bits = f'<div class="small mt-2"><span class="text-muted">Sources:</span><ul class="small mb-0 ps-3">{"".join(links)}</ul></div>'
+        return f"""
+        <div class="fc-card" data-id="{html.escape(c['id'])}" data-domain="{html.escape(c.get('domain','Unspecified'))}">
+          <div class="front">{html.escape(c['front'])}</div>
+          <div class="back d-none">{html.escape(c['back'])}{src_bits}</div>
+        </div>
+        """
+
+    cards_html = "".join(_card_div(c) for c in cards) or (
+        "<div class='text-muted'>No flashcards found. Add content in "
+        "<code>data/bank/cpp_flashcards_v1.json</code> or <code>data/flashcards.json</code>.</div>"
+    )
+
+    # STABILITY: build via Jinja template to avoid f-string+JS brace parsing
+    domain_label = (DOMAINS.get(domain, "Mixed") if domain != "random" else "Random (all)")
     tpl = """
     <div class="container">
       <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
@@ -2055,42 +2091,16 @@ def sec5_flashcards_page():
           </div>
           <div class="card-body">
             <div class="mb-2 small text-muted">Domain:
-              <strong>{% if domain != 'random' %}{{ domain_label }}{% else %}Random (all){% endif %}</strong>
-              &bull; Cards: {{ cards|length }}
+              <strong>{{ domain_label }}</strong>
+              &bull; Cards: {{ cards_count }}
             </div>
-
-            <div id="fc-container">
-              {% if cards %}
-                {% for c in cards %}
-                <div class="fc-card" data-id="{{ c.id }}" data-domain="{{ c.domain or 'Unspecified' }}">
-                  <div class="front">{{ c.front }}</div>
-                  <div class="back d-none">
-                    {{ c.back }}
-                    {% if c.sources %}
-                      <div class="small mt-2">
-                        <span class="text-muted">Sources:</span>
-                        <ul class="small mb-0 ps-3">
-                          {% for s in c.sources %}
-                            <li><a href="{{ s.url }}" target="_blank" rel="noopener">{{ s.title }}</a></li>
-                          {% endfor %}
-                        </ul>
-                      </div>
-                    {% endif %}
-                  </div>
-                </div>
-                {% endfor %}
-              {% else %}
-                <div class='text-muted'>No flashcards found. Add content in
-                  <code>data/bank/cpp_flashcards_v1.json</code> or <code>data/flashcards.json</code>.
-                </div>
-              {% endif %}
-            </div>
+            <div id="fc-container">{{ cards_html|safe }}</div>
 
             <div class="d-flex align-items-center gap-2 mt-3">
               <button class="btn btn-outline-secondary" id="prevBtn"><i class="bi bi-arrow-left"></i></button>
               <button class="btn btn-primary" id="flipBtn"><i class="bi bi-arrow-repeat me-1"></i>Flip</button>
               <button class="btn btn-outline-secondary" id="nextBtn"><i class="bi bi-arrow-right"></i></button>
-              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{{ cards|length }}</span></div>
+              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{{ cards_count }}</span></div>
             </div>
           </div>
         </div>
@@ -2109,8 +2119,7 @@ def sec5_flashcards_page():
             el.querySelector('.back').classList.add('d-none');
           }
         });
-        var idxEl = document.getElementById('idx');
-        if (idxEl) idxEl.textContent = (total ? idx+1 : 0);
+        document.getElementById('idx').textContent = (total ? idx+1 : 0);
       }
       function flip() {
         if (!total) return;
@@ -2131,10 +2140,16 @@ def sec5_flashcards_page():
     """
     try:
         _log_event(_user_id(), "flashcards.start", {"count": len(cards), "domain": domain})
+        # Optional usage bumps; guarded in case helper is defined in a later section.
         _bump_usage("flashcards", len(cards))
     except Exception:
         pass
-    return base_layout("Flashcards", _rts(tpl, cards=cards, domain=domain, domain_label=domain_label))
+    return base_layout("Flashcards", render_template_string(
+        tpl,
+        domain_label=domain_label,
+        cards_count=len(cards),
+        cards_html=cards_html
+    ))
 
 # ---------- PROGRESS ----------
 @app.get("/progress", endpoint="sec5_progress_page")
@@ -2145,6 +2160,7 @@ def sec5_progress_page():
     attempts.sort(key=lambda x: x.get("ts", ""), reverse=True)
 
     total_q  = sum(int(a.get("count", 0))   for a in attempts)
+    total_ok = sum(int(a.get("correct", 0)) for a in attempts)
     best = max([float(a.get("score_pct", 0.0)) for a in attempts], default=0.0)
     avg  = round(sum([float(a.get("score_pct", 0.0)) for a in attempts]) / len(attempts), 1) if attempts else 0.0
 
@@ -2157,6 +2173,7 @@ def sec5_progress_page():
 
     def pct(c, t): return f"{(100.0*c/t):.1f}%" if t else "0.0%"
 
+    # Recent attempts (max 100 rows)
     rows = []
     for a in attempts[:100]:
         rows.append(f"""
@@ -2169,6 +2186,7 @@ def sec5_progress_page():
         """)
     attempts_html = "".join(rows) or "<tr><td colspan='4' class='text-center text-muted'>No attempts yet.</td></tr>"
 
+    # By domain
     drows = []
     for dname in sorted(dom.keys()):
         c = dom[dname]["correct"]; t = dom[dname]["total"]
@@ -2194,7 +2212,7 @@ def sec5_progress_page():
                 <div class="small text-muted">Attempts</div><div class="h4 mb-0">{len(attempts)}</div>
               </div></div>
               <div class="col-md-3"><div class="p-3 border rounded-3">
-                <div class="small text-muted">Questions</div><div class="h4 mb-0">{sum(int(a.get('count',0)) for a in attempts)}</div>
+                <div class="small text-muted">Questions</div><div class="h4 mb-0">{total_q}</div>
               </div></div>
               <div class="col-md-3"><div class="p-3 border rounded-3">
                 <div class="small text-muted">Average</div><div class="h4 mb-0">{avg}%</div>
@@ -2280,9 +2298,15 @@ def sec5_usage_dashboard():
 
 # ---------- BILLING (Stripe) ----------
 def sec5_create_stripe_checkout_session(user_email: str, plan: str = "monthly", discount_code: str | None = None):
+    """
+    Creates a Stripe Checkout Session for either a subscription (monthly) or a
+    one-time payment (sixmonth). If discount_code is provided, try to resolve an
+    active Promotion Code in Stripe and apply it; also enable allow_promotion_codes.
+    """
     if not _stripe_ready():
         logger.error("Stripe not configured (library or STRIPE_SECRET_KEY missing).")
         return None
+
     try:
         discounts_param = None
         if discount_code:
@@ -2350,27 +2374,9 @@ def sec5_billing_page():
     sub = user.get("subscription", "inactive") if user else "inactive"
     names = {"monthly": "Monthly Plan", "sixmonth": "6-Month Plan", "inactive": "Free Plan"}
 
-    tpl = """
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-8">
-      <div class="card">
-        <div class="card-header bg-warning text-dark">
-          <h3 class="mb-0"><i class="bi bi-credit-card me-2"></i>Billing & Subscription</h3>
-        </div>
-        <div class="card-body">
-          <div class="alert {{ 'alert-success' if sub!='inactive' else 'alert-info' }} border-0 mb-4">
-            <div class="d-flex align-items-center">
-              <i class="bi bi-{{ 'check-circle' if sub!='inactive' else 'info-circle' }} fs-4 me-3"></i>
-              <div>
-                <h6 class="alert-heading mb-1">Current Plan: {{ names.get(sub, 'Unknown') }}</h6>
-                <p class="mb-0">
-                  {% if sub!='inactive' %}You have unlimited access to all features.{% else %}
-                  Limited access — upgrade for unlimited features.{% endif %}
-                </p>
-              </div>
-            </div>
-          </div>
-
-          {% if sub=='inactive' %}
+    # STABILITY: the content includes a tiny JS block — render with Jinja to avoid f-string brace parsing
+    if sub == "inactive":
+        plans_tpl = """
           <div class="row g-3">
             <div class="col-md-6">
               <div class="card border-primary">
@@ -2404,8 +2410,7 @@ def sec5_billing_page():
           <script>
             (function() {
               function goWithCode(href) {
-                var codeEl = document.getElementById('discount_code');
-                var code = codeEl ? codeEl.value.trim() : '';
+                var code = (document.getElementById('discount_code')||{value:''}).value.trim();
                 if (code) {
                   var url = new URL(href, window.location.origin);
                   url.searchParams.set('code', code);
@@ -2427,29 +2432,54 @@ def sec5_billing_page():
               }
             })();
           </script>
-          {% else %}
+        """
+    else:
+        plans_tpl = """
           <div class="alert alert-info border-0">
             <i class="bi bi-info-circle me-2"></i>Your subscription is active. Use support to manage changes.
           </div>
-          {% endif %}
+        """
+
+    body_tpl = """
+    <div class="container"><div class="row justify-content-center"><div class="col-lg-8">
+      <div class="card">
+        <div class="card-header bg-warning text-dark">
+          <h3 class="mb-0"><i class="bi bi-credit-card me-2"></i>Billing & Subscription</h3>
+        </div>
+        <div class="card-body">
+          <div class="alert {{ 'alert-success' if sub!='inactive' else 'alert-info' }} border-0 mb-4">
+            <div class="d-flex align-items-center">
+              <i class="bi bi-{{ 'check-circle' if sub!='inactive' else 'info-circle' }} fs-4 me-3"></i>
+              <div>
+                <h6 class="alert-heading mb-1">Current Plan: {{ names.get(sub, 'Unknown') }}</h6>
+                <p class="mb-0">{{ 'You have unlimited access to all features.' if sub!='inactive' else 'Limited access — upgrade for unlimited features.' }}</p>
+              </div>
+            </div>
+          </div>
+
+          {{ plans|safe }}
         </div>
       </div>
     </div></div></div>
     """
-    return base_layout("Billing", _rts(tpl, sub=sub, names=names))
+    return base_layout("Billing", render_template_string(body_tpl, sub=sub, names=names, plans=plans_tpl))
 
 @app.get("/billing/checkout", endpoint="sec5_billing_checkout")
 @login_required
 def sec5_billing_checkout():
     plan = request.args.get("plan", "monthly")
     user_email = session.get("email", "")
+
+    # A user can be logged in (uid set) but lack an email in session; handle gracefully.
     if not user_email:
         return redirect(_login_redirect_url(request.path))
 
     discount_code = (request.args.get("code") or "").strip()
+
     url = sec5_create_stripe_checkout_session(user_email, plan=plan, discount_code=discount_code)
     if url:
         return redirect(url)
+    # If creation failed (e.g., Stripe not configured), return to Billing
     return redirect(url_for("sec5_billing_page"))
 
 @app.get("/billing/success", endpoint="sec5_billing_success")
@@ -2466,6 +2496,7 @@ def sec5_billing_success():
             u = _find_user(email or "")
             if u:
                 updates: Dict[str, Any] = {}
+                # Store customer id either way
                 cid = (cs.get("customer") if isinstance(cs, dict) else getattr(cs, "customer", None)) or u.get("stripe_customer_id")
                 updates["stripe_customer_id"] = cid
 
@@ -2484,26 +2515,26 @@ def sec5_billing_success():
     elif sess_id and not _stripe_ready():
         logger.warning("Stripe success callback received but Stripe is not configured.")
 
-    content = """
+    content = f"""
     <div class="container"><div class="row justify-content-center"><div class="col-md-6">
       <div class="card text-center"><div class="card-body p-5">
         <i class="bi bi-check-circle-fill text-success display-1 mb-4"></i>
         <h2 class="text-success mb-3">Payment Successful!</h2>
-        <p class="text-muted mb-4">Your {{ plan_name }} subscription is now active.</p>
+        <p class="text-muted mb-4">Your {('Monthly' if plan=='monthly' else '6-Month')} subscription is now active.</p>
         <a href="/" class="btn btn-primary">Start Learning</a>
       </div></div>
     </div></div></div>"""
-    plan_name = "Monthly" if plan == "monthly" else "6-Month"
-    return base_layout("Payment Success", _rts(content, plan_name=plan_name))
+    return base_layout("Payment Success", content)
 
-# ---------- Stripe Webhook ----------
+# Stripe Webhook — authoritative subscription updates
 @app.post("/stripe/webhook", endpoint="sec5_stripe_webhook")
 def sec5_stripe_webhook():
+    # STABILITY: if secret is empty, fail clearly (503) without attempting to verify
     if not _stripe_ready():
         logger.error("Stripe webhook invoked but Stripe is not configured.")
         return "", 400
     if not STRIPE_WEBHOOK_SECRET:
-        logger.error("Stripe webhook secret not configured; refusing webhook.")
+        logger.error("Stripe webhook called but STRIPE_WEBHOOK_SECRET is not set.")
         return "", 503
 
     payload = request.data
@@ -2521,6 +2552,8 @@ def sec5_stripe_webhook():
         email = meta.get("user_email")
         plan  = meta.get("plan", "")
         customer_id = cs.get("customer")
+
+        # STABILITY: Log only safe fields
         try:
             logger.info("stripe_event type=%s customer=%s plan=%s", etype, str(customer_id), str(plan))
         except Exception:
@@ -2538,16 +2571,17 @@ def sec5_stripe_webhook():
                     expiry = datetime.utcnow() + timedelta(days=duration)
                     updates["subscription_expires_at"] = expiry.isoformat() + "Z"
                 _update_user(u["id"], updates)
+
     return "", 200
 
-# CSRF exempt only for webhook (if CSRFProtect present)
-if HAS_CSRF and csrf is not None:
-    try:
+# STABILITY: Exempt webhook from CSRF if Flask-WTF is present
+try:
+    if HAS_CSRF and csrf is not None:
         csrf.exempt(sec5_stripe_webhook)
-    except Exception:
-        pass
+except Exception:
+    pass
 
-# ---------- BILLING DEBUG ----------
+# ---------- BILLING DEBUG (admin-only; no secrets) ----------
 @app.get("/billing/debug", endpoint="sec5_billing_debug")
 @login_required
 def sec5_billing_debug():
@@ -2613,6 +2647,7 @@ def sec5_admin_login_page():
 
 @app.post("/admin/login", endpoint="sec5_admin_login_post")
 def sec5_admin_login_post():
+    # If CSRFProtect is active, it enforces validity. Otherwise, manual check.
     if not HAS_CSRF:
         if request.form.get("csrf_token") != csrf_token():
             abort(403)
@@ -2674,7 +2709,6 @@ def sec5_admin_reset_password():
     """
     return base_layout("Admin Reset Password", body)
 # ========================= END SECTION 5/8 =========================
-
 
 
 # SECTION 6/8 — Content Bank: ingestion, helpers, validation UI
@@ -3520,6 +3554,7 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
+
 
 
 
