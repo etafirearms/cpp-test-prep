@@ -2710,15 +2710,20 @@ def sec7_tutor_page():
     body = _tutor_chat_html(_tutor_get_history(), banner="")
     return base_layout("Tutor", body)
 
-# SECTION 8/8 — Public Login & Logout (final glue)
+# SECTION 8/8 — Public Login & Logout (+ Registration & Welcome Gate)
 # Route ownership (unique in app):
-#   /login   [GET, POST]  (endpoint name must remain sec1_login_page for compatibility)
-#   /logout  [GET]
+#   /welcome  [GET, POST]   (new)  — disclaimer + "I agree" gate
+#   /register [GET, POST]   (new)  — account creation
+#   /login    [GET, POST]   (existing; kept same endpoint names)
+#   /logout   [GET]         (existing)
 #
-# NOTE:
-# - To avoid route collisions and preserve your current design, this section
-#   does NOT redefine "/" (Home) or "/legal/terms" because they are already
-#   present in Section 1 in your codebase.
+# Notes:
+# - We DO NOT redefine "/" or "/legal/terms".
+# - We keep your helpers and data layout (users.json) unchanged.
+# - Sessions are marked permanent on successful login/register
+#   so returning users stay signed in (subject to cookie lifetime).
+# - If terms were accepted during this session, we persist
+#   "tos_accepted_at" on the user at first login/register.
 
 # Ensure required data files exist (idempotent, safe on reload)
 try:
@@ -2729,7 +2734,7 @@ except Exception as _e:
     except Exception:
         pass
 
-# ---------- Helpers ----------
+# ---------- Helpers (unchanged) ----------
 def _safe_next(next_val: str | None) -> str:
     nv = (next_val or "").strip()
     if nv.startswith("/") and not nv.startswith("//"):
@@ -2745,9 +2750,180 @@ def _auth_clear_session() -> None:
     session.pop("email", None)
     session.pop("admin_ok", None)
 
+# ---------- NEW: Welcome / Disclaimer ----------
+@app.route("/welcome", methods=["GET", "POST"], endpoint="sec8_welcome")
+def sec8_welcome():
+    # GET => show disclaimer; POST => require "agree"
+    if request.method == "POST":
+        if not _csrf_ok():
+            abort(403)
+        agreed = (request.form.get("agree") == "on")
+        if not agreed:
+            # Re-render with gentle message
+            msg = "<div class='alert alert-warning'>Please check the box to agree to the Terms & Conditions.</div>"
+        else:
+            session["terms_ok"] = True
+            # After agreeing, send to login (or explicit next)
+            nxt = _safe_next(request.form.get("next"))
+            return redirect(nxt or url_for("sec1_login_page"))
+    else:
+        msg = ""
+    csrf_val = csrf_token()
+    next_val = _safe_next(request.args.get("next"))
+
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+      <div class="card">
+        <div class="card-header bg-light">
+          <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>Welcome</h3>
+        </div>
+        <div class="card-body">
+          {msg}
+          <p class="lead mb-2">Welcome to CPP Exam Prep!</p>
+          <p class="mb-3">You’ll be able to take quizzes, review flashcards, track progress, and (optionally) use the Tutor. Please read and accept our disclaimer before continuing.</p>
+          <div class="p-3 border rounded-3 bg-light mb-3">
+            <div class="fw-semibold mb-1">Educational Disclaimer</div>
+            <div class="small">
+              This site is for study purposes only. It is not affiliated with ASIS, and it does not provide real exam questions or official guidance.
+              By continuing, you confirm you will use the content responsibly and in accordance with our <a href="/legal/terms" target="_blank" rel="noopener">Terms &amp; Conditions</a>.
+            </div>
+          </div>
+
+          <form method="POST" class="mb-3">
+            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <input type="hidden" name="next" value="{html.escape(next_val)}"/>
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" name="agree" id="agreeBox" required>
+              <label class="form-check-label" for="agreeBox">
+                I have read and agree to the Terms &amp; Conditions.
+              </label>
+            </div>
+            <button class="btn btn-primary" type="submit">I Agree — Continue</button>
+            <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
+          </form>
+
+          <div class="small text-muted">Tip: After agreeing, you can log in or create a new account.</div>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Welcome", body)
+
+# ---------- NEW: Register ----------
+@app.get("/register", endpoint="sec8_register_get")
+def sec8_register_get():
+    # Require the welcome/terms gate first
+    if not session.get("terms_ok"):
+        return redirect(url_for("sec8_welcome", next=request.path))
+
+    csrf_val = csrf_token()
+    nxt = _safe_next(request.args.get("next"))
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-md-6">
+      <div class="card">
+        <div class="card-header bg-success text-white"><h3 class="mb-0"><i class="bi bi-person-plus me-2"></i>Create Account</h3></div>
+        <div class="card-body">
+          <form method="POST" action="/register">
+            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <input type="hidden" name="next" value="{html.escape(nxt)}"/>
+            <div class="mb-3">
+              <label class="form-label">Email</label>
+              <input type="email" class="form-control" name="email" placeholder="you@example.com" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" class="form-control" name="password" minlength="8" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Confirm Password</label>
+              <input type="password" class="form-control" name="confirm" minlength="8" required>
+            </div>
+            <div class="small text-muted mb-3">
+              By creating an account you agree to our <a href="/legal/terms" target="_blank" rel="noopener">Terms &amp; Conditions</a>.
+            </div>
+            <button class="btn btn-success" type="submit">Create Account</button>
+            <a class="btn btn-outline-secondary ms-2" href="/login">Have an account? Sign in</a>
+          </form>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Register", body)
+
+@app.post("/register", endpoint="sec8_register_post")
+def sec8_register_post():
+    # Rate limit: 1 / 2s by IP (reuse your helper)
+    rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
+    if not _rate_ok(f"register:{rip}", per_sec=0.5):
+        return redirect(url_for("sec8_register_get", next=_safe_next(request.form.get("next"))))
+
+    if not _csrf_ok():
+        abort(403)
+
+    # Enforce terms gate
+    if not session.get("terms_ok"):
+        return redirect(url_for("sec8_welcome", next="/register"))
+
+    email = (request.form.get("email") or "").strip().lower()
+    pw    = request.form.get("password") or ""
+    conf  = request.form.get("confirm") or ""
+    nxt   = _safe_next(request.form.get("next"))
+
+    # Validate
+    if not email or "@" not in email:
+        return redirect(url_for("sec8_register_get", next=nxt))
+    if pw != conf:
+        return redirect(url_for("sec8_register_get", next=nxt))
+    ok, err = validate_password(pw)
+    if not ok:
+        return redirect(url_for("sec8_register_get", next=nxt))
+
+    # Uniqueness
+    if _find_user(email):
+        # Send to login if already exists
+        return redirect(url_for("sec1_login_page", next=nxt))
+
+    # Create user
+    users = _users_all()
+    uid = str(uuid.uuid4())
+    user = {
+        "id": uid,
+        "email": email,
+        "password_hash": generate_password_hash(pw),
+        "subscription": "inactive",
+        "usage": {},
+        "created_at": datetime.utcnow().isoformat() + "Z"
+    }
+    users.append(user)
+    try:
+        _save_json("users.json", users)
+    except Exception as e:
+        logger.warning("Register: could not save user: %s", e)
+        return redirect(url_for("sec8_register_get", next=nxt))
+
+    # Persist Terms acceptance if present
+    if session.get("terms_ok"):
+        try:
+            _update_user(uid, {"tos_accepted_at": datetime.utcnow().isoformat() + "Z"})
+        except Exception:
+            pass
+
+    # Login and make session "remembered"
+    _auth_set_session(user)
+    session.permanent = True  # remember across restarts (cookie lifetime applies)
+    try:
+        _log_event(_user_id(), "auth.register", {})
+    except Exception:
+        pass
+    return redirect(nxt or "/")
+
 # ---------- USER LOGIN ----------
 @app.get("/login", endpoint="sec1_login_page")
 def sec1_login_page():
+    # Gate: require welcome/terms for new students before showing login
+    if not session.get("terms_ok"):
+        return redirect(url_for("sec8_welcome", next=request.path))
+
     nxt = _safe_next(request.args.get("next") or "/")
     err = (request.args.get("error") or "").strip()
     msg_html = ""
@@ -2776,6 +2952,7 @@ def sec1_login_page():
             <button class="btn btn-primary" type="submit">Sign In</button>
             <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
           </form>
+          <div class="mt-3 small">New here? <a href="/register">Create an account</a>.</div>
         </div>
       </div>
     </div></div></div>
@@ -2804,6 +2981,15 @@ def sec1_login_post():
 
     # Success
     _auth_set_session(u)
+    session.permanent = True  # remember across restarts (cookie lifetime applies)
+
+    # If terms were accepted during this session and not yet on profile, persist it
+    if session.get("terms_ok") and not u.get("tos_accepted_at"):
+        try:
+            _update_user(u["id"], {"tos_accepted_at": datetime.utcnow().isoformat() + "Z"})
+        except Exception:
+            pass
+
     try:
         _log_event(_user_id(), "auth.login", {})
     except Exception:
@@ -2819,17 +3005,3 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
