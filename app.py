@@ -2710,26 +2710,21 @@ def sec7_tutor_page():
     body = _tutor_chat_html(_tutor_get_history(), banner="")
     return base_layout("Tutor", body)
 #=====================================================#
-# SECTION 8/8 — Public Welcome, Login, Register & Logout (updated)
+# =========================
+# SECTION 8/8 — Public Welcome, Signup, Login & Logout (final glue)
 # Route ownership (unique in app):
-#   /welcome   [GET, POST]  -> Landing + disclaimer
-#   /register  [GET, POST]  -> Create account
-#   /login     [GET, POST]  -> (endpoint names preserved)
-#   /logout    [GET]
+#   /welcome [GET, POST]
+#   /signup  [GET, POST]
+#   /login   [GET, POST]  (endpoint name must remain sec1_login_page / sec1_login_post)
+#   /logout  [GET]
 #
-# Notes:
-# - Sessions are made permanent on successful login so users stay signed in.
-# - Keep endpoint names for /login & /logout: sec1_login_page, sec1_login_post, sec1_logout.
-# - No external deps added. Uses existing helpers & imports from earlier sections.
-
-# Ensure required data files exist (idempotent, safe on reload)
-try:
-    init_sample_data()
-except Exception as _e:
-    try:
-        logger.warning("init_sample_data at Section 8 failed: %s", _e)
-    except Exception:
-        pass
+# NOTES
+# - This section provides the onboarding/welcome gate with a disclaimer checkbox.
+# - Users who accept on /welcome are remembered via session; if logged in we persist to users.json.
+# - Signup requires agreeing to terms (checkbox) and persists that choice.
+# - After login we mirror stored tos_ok from the user record into session, so you won’t bounce back to /welcome.
+# - We do NOT redefine "/" (Home) because it exists in Section 1. A small before_request gate below protects all routes.
+# =========================
 
 # ---------- Helpers ----------
 def _safe_next(next_val: str | None) -> str:
@@ -2739,147 +2734,216 @@ def _safe_next(next_val: str | None) -> str:
     return "/"
 
 def _auth_set_session(user: dict) -> None:
+    # Persist identity
     session["uid"] = user.get("id", "")
     session["email"] = user.get("email", "")
+    # Mirror ToS acceptance from stored user (prevents loop back to /welcome)
+    if user.get("tos_ok"):
+        session["tos_ok"] = True
+    # Make session persistent across browser restarts (uses Flask default lifetime ~31d)
+    session.permanent = True
 
 def _auth_clear_session() -> None:
     session.pop("uid", None)
     session.pop("email", None)
     session.pop("admin_ok", None)
-
-# ---------- Landing gate: redirect "/" to /welcome (GET/HEAD only) ----------
-@app.before_request
-def _root_to_welcome_gate():
-    if request.method not in ("GET", "HEAD"):
-        return None
-    p = (request.path or "/")
-    if p in ("/welcome", "/login", "/register", "/healthz", "/stripe/webhook"):
-        return None
-    if p.startswith("/static/"):
-        return None
-    if p == "/":
-        return redirect(url_for("sec8_welcome", next=request.args.get("next") or "/"))
-    return None
+    session.pop("tos_ok", None)
 
 # ---------- Welcome / Disclaimer ----------
 @app.route("/welcome", methods=["GET", "POST"], endpoint="sec8_welcome")
 def sec8_welcome():
+    # If already accepted, bounce to next/home.
+    if session.get("tos_ok"):
+        return redirect(_safe_next(request.args.get("next") or "/"))
+
+    err = ""
+    nxt = _safe_next(request.args.get("next") or "/")
+
     if request.method == "POST":
         if not _csrf_ok():
             abort(403)
-        agree = (request.form.get("agree") == "1")
-        if agree:
-            session["terms_ok"] = True
-            try:
-                _log_event(_user_id(), "welcome.agree", {})
-            except Exception:
-                pass
-            nxt = _safe_next(request.form.get("next") or "/login")
-            return redirect(nxt)
+        accepted = (request.form.get("agree") == "1")
+        if not accepted:
+            err = "Please confirm you understand and agree to the disclaimer and terms."
+        else:
+            # Set session flag
+            session["tos_ok"] = True
+            # If user is logged in, persist this decision on their record
+            u = _find_user(session.get("email", "") or "")
+            if u:
+                try:
+                    _update_user(u["id"], {"tos_ok": True})
+                except Exception:
+                    pass
+            return redirect(_safe_next(request.form.get("next") or nxt))
 
     csrf_val = csrf_token()
-    nxt = _safe_next(request.args.get("next") or "/")
+    next_hidden = html.escape(nxt)
 
-    content = f"""
-    <div class="container py-4">
-      <div class="row justify-content-center">
-        <div class="col-xl-8 col-lg-9">
-          <div class="card border-0 shadow" style="overflow:hidden;">
-            <div class="card-header text-white" style="background: linear-gradient(135deg,#184e77,#1e6091);">
-              <div class="d-flex align-items-center">
-                <i class="bi bi-mortarboard fs-3 me-3"></i>
-                <div>
-                  <h2 class="mb-0">Welcome to CPP Exam Prep</h2>
-                  <div class="small opacity-75">Focused practice for ASIS CPP domains — clear, concise, actionable.</div>
-                </div>
-              </div>
-            </div>
-            <div class="card-body p-4">
-              <div class="mb-3">
-                <p class="lead mb-1">Your study partner for the CPP&reg; exam.</p>
-                <p class="text-muted mb-0">Use quick quizzes, flashcards, and a tutor to build mastery across all domains.</p>
-              </div>
-
-              <div class="alert alert-warning border-0">
-                <div class="d-flex">
-                  <i class="bi bi-exclamation-triangle me-2 mt-1"></i>
-                  <div>
-                    <strong>Important:</strong> This program is <em>not</em> affiliated with or approved by ASIS International.
-                    Content is for educational preparation only and does not include real exam questions.
-                  </div>
-                </div>
-              </div>
-
-              <form method="POST" class="mb-3">
-                <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-                <input type="hidden" name="next" value="{html.escape(nxt)}"/>
-                <div class="form-check mb-3">
-                  <input class="form-check-input" type="checkbox" id="agree" name="agree" value="1">
-                  <label class="form-check-label" for="agree">
-                    I understand and agree to the terms above.
-                  </label>
-                </div>
-                <button class="btn btn-success" type="submit">
-                  <i class="bi bi-check2-circle me-1"></i> Continue
-                </button>
-                <span class="text-muted ms-2">— or —</span>
-                <a href="/login" class="btn btn-outline-primary ms-2"><i class="bi bi-box-arrow-in-right me-1"></i> Sign in</a>
-                <a href="/register" class="btn btn-outline-secondary ms-2"><i class="bi bi-person-plus me-1"></i> Create account</a>
-              </form>
-
-              <hr class="my-4">
-
-              <div class="row g-3">
-                <div class="col-md-4">
-                  <div class="p-3 border rounded-3 h-100">
-                    <div class="fw-semibold mb-1"><i class="bi bi-lightning-charge me-1"></i> Quick Start</div>
-                    <div class="text-muted small">Pick a domain, take a short quiz, then review mistakes immediately.</div>
-                  </div>
-                </div>
-                <div class="col-md-4">
-                  <div class="p-3 border rounded-3 h-100">
-                    <div class="fw-semibold mb-1"><i class="bi bi-card-text me-1"></i> Flashcards</div>
-                    <div class="text-muted small">Target weak areas with focused flashcards and source links.</div>
-                  </div>
-                </div>
-                <div class="col-md-4">
-                  <div class="p-3 border rounded-3 h-100">
-                    <div class="fw-semibold mb-1"><i class="bi bi-chat-dots me-1"></i> Tutor</div>
-                    <div class="text-muted small">Ask for explanations or small drills; stay concise and practical.</div>
-                  </div>
-                </div>
-              </div>
-
-            </div>
-            <div class="card-footer bg-light text-muted small">
-              CPP&reg; is a registered mark of ASIS International. This site is independent and for study purposes only.
-            </div>
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
+      <div class="card shadow-sm">
+        <div class="card-header bg-dark text-white">
+          <h3 class="mb-0"><i class="bi bi-mortarboard me-2"></i>CPP Exam Prep — Welcome</h3>
+        </div>
+        <div class="card-body">
+          {"<div class='alert alert-warning mb-3'>" + html.escape(err) + "</div>" if err else ""}
+          <p class="lead">This program helps you study the ASIS CPP domains with quizzes, flashcards, and a tutor.</p>
+          <div class="p-3 border rounded-3 bg-light">
+            <h5 class="mb-2">Important Disclaimer</h5>
+            <ul class="mb-2">
+              <li>This is an independent study tool and is <strong>not</strong> approved, endorsed, or affiliated with ASIS International.</li>
+              <li>Do not request or share real exam questions. We will create fresh practice items instead.</li>
+              <li>Use at your own discretion; this is educational content only.</li>
+            </ul>
+            <div class="small text-muted">By proceeding, you acknowledge the above.</div>
           </div>
+
+          <form method="POST" class="mt-3">
+            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
+            <input type="hidden" name="next" value="{next_hidden}"/>
+            <div class="form-check my-3">
+              <input class="form-check-input" type="checkbox" id="agree" name="agree" value="1" required>
+              <label class="form-check-label" for="agree">I understand the disclaimer and agree to the terms.</label>
+            </div>
+            <div class="d-flex gap-2 align-items-center">
+              <button class="btn btn-primary" type="submit"><i class="bi bi-check2-circle me-1"></i>Continue</button>
+              <a class="btn btn-outline-secondary" href="/login"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a>
+              <a class="btn btn-outline-success" href="/signup"><i class="bi bi-person-plus me-1"></i>Create Account</a>
+            </div>
+          </form>
+
+          <hr class="my-4">
+          <h6 class="fw-semibold">Quick Start</h6>
+          <ol class="mb-0">
+            <li>Accept the disclaimer above.</li>
+            <li>Sign in or create an account.</li>
+            <li>Start with <a href="/flashcards">Flashcards</a> or take a <a href="/mock">Mock Exam</a>.</li>
+          </ol>
         </div>
       </div>
-    </div>
+    </div></div></div>
     """
-    return base_layout("Welcome", content)
+    return base_layout("Welcome", body)
+
+# ---------- Global gate: require disclaimer acceptance (except safe paths) ----------
+@app.before_request
+def sec8_tos_gate():
+    # Always allow assets and known public endpoints
+    p = request.path or "/"
+    if (
+        p.startswith("/static/") or
+        p.startswith("/stripe/webhook") or  # webhook (no session)
+        p in ("/welcome", "/login", "/signup", "/logout", "/healthz", "/legal/terms")
+    ):
+        return None
+
+    # Allow POST to /login and /signup as well
+    if request.method == "POST" and p in ("/login", "/signup"):
+        return None
+
+    # If no acceptance yet, redirect to welcome, preserving original next=...
+    if not session.get("tos_ok"):
+        # Avoid redirect loops for API JSON posts by only redirecting on GET/HEAD
+        if request.method in ("GET", "HEAD"):
+            return redirect(url_for("sec8_welcome", next=request.full_path if request.query_string else p))
+    return None
+
+# ---------- Signup ----------
+@app.get("/signup", endpoint="sec8_signup_page")
+def sec8_signup_page():
+    nxt = _safe_next(request.args.get("next") or "/")
+    body = f"""
+    <div class="container"><div class="row justify-content-center"><div class="col-md-6">
+      <div class="card">
+        <div class="card-header bg-success text-white"><h3 class="mb-0"><i class="bi bi-person-plus me-2"></i>Create Account</h3></div>
+        <div class="card-body">
+          <form method="POST" action="/signup">
+            <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+            <input type="hidden" name="next" value="{html.escape(nxt)}"/>
+            <div class="mb-3">
+              <label class="form-label">Email</label>
+              <input type="email" class="form-control" name="email" placeholder="you@example.com" required>
+            </div>
+            <div class="mb-3">
+              <label class="form-label">Password</label>
+              <input type="password" class="form-control" name="password" minlength="8" required>
+            </div>
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="checkbox" id="agree2" name="agree" value="1" required>
+              <label class="form-check-label" for="agree2">I accept the disclaimer and terms.</label>
+            </div>
+            <button class="btn btn-success" type="submit">Create Account</button>
+            <a class="btn btn-outline-secondary ms-2" href="/login"><i class="bi bi-box-arrow-in-right me-1"></i>Sign In</a>
+          </form>
+        </div>
+      </div>
+    </div></div></div>
+    """
+    return base_layout("Sign Up", body)
+
+@app.post("/signup", endpoint="sec8_signup_post")
+def sec8_signup_post():
+    if not _csrf_ok():
+        abort(403)
+
+    email = (request.form.get("email") or "").strip().lower()
+    pw    = request.form.get("password") or ""
+    nxt   = _safe_next(request.form.get("next"))
+    agree = (request.form.get("agree") == "1")
+
+    ok, msg = validate_password(pw)
+    if not email or not ok or not agree:
+        # Re-render minimal error page (UI style unchanged)
+        err = msg or "Please provide a valid email, an 8+ char password, and accept the terms."
+        return base_layout("Sign Up", f"<div class='container'><div class='row justify-content-center'><div class='col-md-6'><div class='alert alert-warning mt-3'>{html.escape(err)}</div><a class='btn btn-outline-secondary' href='/signup'>Back</a></div></div></div>")
+
+    if _find_user(email):
+        return base_layout("Sign Up", f"<div class='container'><div class='row justify-content-center'><div class='col-md-6'><div class='alert alert-warning mt-3'>An account with that email already exists.</div><a class='btn btn-outline-secondary' href='/login'>Sign In</a></div></div></div>")
+
+    # Create user
+    new_user = {
+        "id": str(uuid.uuid4()),
+        "email": email,
+        "password_hash": generate_password_hash(pw),
+        "subscription": "inactive",
+        "usage": {"monthly": {}},
+        "tos_ok": True  # persist agreement
+    }
+    # Persist to users.json
+    try:
+        users = _users_all()
+        users.append(new_user)
+        _save_json("users.json", users)
+    except Exception:
+        return base_layout("Sign Up", "<div class='container'><div class='row justify-content-center'><div class='col-md-6'><div class='alert alert-danger mt-3'>Could not create the account. Please try again.</div><a class='btn btn-outline-secondary' href='/signup'>Back</a></div></div></div>")
+
+    # Set session
+    _auth_set_session(new_user)
+    # Also mark disclaimer accepted in session
+    session["tos_ok"] = True
+
+    try:
+        _log_event(_user_id(), "auth.signup", {})
+    except Exception:
+        pass
+    return redirect(nxt or "/")
 
 # ---------- USER LOGIN ----------
 @app.get("/login", endpoint="sec1_login_page")
 def sec1_login_page():
     nxt = _safe_next(request.args.get("next") or "/")
     err = (request.args.get("error") or "").strip()
-    registered = (request.args.get("registered") == "1")
-
     msg_html = ""
     if err == "1":
         msg_html = "<div class='alert alert-danger'>Invalid email or password.</div>"
     elif err == "rate":
         msg_html = "<div class='alert alert-warning'>Too many attempts. Please wait a moment and try again.</div>"
-    elif registered:
-        msg_html = "<div class='alert alert-success'>Account created. You can sign in now.</div>"
 
     content = f"""
     <div class="container"><div class="row justify-content-center"><div class="col-md-5">
       <div class="card">
-        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-box-arrow-in-right me-2"></i>Sign in</h3></div>
+        <div class="card-header bg-primary text-white"><h3 class="mb-0"><i class="bi bi-box-arrow-in-right me-2"></i>Login</h3></div>
         <div class="card-body">
           {msg_html}
           <form method="POST" action="/login">
@@ -2894,7 +2958,7 @@ def sec1_login_page():
               <input type="password" class="form-control" name="password" minlength="8" required>
             </div>
             <button class="btn btn-primary" type="submit">Sign In</button>
-            <a class="btn btn-outline-secondary ms-2" href="/register"><i class="bi bi-person-plus me-1"></i>Create account</a>
+            <a class="btn btn-outline-success ms-2" href="/signup"><i class="bi bi-person-plus me-1"></i>Create Account</a>
           </form>
         </div>
       </div>
@@ -2907,7 +2971,7 @@ def sec1_login_post():
     if not _csrf_ok():
         abort(403)
 
-    # Rate limit: 1 attempt / 2 seconds per IP
+    # Basic rate limit (per-IP): 1 attempt / 2 seconds
     rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
     if not _rate_ok(f"login:{rip}", per_sec=0.5):
         nxt = _safe_next(request.form.get("next"))
@@ -2921,97 +2985,20 @@ def sec1_login_post():
     if not u or not check_password_hash(u.get("password_hash",""), pw):
         return redirect(url_for("sec1_login_page", next=nxt, error="1"))
 
-    # Success: persistent session
+    # Success: set session (includes mirroring tos_ok + permanent)
     _auth_set_session(u)
-    session.permanent = True
+
     try:
         _log_event(_user_id(), "auth.login", {})
     except Exception:
         pass
-    return redirect(nxt or "/")
 
-# ---------- USER REGISTRATION ----------
-@app.get("/register", endpoint="sec8_register_page")
-def sec8_register_page():
-    nxt = _safe_next(request.args.get("next") or "/")
-    content = f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-md-6">
-      <div class="card">
-        <div class="card-header bg-secondary text-white"><h3 class="mb-0"><i class="bi bi-person-plus me-2"></i>Create Account</h3></div>
-        <div class="card-body">
-          <form method="POST" action="/register">
-            <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
-            <input type="hidden" name="next" value="{html.escape(nxt)}"/>
-            <div class="mb-3">
-              <label class="form-label">Email</label>
-              <input type="email" class="form-control" name="email" placeholder="you@example.com" required>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">Password</label>
-              <input type="password" class="form-control" name="password" minlength="8" required>
-              <div class="form-text">At least 8 characters; use a mix of letters and numbers.</div>
-            </div>
-            <div class="mb-3">
-              <label class="form-label">Confirm Password</label>
-              <input type="password" class="form-control" name="password2" minlength="8" required>
-            </div>
-            <button class="btn btn-success" type="submit">Create Account</button>
-            <a class="btn btn-outline-secondary ms-2" href="/login"><i class="bi bi-box-arrow-in-right me-1"></i>Sign in</a>
-          </form>
-        </div>
-      </div>
-    </div></div></div>
-    """
-    return base_layout("Create Account", content)
-
-@app.post("/register", endpoint="sec8_register_post")
-def sec8_register_post():
-    if not _csrf_ok():
-        abort(403)
-
-    # Rate limit: 1 submission / 2 seconds per IP
-    rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
-    if not _rate_ok(f"register:{rip}", per_sec=0.5):
-        return redirect(url_for("sec8_register_page", next=_safe_next(request.form.get("next"))))
-
-    email = (request.form.get("email") or "").strip().lower()
-    pw    = request.form.get("password") or ""
-    pw2   = request.form.get("password2") or ""
-    nxt   = _safe_next(request.form.get("next"))
-
-    if not email or not pw or pw != pw2:
-        return redirect(url_for("sec8_register_page", next=nxt))
-
-    ok, err = validate_password(pw)
-    if not ok:
-        return redirect(url_for("sec8_register_page", next=nxt))
-
-    if _find_user(email):
-        # email in use -> send to login with generic error (don't leak existence)
-        return redirect(url_for("sec1_login_page", next=nxt, error="1"))
-
-    # Create new user
-    users = _users_all()
-    uid = str(uuid.uuid4())
-    new_user = {
-        "id": uid,
-        "email": email,
-        "password_hash": generate_password_hash(pw),
-        "subscription": "inactive",
-        "usage": {"monthly": {}},
-        "created_at": datetime.utcnow().isoformat() + "Z"
-    }
-    users.append(new_user)
-    try:
-        _save_json("users.json", users)
-    except Exception:
-        return redirect(url_for("sec1_login_page", next=nxt, error="1"))
-
-    try:
-        _log_event(uid, "auth.register", {})
-    except Exception:
-        pass
-    return redirect(url_for("sec1_login_page", next=nxt, registered="1"))
+    # If user previously accepted disclaimer, ensure session flag reflects it; otherwise send them to /welcome
+    if u.get("tos_ok"):
+        session["tos_ok"] = True
+        return redirect(nxt or "/")
+    else:
+        return redirect(url_for("sec8_welcome", next=nxt or "/"))
 
 # ---------- LOGOUT ----------
 @app.get("/logout", endpoint="sec1_logout")
@@ -3022,3 +3009,4 @@ def sec1_logout():
         pass
     _auth_clear_session()
     return redirect("/welcome")
+# ========================= END SECTION 8/8 =========================
