@@ -1976,323 +1976,357 @@ def sec5_admin_reset_password():
 # ========================= END SECTION 5/8 =========================
 
 
-# =========================
-# SECTION 6/8 — Tutor (UI uplift + suggestion box)
-# Drop-in replacement for your existing Tutor section. Keeps routes and POST shape identical:
-# - GET  /tutor    → shows Tutor with welcome text and a 4-item suggestion box
-# - POST /tutor    → submits a question via form field name "q" (unchanged)
-#
-# Notes:
-# • Clicking a suggested question fills the input and auto-submits the form (no extra click).
-# • After a suggestion is clicked, it’s instantly swapped out for a new one (and the page then navigates).
-# • No backend logic changed beyond the page HTML shell — your existing POST handler continues to work.
-# • If your original function names differ, keep the route paths the same and replace the whole section.
-# =========================
+# =====================================================================
+# SECTION 6/8 — CONTENT BANK & ADMIN UPLOAD (FULL)
+# START OF SECTION 6/8
+# =====================================================================
 
-# STABILITY: helpers used across the app
-def _safe_next(next_val: str | None) -> str:
-    nv = (next_val or "").strip()
-    if nv.startswith("/") and not nv.startswith("//"):
-        return nv
-    return "/"
+# STABILITY: stdlib only
+import os, io, json, time, glob, hashlib, tempfile, shutil
+from typing import List, Dict, Tuple
 
-# ---------- Tutor UI ----------
-@app.get("/tutor", endpoint="sec6_tutor_page")
-def sec6_tutor_page():
-    # If you already gate with @login_required + TOS in before_request, nothing else needed here.
+# STABILITY: use existing logger if present
+try:
+    logger  # noqa: F821
+except NameError:  # pragma: no cover
+    import logging
+    logger = logging.getLogger("app")
 
-    # STABILITY: keep CSRF for the form (same name your POST expects)
-    csrf_val = csrf_token()
+# STABILITY: DATA_DIR must exist from earlier env/config section
+try:
+    DATA_DIR  # noqa: F821
+except NameError:
+    DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
 
-    # Short welcome/explainer that sits above the main box
-    welcome_html = """
-      <div class="alert alert-info d-flex align-items-start">
-        <div class="me-2"><i class="bi bi-robot fs-4"></i></div>
-        <div>
-          <div class="fw-semibold">Welcome to Tutor</div>
-          <div class="small">
-            Ask anything about the CPP domains. For best results:
-            <ul class="mb-0">
-              <li>Be specific (cite the domain or concept if you can).</li>
-              <li>Ask for examples or step-by-step explanations.</li>
-              <li>Use the practice tools (Mock Exam & Flashcards) alongside Tutor.</li>
-            </ul>
-          </div>
-        </div>
-      </div>
-    """
+# ---------- Canonical bank paths (7/8 will reuse these) ----------
+BANK_DIR = os.path.join(DATA_DIR, "bank")
+os.makedirs(BANK_DIR, exist_ok=True)
 
-    # The main tutor panel + suggestion rail
-    # The POST target remains /tutor and the field name remains "q" so your existing handler continues to work.
-    content = f"""
-    <div class="container">
-      <div class="row g-4">
+ITEMS_JSONL = os.path.join(BANK_DIR, "items.jsonl")
+INDEX_JSON   = os.path.join(BANK_DIR, "index.json")   # dedup index: {dedup_key: 1}
+SOURCES_JSON = os.path.join(BANK_DIR, "sources.json") # optional metadata
 
-        <!-- Left: Tutor main panel -->
-        <div class="col-lg-8">
-          {welcome_html}
-          <div class="card shadow-sm">
-            <div class="card-header bg-primary text-white">
-              <h3 class="mb-0"><i class="bi bi-chat-dots me-2"></i>Tutor</h3>
-            </div>
-            <div class="card-body">
-              <form id="tutor-form" method="POST" action="/tutor">
-                <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-                <div class="mb-3">
-                  <label for="tutor-q" class="form-label">Your question</label>
-                  <textarea class="form-control" id="tutor-q" name="q" rows="4" placeholder="Ask about a CPP topic… (e.g., ‘Explain Crime Prevention through Environmental Design (CPTED) with a real-world example.’)" required></textarea>
-                </div>
-                <div class="d-flex gap-2">
-                  <button class="btn btn-primary" type="submit"><i class="bi bi-send me-1"></i>Ask Tutor</button>
-                  <a class="btn btn-outline-secondary" href="/flashcards"><i class="bi bi-collection me-1"></i>Flashcards</a>
-                  <a class="btn btn-outline-secondary" href="/mock"><i class="bi bi-clipboard-check me-1"></i>Mock Exam</a>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-
-        <!-- Right: Suggested questions -->
-        <div class="col-lg-4">
-          <div class="card shadow-sm">
-            <div class="card-header bg-dark text-white d-flex align-items-center">
-              <i class="bi bi-lightbulb me-2"></i><span>Suggestions</span>
-            </div>
-            <div class="card-body">
-              <div id="suggestions" class="list-group small">
-                <!-- JS will inject 4 items -->
-              </div>
-              <div class="form-text mt-2">Click any suggestion to auto-ask Tutor.</div>
-            </div>
-          </div>
-        </div>
-
-      </div>
-    </div>
-
-    <!-- STABILITY: simple JS (no new deps). Four rotating suggestions + auto-submit on click -->
-    <script>
-    (function() {{
-      // A larger pool to keep things fresh; feel free to expand safely later.
-      const SUGGESTIONS_POOL = [
-        "Give me a 5-minute overview of CPP Domain 1 (Security Principles and Practices).",
-        "Explain CPTED with a concise example I could use at work.",
-        "What’s the difference between threat, vulnerability, and risk? Provide a quick table.",
-        "Walk me through a basic incident response plan for a data breach.",
-        "How do I build a qualitative risk matrix for a corporate office?",
-        "Summarize key steps in a professional security investigation (Domain 3).",
-        "Compare access control models (MAC, DAC, RBAC) with examples.",
-        "Create 5 practice questions on physical security (Domain 2) with brief answers.",
-        "Help me memorize the steps of a business impact analysis (BIA).",
-        "What are effective controls against tailgating in buildings?",
-        "Draft a short security awareness checklist for new employees.",
-        "Explain the difference between business continuity and disaster recovery.",
-        "How should I evaluate a new video surveillance (CCTV) design?",
-        "Outline a vendor due diligence checklist for information security.",
-        "Give me a scenario-based question about executive protection planning.",
-        "What metrics (KPIs) matter for a corporate security program?"
-      ];
-
-      // State
-      const shown = new Set();
-      const suggestionsEl = document.getElementById('suggestions');
-      const form = document.getElementById('tutor-form');
-      const input = document.getElementById('tutor-q');
-
-      function randPick(exclude) {{
-        // pick a suggestion not currently shown
-        let tries = 0;
-        while (tries < 50) {{
-          const idx = Math.floor(Math.random() * SUGGESTIONS_POOL.length);
-          const text = SUGGESTIONS_POOL[idx];
-          if (!exclude.has(text)) return text;
-          tries++;
-        }}
-        // fallback if pool is too small
-        return SUGGESTIONS_POOL[Math.floor(Math.random() * SUGGESTIONS_POOL.length)];
-      }}
-
-      function makeItem(text) {{
-        const a = document.createElement('a');
-        a.href = "#";
-        a.className = "list-group-item list-group-item-action";
-        a.textContent = text;
-        a.addEventListener('click', function(ev) {{
-          ev.preventDefault();
-          // Auto-fill + submit
-          input.value = text;
-          // Replace this suggestion immediately for a fresh feel
-          shown.delete(text);
-          const replacement = randPick(shown);
-          shown.add(replacement);
-          a.textContent = replacement;
-          // Now submit the question
-          form.submit();
-        }});
-        return a;
-      }}
-
-      function bootstrapSuggestions() {{
-        // clear & seed 4 unique
-        suggestionsEl.innerHTML = "";
-        shown.clear();
-        for (let i = 0; i < 4; i++) {{
-          const s = randPick(shown);
-          shown.add(s);
-          suggestionsEl.appendChild(makeItem(s));
-        }}
-      }}
-
-      bootstrapSuggestions();
-    }})();
-    </script>
-    """
-
-    return base_layout("Tutor", content)
-
-# Keep your existing POST handler signature and behavior.
-# If your original POST function name differs, reuse that name and replace only its body if needed.
-@app.post("/tutor", endpoint="sec6_tutor_post")
-def sec6_tutor_post():
-    # STABILITY: honor CSRF the same way as before
-    if not _csrf_ok():
-        abort(403)
-
-    # Your existing processing likely reads the field 'q', talks to OpenAI (when configured),
-    # logs the attempt, and renders a response. We keep that contract intact.
-    q = (request.form.get("q") or "").strip()
-
-    # Graceful offline fallback if OpenAI isn’t configured/available — keep your prior logic.
-    answer = ""
+# ---------- Helper: atomic JSON write (reuses earlier pattern if present) ----------
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write bytes atomically (path.tmp -> fsync -> replace)."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_", dir=d)
     try:
-        answer = _tutor_answer(q)  # <-- Call your existing helper that generates an answer (LLM or fallback).
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
     except Exception:
-        # Minimal safe fallback; you can keep your prior richer behavior if it exists.
-        answer = "Tutor is temporarily unavailable. Please try again, or use Flashcards / Mock Exam in the meantime."
+        try:
+            os.unlink(tmp)
+        except Exception:
+            pass
+        raise
 
-    # Basic render (reuse your existing renderer if you have one)
-    safe_q = html.escape(q)
-    safe_a = answer if isinstance(answer, str) else html.escape(str(answer))
+def _atomic_write_json(path: str, obj) -> None:
+    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    _atomic_write_bytes(path, data)
 
-    result_html = f"""
-    <div class="container">
-      <div class="row g-4">
-        <div class="col-lg-8">
-          <div class="card shadow-sm">
-            <div class="card-header bg-primary text-white">
-              <h3 class="mb-0"><i class="bi bi-chat-dots me-2"></i>Tutor</h3>
-            </div>
-            <div class="card-body">
-              <div class="mb-3">
-                <div class="text-muted small mb-1">Your question</div>
-                <div class="p-2 border rounded">{safe_q or '<em>(empty)</em>'}</div>
-              </div>
-              <div class="mb-3">
-                <div class="text-muted small mb-1">Tutor</div>
-                <div class="p-3 border rounded bg-light">{safe_a}</div>
-              </div>
-              <a class="btn btn-outline-primary" href="/tutor"><i class="bi bi-arrow-left-short me-1"></i>Ask another</a>
-            </div>
-          </div>
-        </div>
+# ---------- Helper: safe append to JSONL with fsync ----------
+def _append_jsonl(path: str, objs: List[dict]) -> None:
+    if not objs:
+        return
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    # Open in append-binary and fsync; this is the safest without external locks.
+    with open(path, "ab") as f:
+        for o in objs:
+            line = (json.dumps(o, ensure_ascii=False) + "\n").encode("utf-8")
+            f.write(line)
+        f.flush()
+        os.fsync(f.fileno())
 
-        <!-- Keep the suggestion rail visible even on the result page -->
-        <div class="col-lg-4">
-          <div class="card shadow-sm">
-            <div class="card-header bg-dark text-white d-flex align-items-center">
-              <i class="bi bi-lightbulb me-2"></i><span>Suggestions</span>
-            </div>
-            <div class="card-body">
-              <div class="list-group small" id="suggestions"></div>
-              <div class="form-text mt-2">Click any suggestion to ask Tutor immediately.</div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
+# ---------- Dedup normalization ----------
+def _normalize_text(s: str) -> str:
+    # Minimal but effective: lowercase, strip, collapse whitespace.
+    # Keep punctuation (security questions may rely on symbols).
+    return " ".join(str(s or "").lower().strip().split())
 
-    <!-- Same JS module to seed suggestions and auto-submit -->
-    <script>
-    (function() {{
-      const SUGGESTIONS_POOL = [
-        "Give me a 5-minute overview of CPP Domain 1 (Security Principles and Practices).",
-        "Explain CPTED with a concise example I could use at work.",
-        "What’s the difference between threat, vulnerability, and risk? Provide a quick table.",
-        "Walk me through a basic incident response plan for a data breach.",
-        "How do I build a qualitative risk matrix for a corporate office?",
-        "Summarize key steps in a professional security investigation (Domain 3).",
-        "Compare access control models (MAC, DAC, RBAC) with examples.",
-        "Create 5 practice questions on physical security (Domain 2) with brief answers.",
-        "Help me memorize the steps of a business impact analysis (BIA).",
-        "What are effective controls against tailgating in buildings?",
-        "Draft a short security awareness checklist for new employees.",
-        "Explain the difference between business continuity and disaster recovery.",
-        "How should I evaluate a new video surveillance (CCTV) design?",
-        "Outline a vendor due diligence checklist for information security.",
-        "Give me a scenario-based question about executive protection planning.",
-        "What metrics (KPIs) matter for a corporate security program?"
-      ];
-
-      const container = document.getElementById('suggestions');
-      if (!container) return;
-
-      function randPick(exclude) {{
-        let tries = 0;
-        while (tries < 50) {{
-          const idx = Math.floor(Math.random() * SUGGESTIONS_POOL.length);
-          const t = SUGGESTIONS_POOL[idx];
-          if (!exclude.has(t)) return t;
-          tries++;
-        }}
-        return SUGGESTIONS_POOL[Math.floor(Math.random() * SUGGESTIONS_POOL.length)];
-      }}
-
-      function addRow(text) {{
-        const a = document.createElement('a');
-        a.href = "#";
-        a.className = "list-group-item list-group-item-action";
-        a.textContent = text;
-        a.addEventListener('click', function(ev) {{
-          ev.preventDefault();
-          // Build and submit a minimal form to POST /tutor with CSRF baked into the page session cookie.
-          const f = document.createElement('form');
-          f.method = "POST";
-          f.action = "/tutor";
-
-          const ta = document.createElement('textarea');
-          ta.name = "q";
-          ta.value = text;
-          f.appendChild(ta);
-
-          // Include CSRF token if your app expects a form field (cookie-based double-submit).
-          try {{
-            const csrfInput = document.createElement('input');
-            csrfInput.type = "hidden";
-            csrfInput.name = "csrf_token";
-            // If you use a cookie-based token, leaving this empty is fine; otherwise you can inject via a data attribute.
-            csrfInput.value = "";
-            f.appendChild(csrfInput);
-          }} catch(e) {{}}
-
-          document.body.appendChild(f);
-          f.submit();
-        }});
-        container.appendChild(a);
-      }}
-
-      const shown = new Set();
-      for (let i = 0; i < 4; i++) {{
-        const s = randPick(shown);
-        shown.add(s);
-        addRow(s);
-      }}
-    }})();
-    </script>
+def _dedup_key(item: dict) -> str:
     """
+    Build a deterministic key to prevent duplicates even if uploaded again:
+    includes type, domain, normalized stem, and (for MCQ) normalized options.
+    """
+    t = _normalize_text(item.get("type", ""))
+    d = _normalize_text(item.get("domain", ""))
+    stem = _normalize_text(item.get("stem", ""))
 
-    return base_layout("Tutor", result_html)
-# ========================= END SECTION 6/8 =========================
+    parts = [f"type={t}", f"domain={d}", f"stem={stem}"]
 
+    # Include options for MCQ/Scenario if present
+    opts = item.get("options")
+    if isinstance(opts, list) and opts:
+        norm_opts = [ _normalize_text(x) for x in opts ]
+        parts.append("options=" + "|".join(norm_opts))
+
+    # If True/False, include normalized answer
+    ans = item.get("answer")
+    if isinstance(ans, str):
+        parts.append("answer=" + _normalize_text(ans))
+
+    raw = "\n".join(parts).encode("utf-8")
+    return hashlib.sha256(raw).hexdigest()
+
+# ---------- Index load/save ----------
+def _load_index() -> Dict[str, int]:
+    try:
+        with open(INDEX_JSON, "r", encoding="utf-8") as f:
+            obj = json.load(f) or {}
+            if isinstance(obj, dict):
+                return {k: int(v) for k, v in obj.items()}
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        logger.warning("INDEX read failed: %r", e)
+    return {}
+
+def _save_index(idx: Dict[str, int]) -> None:
+    _atomic_write_json(INDEX_JSON, idx)
+
+# ---------- Canonical loader used by Section 7/8 ----------
+def load_all_items() -> List[dict]:
+    items: List[dict] = []
+
+    def _read_jsonl(path: str):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            items.append(obj)
+                    except Exception:
+                        continue
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.warning("Could not read %s: %r", path, e)
+
+    # Primary file
+    _read_jsonl(ITEMS_JSONL)
+
+    # Any other *.jsonl files in bank/ (merging additional sources)
+    for p in glob.glob(os.path.join(BANK_DIR, "*.jsonl")):
+        if os.path.abspath(p) == os.path.abspath(ITEMS_JSONL):
+            continue
+        _read_jsonl(p)
+
+    return items
+
+# ---------- Public stats (per domain/type) for Admin ----------
+def _stats(items: List[dict]) -> Dict[str, Dict[str, int]]:
+    result: Dict[str, Dict[str, int]] = {}
+    for it in items:
+        d = it.get("domain", "unknown")
+        t = str(it.get("type", "")).lower()
+        bucket = result.setdefault(d, {})
+        bucket[t] = bucket.get(t, 0) + 1
+    return result
+
+# ---------- ADMIN UPLOAD API ----------
+try:
+    app  # noqa: F821
+    from flask import request, jsonify
+    try:
+        ADMIN_UPLOAD_TOKEN  # noqa: F821
+    except NameError:
+        ADMIN_UPLOAD_TOKEN = os.environ.get("ADMIN_UPLOAD_TOKEN", "")
+
+    MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", "5242880"))  # 5 MB default
+    ACCEPTED_MIME = {"application/json", "application/x-ndjson", "text/plain"}
+
+    def _admin_auth_ok() -> bool:
+        tok = request.headers.get("X-Admin-Token", "")
+        return bool(ADMIN_UPLOAD_TOKEN) and tok == ADMIN_UPLOAD_TOKEN
+
+    def _parse_upload_payload() -> Tuple[List[dict], List[str]]:
+        """
+        Accept either:
+          - multipart/form-data with a 'file' field (JSON or JSONL/NDJSON)
+          - raw JSON (list or object) in request.data
+          - raw NDJSON in text/plain
+        Returns (items, errors)
+        """
+        errors: List[str] = []
+        raw: bytes = b""
+
+        # Multipart path
+        if request.files:
+            f = request.files.get("file")
+            if not f:
+                return [], ["missing file"]
+            stream = f.stream.read()
+            if len(stream) > MAX_UPLOAD_BYTES:
+                return [], [f"file too large (> {MAX_UPLOAD_BYTES} bytes)"]
+            raw = stream
+        else:
+            # Raw body
+            body = request.get_data(cache=False, as_text=False)
+            if len(body) > MAX_UPLOAD_BYTES:
+                return [], [f"payload too large (> {MAX_UPLOAD_BYTES} bytes)"]
+            raw = body
+
+        # Try JSON (array or single object)
+        try:
+            obj = json.loads(raw.decode("utf-8"))
+            if isinstance(obj, list):
+                items = [x for x in obj if isinstance(x, dict)]
+            elif isinstance(obj, dict):
+                # Could be {"items":[...]}
+                if "items" in obj and isinstance(obj["items"], list):
+                    items = [x for x in obj["items"] if isinstance(x, dict)]
+                else:
+                    items = [obj]
+            else:
+                items = []
+            if items:
+                return items, errors
+        except Exception:
+            pass
+
+        # Try NDJSON/JSONL
+        items: List[dict] = []
+        try:
+            for line in raw.decode("utf-8").splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    o = json.loads(line)
+                    if isinstance(o, dict):
+                        items.append(o)
+                except Exception:
+                    continue
+        except Exception as e:
+            errors.append(f"decode error: {e!r}")
+
+        return items, errors
+
+    @app.post("/api/admin/items/upload")
+    def api_admin_items_upload():
+        if not _admin_auth_ok():
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+
+        items, errs = _parse_upload_payload()
+        if errs:
+            return jsonify({"ok": False, "error": "; ".join(errs)}), 400
+        if not items:
+            return jsonify({"ok": False, "error": "no items parsed"}), 400
+
+        # Normalize, dedup, and minimal validation
+        idx = _load_index()
+        new_items: List[dict] = []
+        skipped = 0
+
+        for it in items:
+            # Minimal validation
+            t = (it.get("type") or "").strip().lower()
+            d = it.get("domain")
+            stem = it.get("stem")
+            if t not in ("mcq", "tf", "scenario"):
+                # normalize aliases if any
+                if t in ("truefalse", "true_false", "boolean"):
+                    t = "tf"
+                    it["type"] = "tf"
+                else:
+                    # skip unknown types
+                    skipped += 1
+                    continue
+            if not d or not stem:
+                skipped += 1
+                continue
+
+            # Normalize fields
+            it["type"] = t
+            it["domain"] = str(d).strip()
+            it["stem"] = str(stem).strip()
+
+            # Ensure options exist for MCQ/Scenario
+            if t in ("mcq", "scenario"):
+                opts = it.get("options")
+                if not (isinstance(opts, list) and opts):
+                    skipped += 1
+                    continue
+
+            key = _dedup_key(it)
+            if key in idx:
+                skipped += 1
+                continue
+
+            # Mark and collect
+            idx[key] = 1
+            # Attach source marker if provided
+            src = request.headers.get("X-Source-Name", "").strip()
+            if src:
+                it.setdefault("sources", [])
+                if src not in it["sources"]:
+                    it["sources"].append(src)
+            new_items.append(it)
+
+        # Persist new items and updated index
+        if new_items:
+            _append_jsonl(ITEMS_JSONL, new_items)
+            _save_index(idx)
+
+        # Optional: update a simple sources.json tally
+        try:
+            sources = {}
+            if os.path.exists(SOURCES_JSON):
+                with open(SOURCES_JSON, "r", encoding="utf-8") as f:
+                    prev = json.load(f) or {}
+                    if isinstance(prev, dict):
+                        sources = prev
+            src_name = request.headers.get("X-Source-Name", "").strip() or "unspecified"
+            sources[src_name] = int(sources.get(src_name, 0)) + len(new_items)
+            _atomic_write_json(SOURCES_JSON, sources)
+        except Exception as e:
+            logger.warning("sources.json update failed: %r", e)
+
+        return jsonify({
+            "ok": True,
+            "added": len(new_items),
+            "skipped": skipped,
+            "total_bank": len(load_all_items())
+        }), 200
+
+    @app.get("/api/admin/items/stats")
+    def api_admin_items_stats():
+        if not _admin_auth_ok():
+            return jsonify({"ok": False, "error": "Unauthorized"}), 401
+        items = load_all_items()
+        return jsonify({
+            "ok": True,
+            "count": len(items),
+            "by_domain_type": _stats(items)
+        }), 200
+
+    # CSRF exemption if Flask-WTF CSRF is present (matches earlier rule style)
+    try:
+        _csrf_obj = globals().get("csrf")
+        if _csrf_obj is not None:
+            _csrf_obj.exempt(api_admin_items_upload)
+            _csrf_obj.exempt(api_admin_items_stats)
+    except Exception:
+        pass
+
+except NameError:
+    # app not defined yet (very early import); in your file order app exists already
+    pass
+
+# =====================================================================
+# SECTION 6/8 — CONTENT BANK & ADMIN UPLOAD
+# END OF SECTION 6/8
+# =====================================================================
 
 
 # =====================================================================
@@ -2924,6 +2958,7 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
 
 
