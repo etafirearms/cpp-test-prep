@@ -2711,19 +2711,18 @@ def sec7_tutor_page():
     return base_layout("Tutor", body)
 #=====================================================#
 # =========================
-# SECTION 8/8 — Public Welcome, Signup, Login & Logout (final glue)
+# SECTION 8/8 — Public Welcome, Signup, Login & Logout (updated to retain login after disclaimer)
 # Route ownership (unique in app):
 #   /welcome [GET, POST]
 #   /signup  [GET, POST]
-#   /login   [GET, POST]  (endpoint name must remain sec1_login_page / sec1_login_post)
+#   /login   [GET, POST]  (endpoint names: sec1_login_page / sec1_login_post)
 #   /logout  [GET]
 #
-# NOTES
-# - This section provides the onboarding/welcome gate with a disclaimer checkbox.
-# - Users who accept on /welcome are remembered via session; if logged in we persist to users.json.
-# - Signup requires agreeing to terms (checkbox) and persists that choice.
-# - After login we mirror stored tos_ok from the user record into session, so you won’t bounce back to /welcome.
-# - We do NOT redefine "/" (Home) because it exists in Section 1. A small before_request gate below protects all routes.
+# WHAT CHANGED (fix for “logs in then returns to welcome”):
+# - If a user accepts the disclaimer first (as a guest) and THEN logs in, we now persist that
+#   acceptance to their user record during login so they won’t bounce back to /welcome.
+# - If a user had previously accepted (stored in users.json), we mirror it into the session on login.
+# - Session is permanent so the browser keeps you signed in unless you log out.
 # =========================
 
 # ---------- Helpers ----------
@@ -2734,14 +2733,11 @@ def _safe_next(next_val: str | None) -> str:
     return "/"
 
 def _auth_set_session(user: dict) -> None:
-    # Persist identity
     session["uid"] = user.get("id", "")
     session["email"] = user.get("email", "")
-    # Mirror ToS acceptance from stored user (prevents loop back to /welcome)
     if user.get("tos_ok"):
         session["tos_ok"] = True
-    # Make session persistent across browser restarts (uses Flask default lifetime ~31d)
-    session.permanent = True
+    session.permanent = True  # persist across restarts
 
 def _auth_clear_session() -> None:
     session.pop("uid", None)
@@ -2766,9 +2762,9 @@ def sec8_welcome():
         if not accepted:
             err = "Please confirm you understand and agree to the disclaimer and terms."
         else:
-            # Set session flag
+            # Mark session as accepted
             session["tos_ok"] = True
-            # If user is logged in, persist this decision on their record
+            # If logged in, persist to user record
             u = _find_user(session.get("email", "") or "")
             if u:
                 try:
@@ -2829,7 +2825,6 @@ def sec8_welcome():
 # ---------- Global gate: require disclaimer acceptance (except safe paths) ----------
 @app.before_request
 def sec8_tos_gate():
-    # Always allow assets and known public endpoints
     p = request.path or "/"
     if (
         p.startswith("/static/") or
@@ -2838,15 +2833,11 @@ def sec8_tos_gate():
     ):
         return None
 
-    # Allow POST to /login and /signup as well
     if request.method == "POST" and p in ("/login", "/signup"):
         return None
 
-    # If no acceptance yet, redirect to welcome, preserving original next=...
-    if not session.get("tos_ok"):
-        # Avoid redirect loops for API JSON posts by only redirecting on GET/HEAD
-        if request.method in ("GET", "HEAD"):
-            return redirect(url_for("sec8_welcome", next=request.full_path if request.query_string else p))
+    if not session.get("tos_ok") and request.method in ("GET", "HEAD"):
+        return redirect(url_for("sec8_welcome", next=request.full_path if request.query_string else p))
     return None
 
 # ---------- Signup ----------
@@ -2894,23 +2885,20 @@ def sec8_signup_post():
 
     ok, msg = validate_password(pw)
     if not email or not ok or not agree:
-        # Re-render minimal error page (UI style unchanged)
         err = msg or "Please provide a valid email, an 8+ char password, and accept the terms."
         return base_layout("Sign Up", f"<div class='container'><div class='row justify-content-center'><div class='col-md-6'><div class='alert alert-warning mt-3'>{html.escape(err)}</div><a class='btn btn-outline-secondary' href='/signup'>Back</a></div></div></div>")
 
     if _find_user(email):
         return base_layout("Sign Up", f"<div class='container'><div class='row justify-content-center'><div class='col-md-6'><div class='alert alert-warning mt-3'>An account with that email already exists.</div><a class='btn btn-outline-secondary' href='/login'>Sign In</a></div></div></div>")
 
-    # Create user
     new_user = {
         "id": str(uuid.uuid4()),
         "email": email,
         "password_hash": generate_password_hash(pw),
         "subscription": "inactive",
         "usage": {"monthly": {}},
-        "tos_ok": True  # persist agreement
+        "tos_ok": True
     }
-    # Persist to users.json
     try:
         users = _users_all()
         users.append(new_user)
@@ -2918,11 +2906,8 @@ def sec8_signup_post():
     except Exception:
         return base_layout("Sign Up", "<div class='container'><div class='row justify-content-center'><div class='col-md-6'><div class='alert alert-danger mt-3'>Could not create the account. Please try again.</div><a class='btn btn-outline-secondary' href='/signup'>Back</a></div></div></div>")
 
-    # Set session
     _auth_set_session(new_user)
-    # Also mark disclaimer accepted in session
     session["tos_ok"] = True
-
     try:
         _log_event(_user_id(), "auth.signup", {})
     except Exception:
@@ -2971,7 +2956,7 @@ def sec1_login_post():
     if not _csrf_ok():
         abort(403)
 
-    # Basic rate limit (per-IP): 1 attempt / 2 seconds
+    # Simple rate limit
     rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
     if not _rate_ok(f"login:{rip}", per_sec=0.5):
         nxt = _safe_next(request.form.get("next"))
@@ -2985,7 +2970,16 @@ def sec1_login_post():
     if not u or not check_password_hash(u.get("password_hash",""), pw):
         return redirect(url_for("sec1_login_page", next=nxt, error="1"))
 
-    # Success: set session (includes mirroring tos_ok + permanent)
+    # If the user accepted the disclaimer earlier in THIS session (as guest),
+    # persist that acceptance to their account now to avoid the welcome loop.
+    if session.get("tos_ok"):
+        try:
+            _update_user(u["id"], {"tos_ok": True})
+            u["tos_ok"] = True
+        except Exception:
+            pass
+
+    # Set session (mirrors persisted tos_ok into session and makes session permanent)
     _auth_set_session(u)
 
     try:
@@ -2993,7 +2987,7 @@ def sec1_login_post():
     except Exception:
         pass
 
-    # If user previously accepted disclaimer, ensure session flag reflects it; otherwise send them to /welcome
+    # Respect stored acceptance if present; otherwise take them to /welcome to accept once.
     if u.get("tos_ok"):
         session["tos_ok"] = True
         return redirect(nxt or "/")
@@ -3010,3 +3004,4 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
