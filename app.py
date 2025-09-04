@@ -2295,249 +2295,275 @@ def sec6_tutor_post():
 
 
 
-# SECTION 7/8 — Tutor (Chat Assistant) + OpenAI integration (safe, optional)
-# Route ownership:
-#   /tutor  [GET, POST]
-#
-# Changes in this section:
-# - FIX: Removed backslashes inside f-string expressions by precomputing newline -> <br> replacement.
-# - Safe optional import of 'requests'; graceful fallback if missing.
+# =====================================================================
+# SECTION 7/8 — BANK SELECTION HELPERS (NO UI CHANGES)
+# START OF SECTION 7/8
+# =====================================================================
 
-# ---------- Optional dependency (safe import) ----------
+# STABILITY: imports
+import os, json, math, random
+from typing import Iterable, List, Dict, Tuple
+
+# STABILITY: reuse existing logger and BANK_DIR/ITEMS_JSONL from Section 6/8
 try:
-    import requests  # type: ignore
-except Exception:
-    requests = None  # type: ignore
+    logger  # noqa: F821
+except NameError:  # pragma: no cover
+    import logging
+    logger = logging.getLogger("app")
 
-# ---------- OpenAI readiness ----------
-def _openai_ready() -> bool:
-    return bool(OPENAI_API_KEY and OPENAI_CHAT_MODEL and OPENAI_API_BASE)
+# ---------- Domain weights (CPP weighting support) ----------
+# Admin may provide a weights file mapping domain -> weight (any positive numbers).
+# Example:
+# {
+#   "Domain 1 - Security Principles and Practices": 25,
+#   "Domain 2 - Business Principles": 15,
+#   ...
+# }
+_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")  # BANK_DIR from Section 6/8
 
-# ---------- Tutor system prompt ----------
-def _tutor_system_prompt() -> str:
-    return (
-        "You are CPP Exam Prep Tutor. Help the user study for the ASIS CPP domains. "
-        "Explain clearly, use step-by-step reasoning in a concise way, and when helpful, "
-        "give small examples or short bullet points. Do not provide legal, medical, or safety advice. "
-        "Do not claim affiliation with ASIS. If the user asks for real CPP exam questions, refuse and "
-        "offer to create fresh practice items instead. Keep answers under ~200 words unless the user asks for more."
-    )
+def _load_domain_weights(allowed_domains: Iterable[str]) -> Dict[str, float]:
+    """Load domain weights from bank/weights.json if present; fallback to uniform."""
+    weights = {}
+    try:
+        if os.path.exists(_WEIGHTS_FILE):
+            with open(_WEIGHTS_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f) or {}
+                for d in allowed_domains:
+                    v = raw.get(d)
+                    if isinstance(v, (int, float)) and v > 0:
+                        weights[d] = float(v)
+    except Exception as e:
+        logger.warning("Could not read weights.json: %r", e)
 
-# ---------- Session history helpers ----------
-_TUTOR_SESS_KEY = "tutor_hist_v1"
-_TUTOR_MAX_TURNS = 12   # user+assistant pairs (kept small to limit payload)
-_TUTOR_MAX_INPUT_CHARS = 2000
+    # Fallback to uniform over allowed domains
+    if not weights:
+        weights = {d: 1.0 for d in allowed_domains}
 
-def _tutor_get_history() -> list[dict]:
-    hist = session.get(_TUTOR_SESS_KEY) or []
-    out = []
-    for m in hist[-(2*_TUTOR_MAX_TURNS):]:
-        role = m.get("role") if isinstance(m, dict) else ""
-        content = m.get("content") if isinstance(m, dict) else ""
-        if role in ("user", "assistant") and isinstance(content, str):
-            out.append({"role": role, "content": content})
+    # Normalize to sum 1.0
+    total = sum(weights.values()) or 1.0
+    return {k: (v / total) for k, v in weights.items()}
+
+# ---------- Utility: pull all items from Section 6/8 ----------
+def _bank_all_items() -> List[dict]:
+    try:
+        return load_all_items()  # from Section 6/8
+    except Exception as e:
+        logger.error("load_all_items() failed: %r", e)
+        return []
+
+# ---------- Filters ----------
+def _filter_by_domain(items: List[dict], domain: str) -> List[dict]:
+    if not domain or domain.lower() in ("random", "mixed", "any"):
+        return items[:]  # all domains
+    out = [it for it in items if it.get("domain") == domain]
     return out
 
-def _tutor_save_history(hist: list[dict]) -> None:
-    session[_TUTOR_SESS_KEY] = hist[-(2*_TUTOR_MAX_TURNS):]
+def _filter_by_types(items: List[dict], allowed_types: Iterable[str]) -> List[dict]:
+    allowed = set([t.lower() for t in allowed_types])
+    return [it for it in items if str(it.get("type", "")).lower() in allowed]
 
-def _tutor_append(role: str, content: str) -> None:
-    hist = _tutor_get_history()
-    hist.append({"role": role, "content": content})
-    _tutor_save_history(hist)
+# ---------- Type mix targets (50% MCQ, 25% TF, 25% Scenario) ----------
+_TYPE_TARGETS = {"mcq": 0.50, "tf": 0.25, "scenario": 0.25}
+# If bank lacks enough of a type, we degrade gracefully and fill with others.
 
-# ---------- OpenAI call (server-side) ----------
-def _tutor_call_openai(user_message: str, prior: list[dict]) -> tuple[bool, str]:
+def _compute_type_needs(total: int, available_counts: Dict[str, int]) -> Dict[str, int]:
+    """Given a total and what the bank has, decide how many of each type to take."""
+    # Initial ideal targets (rounded down)
+    wants = {t: int(math.floor(_TYPE_TARGETS[t] * total)) for t in _TYPE_TARGETS}
+    # Fix rounding gaps by adding to the largest buckets until sum == total
+    gap = total - sum(wants.values())
+    if gap > 0:
+        # add to types in priority order (mcq, tf, scenario) to maintain rule
+        for t in ("mcq", "tf", "scenario"):
+            if gap <= 0:
+                break
+            wants[t] += 1
+            gap -= 1
+
+    # Cap by availability, record shortage
+    shortage = 0
+    for t, need in list(wants.items()):
+        have = int(available_counts.get(t, 0))
+        if need > have:
+            shortage += (need - have)
+            wants[t] = have
+
+    if shortage > 0:
+        # Redistribute shortage into any types with spare items
+        # priority: mcq -> tf -> scenario
+        for t in ("mcq", "tf", "scenario"):
+            if shortage <= 0:
+                break
+            spare = max(0, available_counts.get(t, 0) - wants.get(t, 0))
+            if spare > 0:
+                take = min(spare, shortage)
+                wants[t] += take
+                shortage -= take
+
+    return wants
+
+# ---------- Random helpers ----------
+_RNG = random.Random()  # independent RNG for deterministic tests if needed
+
+def _sample(items: List[dict], k: int) -> List[dict]:
+    """Return up to k items randomly without replacement (k may exceed len)."""
+    if k <= 0:
+        return []
+    if k >= len(items):
+        # Shuffle copy to avoid side effects
+        copy = items[:]
+        _RNG.shuffle(copy)
+        return copy
+    return _RNG.sample(items, k)
+
+# ---------- Core picker ----------
+def pick_from_bank(domain: str, total: int) -> List[dict]:
     """
-    Returns (ok, reply_text). Never raises to the view.
-    Uses Chat Completions for broad compatibility.
+    Select questions from the bank honoring:
+      - specific domain if requested; otherwise weighted across domains (CPP weights)
+      - type distribution: 50% mcq, 25% tf, 25% scenario (with graceful fallback)
+    Returns a list of raw item dicts (unchanged shape from Section 6/8).
     """
-    if not _openai_ready():
-        return False, ("Tutor is offline: OpenAI is not configured on this environment. "
-                       "Set OPENAI_API_KEY/OPENAI_API_BASE/OPENAI_CHAT_MODEL to enable.")
+    all_items = _bank_all_items()
+    if not all_items:
+        logger.warning("Content bank is empty; returning no items")
+        return []
 
-    if requests is None:
-        return False, ("Tutor is offline: the 'requests' library is not available on this server. "
-                       "Please install it or disable Tutor.")
+    # Determine target pool by domain(s)
+    if not domain or domain.lower() in ("random", "mixed", "any"):
+        # Weighted selection across domains
+        # 1) Group items by domain
+        by_domain: Dict[str, List[dict]] = {}
+        for it in all_items:
+            d = it.get("domain", "unknown")
+            by_domain.setdefault(d, []).append(it)
 
-    msgs = [{"role": "system", "content": _tutor_system_prompt()}]
-    for m in prior[-(2*_TUTOR_MAX_TURNS):]:
-        if m.get("role") in ("user", "assistant"):
-            msgs.append({"role": m["role"], "content": m.get("content", "")})
-    msgs.append({"role": "user", "content": user_message})
+        allowed_domains = list(by_domain.keys())
+        weights = _load_domain_weights(allowed_domains)
 
-    url = (OPENAI_API_BASE.rstrip("/") + "/chat/completions")
-    headers = {
-        "Authorization": f"Bearer {OPENAI_API_KEY}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": OPENAI_CHAT_MODEL,
-        "messages": msgs,
-        "temperature": 0.2,
-        "top_p": 1.0,
-        "presence_penalty": 0.0,
-        "frequency_penalty": 0.2,
-        "max_tokens": 600,
-    }
+        # 2) Compute how many per domain (probabilistic rounding)
+        #    We draw one by one according to weights to keep sampling fair.
+        selected: List[dict] = []
+        if total <= 0:
+            return selected
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=20)  # type: ignore
-        if resp.status_code != 200:
-            logger.warning("OpenAI error %s: %s", resp.status_code, resp.text[:500])
-            return False, "I couldn't reach the tutor service just now. Please try again."
-        data = resp.json()
-        text = ""
-        try:
-            text = (data["choices"][0]["message"]["content"] or "").strip()
-        except Exception:
-            text = ""
-        if not text:
-            return False, "The tutor returned an empty response. Please try again."
-        return True, text
-    except Exception as e:
-        logger.warning("OpenAI call failed: %s", e)
-        return False, "Network error while contacting the tutor. Please try again."
+        domains = allowed_domains[:]
+        probs = [weights[d] for d in domains]
 
-# ---------- Render chat UI ----------
-def _tutor_chat_html(history: list[dict], banner: str = "") -> str:
+        # defensive: normalize
+        s = sum(probs) or 1.0
+        probs = [p / s for p in probs]
+
+        # Perform domain-level sampling with replacement on domain buckets,
+        # while also respecting type quotas later.
+        # We'll over-pick from domains first, then enforce type quotas.
+        domain_draws: List[str] = []
+        for _ in range(total * 2):  # overdraw pool; we’ll trim by type below
+            r = _RNG.random()
+            acc = 0.0
+            chosen = domains[-1]
+            for d, p in zip(domains, probs):
+                acc += p
+                if r <= acc:
+                    chosen = d
+                    break
+            # Only keep if domain still has items
+            if by_domain.get(chosen):
+                domain_draws.append(chosen)
+            if len(domain_draws) >= total:
+                break
+
+        pool: List[dict] = []
+        for d in domain_draws:
+            bucket = by_domain.get(d) or []
+            if bucket:
+                pool.append(_RNG.choice(bucket))
+
+        if not pool:
+            pool = all_items[:]  # extreme fallback
+
+    else:
+        # Specific domain
+        pool = _filter_by_domain(all_items, domain)
+
+    # Enforce type distribution from pool
+    mcq_pool    = [it for it in pool if str(it.get("type","")).lower() == "mcq"]
+    tf_pool     = [it for it in pool if str(it.get("type","")).lower() == "tf"]
+    scen_pool   = [it for it in pool if str(it.get("type","")).lower() == "scenario"]
+
+    avail = {"mcq": len(mcq_pool), "tf": len(tf_pool), "scenario": len(scen_pool)}
+    wants = _compute_type_needs(max(0, int(total)), avail)
+
+    chosen: List[dict] = []
+    chosen.extend(_sample(mcq_pool, wants.get("mcq", 0)))
+    chosen.extend(_sample(tf_pool, wants.get("tf", 0)))
+    chosen.extend(_sample(scen_pool, wants.get("scenario", 0)))
+
+    # If we still fell short (e.g., small pool), fill from anything remaining
+    if len(chosen) < total:
+        leftovers = [it for it in pool if it not in chosen]
+        chosen.extend(_sample(leftovers, total - len(chosen)))
+
+    # Shuffle final set for fairness
+    _RNG.shuffle(chosen)
+    return chosen[:total]
+
+# ---------- Facade helpers for your routes (call these) ----------
+def get_flashcards_from_bank(domain: str, count: int) -> List[dict]:
     """
-    Render a simple, clean chat interface.
+    Return `count` items for flashcards. Caller can display:
+      - front: item['stem']
+      - back:  explanation or correct answer(s)
     """
-    # Build bubbles (FIX: precompute newline-><br> to avoid backslashes inside f-strings)
-    bubbles = []
-    for m in history:
-        role = m.get("role")
-        raw = (m.get("content", "") or "").strip()
-        escaped = html.escape(raw)
-        escaped_with_breaks = escaped.replace("\n", "<br>")
+    count = max(0, int(count))
+    items = pick_from_bank(domain, count)
+    return items
 
-        if not escaped_with_breaks:
-            continue
-
-        if role == "user":
-            bubbles.append(
-                f"""
-                <div class="d-flex justify-content-end my-2">
-                  <div class="p-2 rounded-3 border bg-light" style="max-width: 80%;">
-                    <div class="small text-muted mb-1">You</div>
-                    <div>{escaped_with_breaks}</div>
-                  </div>
-                </div>
-                """
-            )
-        else:
-            bubbles.append(
-                f"""
-                <div class="d-flex justify-content-start my-2">
-                  <div class="p-2 rounded-3 border" style="max-width: 80%; background:#fff;">
-                    <div class="small text-muted mb-1"><i class="bi bi-robot"></i> Tutor</div>
-                    <div>{escaped_with_breaks}</div>
-                  </div>
-                </div>
-                """
-            )
-    bubble_html = "".join(bubbles) or "<div class='text-muted'>No messages yet — ask the tutor anything related to your CPP prep.</div>"
-
-    csrf_val = csrf_token()
-    banner_html = f"<div class='alert alert-warning'>{html.escape(banner)}</div>" if banner else ""
-    return f"""
-    <div class="container"><div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-      <div class="card">
-        <div class="card-header bg-secondary text-white d-flex align-items-center justify-content-between">
-          <h3 class="mb-0"><i class="bi bi-chat-dots me-2"></i>Tutor</h3>
-          <form method="POST" class="m-0">
-            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-            <input type="hidden" name="action" value="reset"/>
-            <button class="btn btn-outline-light btn-sm" type="submit"><i class="bi bi-arrow-counterclockwise me-1"></i>Reset</button>
-          </form>
-        </div>
-        <div class="card-body">
-          {banner_html}
-          <div id="chat" class="mb-3" style="min-height: 200px;">{bubble_html}</div>
-          <form method="POST">
-            <input type="hidden" name="csrf_token" value="{csrf_val}"/>
-            <div class="mb-2">
-              <label class="form-label fw-semibold">Your message</label>
-              <textarea name="message" class="form-control" rows="3" maxlength="{_TUTOR_MAX_INPUT_CHARS}" placeholder="Ask about a concept, request a quick quiz, or get an explanation..." required></textarea>
-            </div>
-            <div class="d-flex align-items-center">
-              <button class="btn btn-primary" type="submit"><i class="bi bi-send me-1"></i>Send</button>
-              <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <div class="ms-auto small text-muted">Educational use only. No official affiliation.</div>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div></div></div>
+def get_quiz_questions_from_bank(domain: str, count: int) -> List[dict]:
     """
+    Return `count` items for a quiz session.
+    Items preserve the Section 6/8 shape so existing rendering can
+    use `.stem`, `.options`, `.answer`, `.type`, `.explanation`, `.sources`.
+    """
+    count = max(0, int(count))
+    items = pick_from_bank(domain, count)
+    return items
 
-# ---------- Route: Tutor ----------
-@app.route("/tutor", methods=["GET", "POST"], endpoint="sec7_tutor_page")
-@login_required
-def sec7_tutor_page():
-    # GET -> render current chat
-    if request.method == "GET":
-        banner = ""
-        if not _openai_ready():
-            banner = ("Tutor is running in limited mode because OpenAI is not configured. "
-                      "Set OPENAI_API_KEY/OPENAI_API_BASE/OPENAI_CHAT_MODEL to enable answers.")
-        body = _tutor_chat_html(_tutor_get_history(), banner=banner)
-        return base_layout("Tutor", body)
+def get_mock_questions_from_bank(domain: str, count: int) -> List[dict]:
+    """
+    Return `count` items for mock exam. Uses same selection rules.
+    """
+    count = max(0, int(count))
+    items = pick_from_bank(domain, count)
+    return items
 
-    # POST -> CSRF
-    if not _csrf_ok():
-        abort(403)
+# ---------- Optional: small sanity checker for admins ----------
+@app.get("/api/admin/items/dry-run-pick")
+def api_admin_dry_run_pick():
+    """Debug endpoint to visualize a pick without exposing answers to students."""
+    token_hdr = request.headers.get("X-Admin-Token", "")
+    if not ADMIN_UPLOAD_TOKEN or token_hdr != ADMIN_UPLOAD_TOKEN:
+        return {"ok": False, "error": "Unauthorized"}, 401
+    domain = request.args.get("domain", "random")
+    n = int(request.args.get("n", "20"))
+    items = pick_from_bank(domain, n)
+    # return only minimal info (no answers) for safety
+    preview = [{"domain": it.get("domain"), "type": it.get("type"), "stem": it.get("stem")} for it in items]
+    return {"ok": True, "picked": preview, "count": len(preview)}, 200
 
-    # Rate-limit per IP
-    rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
-    if not _rate_ok(f"tutor:{rip}", per_sec=0.5):   # 1 message / 2s
-        body = _tutor_chat_html(_tutor_get_history(), banner="You're sending messages too quickly. Please wait a moment.")
-        return base_layout("Tutor", body)
+# CSRF exemption for the admin dry-run (if CSRF is present)
+try:
+    _csrf_obj = globals().get("csrf")
+    if _csrf_obj is not None:
+        _csrf_obj.exempt(api_admin_dry_run_pick)
+except Exception:
+    pass
 
-    action = (request.form.get("action") or "").strip().lower()
-    if action == "reset":
-        _tutor_save_history([])
-        try:
-            _log_event(_user_id(), "tutor.reset", {})
-        except Exception:
-            pass
-        body = _tutor_chat_html([], banner="Chat has been reset.")
-        return base_layout("Tutor", body)
+# =====================================================================
+# SECTION 7/8 — BANK SELECTION HELPERS
+# END OF SECTION 7/8
+# =====================================================================
 
-    # Normal message
-    user_msg = (request.form.get("message") or "").strip()
-    if not user_msg:
-        body = _tutor_chat_html(_tutor_get_history(), banner="Please enter a message.")
-        return base_layout("Tutor", body)
-    if len(user_msg) > _TUTOR_MAX_INPUT_CHARS:
-        user_msg = user_msg[:_TUTOR_MAX_INPUT_CHARS]
-
-    # Append user first so it shows even if backend fails
-    _tutor_append("user", user_msg)
-
-    # Call OpenAI (or fallback)
-    ok, reply = _tutor_call_openai(user_msg, _tutor_get_history())
-    if not ok:
-        _tutor_append("assistant", reply)
-        try:
-            _log_event(_user_id(), "tutor.reply_error", {"msg_len": len(user_msg)})
-        except Exception:
-            pass
-        body = _tutor_chat_html(_tutor_get_history(), banner="Tutor responded with an error message.")
-        return base_layout("Tutor", body)
-
-    # Success path
-    _tutor_append("assistant", reply)
-    try:
-        _bump_usage("tutor", 1)
-        _log_event(_user_id(), "tutor.reply_ok", {"msg_len": len(user_msg), "reply_len": len(reply)})
-    except Exception:
-        pass
-
-    body = _tutor_chat_html(_tutor_get_history(), banner="")
-    return base_layout("Tutor", body)
-#=====================================================#
 # =========================
 # SECTION 8/8 — Public Welcome, Signup, Login & Logout (patch to stop “login → back to welcome” loop)
 # Drop-in replacement for your existing SECTION 8/8.
@@ -2845,4 +2871,5 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
