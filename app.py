@@ -2296,34 +2296,104 @@ def sec6_tutor_post():
 
 
 # =====================================================================
-# SECTION 7/8 — BANK SELECTION HELPERS (NO UI CHANGES)
+# =====================================================================
+# SECTION 7/8 — BANK SELECTION HELPERS (FIXED, SELF-CONTAINED)
 # START OF SECTION 7/8
 # =====================================================================
 
 # STABILITY: imports
-import os, json, math, random
+import os, json, math, random, io, glob
 from typing import Iterable, List, Dict, Tuple
 
-# STABILITY: reuse existing logger and BANK_DIR/ITEMS_JSONL from Section 6/8
+# STABILITY: reuse existing logger if present
 try:
     logger  # noqa: F821
 except NameError:  # pragma: no cover
     import logging
     logger = logging.getLogger("app")
 
+# STABILITY: DATA_DIR must exist from earlier env/config section
+try:
+    DATA_DIR  # noqa: F821
+except NameError:
+    # Last-resort fallback — matches earlier instructions
+    DATA_DIR = os.path.join(os.getcwd(), "data")
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# STABILITY: Define BANK_DIR here if not already defined by Section 6/8
+try:
+    BANK_DIR  # noqa: F821
+except NameError:
+    BANK_DIR = os.path.join(DATA_DIR, "bank")
+    os.makedirs(BANK_DIR, exist_ok=True)
+
+# Optional constant sometimes defined in Section 6/8; we won’t rely on it but keep it if present
+try:
+    ITEMS_JSONL  # noqa: F821
+except NameError:
+    ITEMS_JSONL = os.path.join(BANK_DIR, "items.jsonl")
+
+# ---------- Fallback loader if Section 6/8 didn't define load_all_items() ----------
+def _fallback_load_all_items() -> List[dict]:
+    """
+    Load all bank items from:
+      - bank/items.jsonl (preferred)
+      - any *.jsonl inside bank/ (merged)
+    Each line should be a JSON object with keys like:
+      type, domain, stem, options, answer, explanation, sources.
+    """
+    items: List[dict] = []
+
+    def _read_jsonl(path: str):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = json.loads(line)
+                        if isinstance(obj, dict):
+                            items.append(obj)
+                    except Exception:
+                        # skip bad lines; keep going
+                        continue
+        except FileNotFoundError:
+            return
+        except Exception as e:
+            logger.warning("Could not read %s: %r", path, e)
+
+    # 1) Primary file
+    _read_jsonl(ITEMS_JSONL)
+
+    # 2) Any other *.jsonl in bank dir (avoid double-reading items.jsonl)
+    for p in glob.glob(os.path.join(BANK_DIR, "*.jsonl")):
+        if os.path.abspath(p) == os.path.abspath(ITEMS_JSONL):
+            continue
+        _read_jsonl(p)
+
+    return items
+
+# Use existing load_all_items() from Section 6/8 if present; else fallback
+try:
+    load_all_items  # noqa: F821
+except NameError:
+    def load_all_items() -> List[dict]:  # type: ignore
+        return _fallback_load_all_items()
+
 # ---------- Domain weights (CPP weighting support) ----------
 # Admin may provide a weights file mapping domain -> weight (any positive numbers).
-# Example:
+# Example file: bank/weights.json
 # {
 #   "Domain 1 - Security Principles and Practices": 25,
 #   "Domain 2 - Business Principles": 15,
 #   ...
 # }
-_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")  # BANK_DIR from Section 6/8
+_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")
 
 def _load_domain_weights(allowed_domains: Iterable[str]) -> Dict[str, float]:
     """Load domain weights from bank/weights.json if present; fallback to uniform."""
-    weights = {}
+    weights: Dict[str, float] = {}
     try:
         if os.path.exists(_WEIGHTS_FILE):
             with open(_WEIGHTS_FILE, "r", encoding="utf-8") as f:
@@ -2343,10 +2413,10 @@ def _load_domain_weights(allowed_domains: Iterable[str]) -> Dict[str, float]:
     total = sum(weights.values()) or 1.0
     return {k: (v / total) for k, v in weights.items()}
 
-# ---------- Utility: pull all items from Section 6/8 ----------
+# ---------- Utility: pull all items ----------
 def _bank_all_items() -> List[dict]:
     try:
-        return load_all_items()  # from Section 6/8
+        return load_all_items()  # from Section 6/8 or our fallback
     except Exception as e:
         logger.error("load_all_items() failed: %r", e)
         return []
@@ -2355,8 +2425,7 @@ def _bank_all_items() -> List[dict]:
 def _filter_by_domain(items: List[dict], domain: str) -> List[dict]:
     if not domain or domain.lower() in ("random", "mixed", "any"):
         return items[:]  # all domains
-    out = [it for it in items if it.get("domain") == domain]
-    return out
+    return [it for it in items if it.get("domain") == domain]
 
 def _filter_by_types(items: List[dict], allowed_types: Iterable[str]) -> List[dict]:
     allowed = set([t.lower() for t in allowed_types])
@@ -2373,7 +2442,6 @@ def _compute_type_needs(total: int, available_counts: Dict[str, int]) -> Dict[st
     # Fix rounding gaps by adding to the largest buckets until sum == total
     gap = total - sum(wants.values())
     if gap > 0:
-        # add to types in priority order (mcq, tf, scenario) to maintain rule
         for t in ("mcq", "tf", "scenario"):
             if gap <= 0:
                 break
@@ -2390,7 +2458,6 @@ def _compute_type_needs(total: int, available_counts: Dict[str, int]) -> Dict[st
 
     if shortage > 0:
         # Redistribute shortage into any types with spare items
-        # priority: mcq -> tf -> scenario
         for t in ("mcq", "tf", "scenario"):
             if shortage <= 0:
                 break
@@ -2403,14 +2470,13 @@ def _compute_type_needs(total: int, available_counts: Dict[str, int]) -> Dict[st
     return wants
 
 # ---------- Random helpers ----------
-_RNG = random.Random()  # independent RNG for deterministic tests if needed
+_RNG = random.Random()
 
 def _sample(items: List[dict], k: int) -> List[dict]:
     """Return up to k items randomly without replacement (k may exceed len)."""
     if k <= 0:
         return []
     if k >= len(items):
-        # Shuffle copy to avoid side effects
         copy = items[:]
         _RNG.shuffle(copy)
         return copy
@@ -2422,7 +2488,7 @@ def pick_from_bank(domain: str, total: int) -> List[dict]:
     Select questions from the bank honoring:
       - specific domain if requested; otherwise weighted across domains (CPP weights)
       - type distribution: 50% mcq, 25% tf, 25% scenario (with graceful fallback)
-    Returns a list of raw item dicts (unchanged shape from Section 6/8).
+    Returns a list of raw item dicts.
     """
     all_items = _bank_all_items()
     if not all_items:
@@ -2432,7 +2498,6 @@ def pick_from_bank(domain: str, total: int) -> List[dict]:
     # Determine target pool by domain(s)
     if not domain or domain.lower() in ("random", "mixed", "any"):
         # Weighted selection across domains
-        # 1) Group items by domain
         by_domain: Dict[str, List[dict]] = {}
         for it in all_items:
             d = it.get("domain", "unknown")
@@ -2441,24 +2506,17 @@ def pick_from_bank(domain: str, total: int) -> List[dict]:
         allowed_domains = list(by_domain.keys())
         weights = _load_domain_weights(allowed_domains)
 
-        # 2) Compute how many per domain (probabilistic rounding)
-        #    We draw one by one according to weights to keep sampling fair.
-        selected: List[dict] = []
+        # Draw domain labels according to weights, stopping when we have enough items
+        selected_domains: List[str] = []
         if total <= 0:
-            return selected
+            return []
 
         domains = allowed_domains[:]
         probs = [weights[d] for d in domains]
-
-        # defensive: normalize
         s = sum(probs) or 1.0
         probs = [p / s for p in probs]
 
-        # Perform domain-level sampling with replacement on domain buckets,
-        # while also respecting type quotas later.
-        # We'll over-pick from domains first, then enforce type quotas.
-        domain_draws: List[str] = []
-        for _ in range(total * 2):  # overdraw pool; we’ll trim by type below
+        while len(selected_domains) < total and any(by_domain.values()):
             r = _RNG.random()
             acc = 0.0
             chosen = domains[-1]
@@ -2469,27 +2527,24 @@ def pick_from_bank(domain: str, total: int) -> List[dict]:
                     break
             # Only keep if domain still has items
             if by_domain.get(chosen):
-                domain_draws.append(chosen)
-            if len(domain_draws) >= total:
-                break
+                selected_domains.append(chosen)
 
         pool: List[dict] = []
-        for d in domain_draws:
+        for d in selected_domains:
             bucket = by_domain.get(d) or []
             if bucket:
                 pool.append(_RNG.choice(bucket))
 
         if not pool:
             pool = all_items[:]  # extreme fallback
-
     else:
         # Specific domain
         pool = _filter_by_domain(all_items, domain)
 
     # Enforce type distribution from pool
-    mcq_pool    = [it for it in pool if str(it.get("type","")).lower() == "mcq"]
-    tf_pool     = [it for it in pool if str(it.get("type","")).lower() == "tf"]
-    scen_pool   = [it for it in pool if str(it.get("type","")).lower() == "scenario"]
+    mcq_pool  = [it for it in pool if str(it.get("type","")).lower() == "mcq"]
+    tf_pool   = [it for it in pool if str(it.get("type","")).lower() == "tf"]
+    scen_pool = [it for it in pool if str(it.get("type","")).lower() == "scenario"]
 
     avail = {"mcq": len(mcq_pool), "tf": len(tf_pool), "scenario": len(scen_pool)}
     wants = _compute_type_needs(max(0, int(total)), avail)
@@ -2499,64 +2554,62 @@ def pick_from_bank(domain: str, total: int) -> List[dict]:
     chosen.extend(_sample(tf_pool, wants.get("tf", 0)))
     chosen.extend(_sample(scen_pool, wants.get("scenario", 0)))
 
-    # If we still fell short (e.g., small pool), fill from anything remaining
+    # If still short (e.g., small pool), fill from leftovers
     if len(chosen) < total:
         leftovers = [it for it in pool if it not in chosen]
         chosen.extend(_sample(leftovers, total - len(chosen)))
 
-    # Shuffle final set for fairness
     _RNG.shuffle(chosen)
     return chosen[:total]
 
 # ---------- Facade helpers for your routes (call these) ----------
 def get_flashcards_from_bank(domain: str, count: int) -> List[dict]:
-    """
-    Return `count` items for flashcards. Caller can display:
-      - front: item['stem']
-      - back:  explanation or correct answer(s)
-    """
+    """Return `count` items for flashcards."""
     count = max(0, int(count))
-    items = pick_from_bank(domain, count)
-    return items
+    return pick_from_bank(domain, count)
 
 def get_quiz_questions_from_bank(domain: str, count: int) -> List[dict]:
-    """
-    Return `count` items for a quiz session.
-    Items preserve the Section 6/8 shape so existing rendering can
-    use `.stem`, `.options`, `.answer`, `.type`, `.explanation`, `.sources`.
-    """
+    """Return `count` items for a quiz session."""
     count = max(0, int(count))
-    items = pick_from_bank(domain, count)
-    return items
+    return pick_from_bank(domain, count)
 
 def get_mock_questions_from_bank(domain: str, count: int) -> List[dict]:
-    """
-    Return `count` items for mock exam. Uses same selection rules.
-    """
+    """Return `count` items for mock exam."""
     count = max(0, int(count))
-    items = pick_from_bank(domain, count)
-    return items
+    return pick_from_bank(domain, count)
 
-# ---------- Optional: small sanity checker for admins ----------
-@app.get("/api/admin/items/dry-run-pick")
-def api_admin_dry_run_pick():
-    """Debug endpoint to visualize a pick without exposing answers to students."""
-    token_hdr = request.headers.get("X-Admin-Token", "")
-    if not ADMIN_UPLOAD_TOKEN or token_hdr != ADMIN_UPLOAD_TOKEN:
-        return {"ok": False, "error": "Unauthorized"}, 401
-    domain = request.args.get("domain", "random")
-    n = int(request.args.get("n", "20"))
-    items = pick_from_bank(domain, n)
-    # return only minimal info (no answers) for safety
-    preview = [{"domain": it.get("domain"), "type": it.get("type"), "stem": it.get("stem")} for it in items]
-    return {"ok": True, "picked": preview, "count": len(preview)}, 200
-
-# CSRF exemption for the admin dry-run (if CSRF is present)
+# ---------- Optional: admin dry-run picker ----------
 try:
-    _csrf_obj = globals().get("csrf")
-    if _csrf_obj is not None:
-        _csrf_obj.exempt(api_admin_dry_run_pick)
-except Exception:
+    app  # noqa: F821
+    from flask import request  # local import is fine
+    try:
+        ADMIN_UPLOAD_TOKEN  # noqa: F821
+    except NameError:
+        ADMIN_UPLOAD_TOKEN = os.environ.get("ADMIN_UPLOAD_TOKEN", "")
+
+    @app.get("/api/admin/items/dry-run-pick")
+    def api_admin_dry_run_pick():
+        """Debug endpoint to visualize a pick without exposing answers to students."""
+        token_hdr = request.headers.get("X-Admin-Token", "")
+        if not ADMIN_UPLOAD_TOKEN or token_hdr != ADMIN_UPLOAD_TOKEN:
+            return {"ok": False, "error": "Unauthorized"}, 401
+        domain = request.args.get("domain", "random")
+        n = int(request.args.get("n", "20"))
+        items = pick_from_bank(domain, n)
+        # return only minimal info (no answers)
+        preview = [{"domain": it.get("domain"), "type": it.get("type"), "stem": it.get("stem")} for it in items]
+        return {"ok": True, "picked": preview, "count": len(preview)}, 200
+
+    # CSRF exemption if CSRF is present
+    try:
+        _csrf_obj = globals().get("csrf")
+        if _csrf_obj is not None:
+            _csrf_obj.exempt(api_admin_dry_run_pick)
+    except Exception:
+        pass
+
+except NameError:
+    # app not defined yet (unlikely in your file order); skip optional endpoint
     pass
 
 # =====================================================================
@@ -2871,5 +2924,6 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
 
