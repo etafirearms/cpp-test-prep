@@ -2712,18 +2712,42 @@ def sec7_tutor_page():
 #=====================================================#
 # SECTION 8/8 — Public Welcome, Login, Register & Logout (updated)
 # Route ownership (unique in app):
-#   /welcome   [GET, POST]  (new; landing + disclaimer)
-#   /register  [GET, POST]  (new; create account)
-#   /login     [GET, POST]  (endpoint names kept for compatibility)
+#   /welcome   [GET, POST]  -> Landing + disclaimer
+#   /register  [GET, POST]  -> Create account
+#   /login     [GET, POST]  -> (endpoint names preserved)
 #   /logout    [GET]
 #
 # Notes:
-# - We do not rename existing endpoints for /login & /logout (keep: sec1_login_page, sec1_login_post, sec1_logout).
-# - We make sessions permanent on successful auth to remember users.
-# - We do NOT alter Section 1 terms page or other public pages.
+# - Sessions are made permanent on successful login so users stay signed in.
+# - Keep endpoint names for /login & /logout: sec1_login_page, sec1_login_post, sec1_logout.
+# - No external deps added. Uses existing helpers & imports from earlier sections.
 
-# ---------- Landing gate: send "/" to /welcome (GET/HEAD only) ----------
-# STABILITY: Redirect only the root path. Skip known routes and static assets to avoid loops.
+# Ensure required data files exist (idempotent, safe on reload)
+try:
+    init_sample_data()
+except Exception as _e:
+    try:
+        logger.warning("init_sample_data at Section 8 failed: %s", _e)
+    except Exception:
+        pass
+
+# ---------- Helpers ----------
+def _safe_next(next_val: str | None) -> str:
+    nv = (next_val or "").strip()
+    if nv.startswith("/") and not nv.startswith("//"):
+        return nv
+    return "/"
+
+def _auth_set_session(user: dict) -> None:
+    session["uid"] = user.get("id", "")
+    session["email"] = user.get("email", "")
+
+def _auth_clear_session() -> None:
+    session.pop("uid", None)
+    session.pop("email", None)
+    session.pop("admin_ok", None)
+
+# ---------- Landing gate: redirect "/" to /welcome (GET/HEAD only) ----------
 @app.before_request
 def _root_to_welcome_gate():
     if request.method not in ("GET", "HEAD"):
@@ -2737,19 +2761,13 @@ def _root_to_welcome_gate():
         return redirect(url_for("sec8_welcome", next=request.args.get("next") or "/"))
     return None
 
-
 # ---------- Welcome / Disclaimer ----------
 @app.route("/welcome", methods=["GET", "POST"], endpoint="sec8_welcome")
 def sec8_welcome():
-    """
-    Attractive landing with disclaimer and clear CTAs.
-    POST (optional) records 'terms_ok' in session if the user clicks the "I agree" form.
-    """
-    # Optional acceptance post; not strictly required to proceed, but we remember it.
     if request.method == "POST":
         if not _csrf_ok():
             abort(403)
-        agree = request.form.get("agree") == "1"
+        agree = (request.form.get("agree") == "1")
         if agree:
             session["terms_ok"] = True
             try:
@@ -2762,8 +2780,6 @@ def sec8_welcome():
     csrf_val = csrf_token()
     nxt = _safe_next(request.args.get("next") or "/")
 
-    # Colors (psychology): deep blue (trust/competence) header, soft gradient background, green CTA (progress),
-    # amber disclaimer box (caution), and ample whitespace.
     content = f"""
     <div class="container py-4">
       <div class="row justify-content-center">
@@ -2845,7 +2861,6 @@ def sec8_welcome():
     """
     return base_layout("Welcome", content)
 
-
 # ---------- USER LOGIN ----------
 @app.get("/login", endpoint="sec1_login_page")
 def sec1_login_page():
@@ -2887,7 +2902,6 @@ def sec1_login_page():
     """
     return base_layout("Login", content)
 
-
 @app.post("/login", endpoint="sec1_login_post")
 def sec1_login_post():
     if not _csrf_ok():
@@ -2915,7 +2929,6 @@ def sec1_login_post():
     except Exception:
         pass
     return redirect(nxt or "/")
-
 
 # ---------- USER REGISTRATION ----------
 @app.get("/register", endpoint="sec8_register_page")
@@ -2951,7 +2964,6 @@ def sec8_register_page():
     """
     return base_layout("Create Account", content)
 
-
 @app.post("/register", endpoint="sec8_register_post")
 def sec8_register_post():
     if not _csrf_ok():
@@ -2968,18 +2980,17 @@ def sec8_register_post():
     nxt   = _safe_next(request.form.get("next"))
 
     if not email or not pw or pw != pw2:
-        # Basic feedback: reuse the page with a simple message via query (keep UI minimal)
         return redirect(url_for("sec8_register_page", next=nxt))
 
     ok, err = validate_password(pw)
     if not ok:
         return redirect(url_for("sec8_register_page", next=nxt))
 
-    # Ensure unique email
     if _find_user(email):
+        # email in use -> send to login with generic error (don't leak existence)
         return redirect(url_for("sec1_login_page", next=nxt, error="1"))
 
-    # Create user in users.json
+    # Create new user
     users = _users_all()
     uid = str(uuid.uuid4())
     new_user = {
@@ -2994,16 +3005,13 @@ def sec8_register_post():
     try:
         _save_json("users.json", users)
     except Exception:
-        # If save fails, fall back to login page with error
         return redirect(url_for("sec1_login_page", next=nxt, error="1"))
 
-    # Optionally sign them in or send them to login; here we direct to login with a success banner
     try:
         _log_event(uid, "auth.register", {})
     except Exception:
         pass
     return redirect(url_for("sec1_login_page", next=nxt, registered="1"))
-
 
 # ---------- LOGOUT ----------
 @app.get("/logout", endpoint="sec1_logout")
