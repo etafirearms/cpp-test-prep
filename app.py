@@ -2711,18 +2711,15 @@ def sec7_tutor_page():
     return base_layout("Tutor", body)
 #=====================================================#
 # =========================
-# SECTION 8/8 — Public Welcome, Signup, Login & Logout (updated to retain login after disclaimer)
-# Route ownership (unique in app):
-#   /welcome [GET, POST]
-#   /signup  [GET, POST]
-#   /login   [GET, POST]  (endpoint names: sec1_login_page / sec1_login_post)
-#   /logout  [GET]
+# SECTION 8/8 — Public Welcome, Signup, Login & Logout (patch to stop “login → back to welcome” loop)
+# Drop-in replacement for your existing SECTION 8/8.
 #
-# WHAT CHANGED (fix for “logs in then returns to welcome”):
-# - If a user accepts the disclaimer first (as a guest) and THEN logs in, we now persist that
-#   acceptance to their user record during login so they won’t bounce back to /welcome.
-# - If a user had previously accepted (stored in users.json), we mirror it into the session on login.
-# - Session is permanent so the browser keeps you signed in unless you log out.
+# Changes in this patch:
+# 1) Session/DB sync in the gate: if a logged-in user already has tos_ok=True in users.json
+#    but session lacks it, we mirror it into session to avoid bouncing back to /welcome.
+# 2) Optional toggle to auto-accept TOS at login (for staging): set env ACCEPT_TOS_ON_LOGIN=1.
+#    In prod, leave it unset/0 to still require the explicit checkbox once.
+# 3) After a guest accepts on /welcome, if they later log in we persist that acceptance to their account.
 # =========================
 
 # ---------- Helpers ----------
@@ -2737,7 +2734,7 @@ def _auth_set_session(user: dict) -> None:
     session["email"] = user.get("email", "")
     if user.get("tos_ok"):
         session["tos_ok"] = True
-    session.permanent = True  # persist across restarts
+    session.permanent = True  # keep user signed in
 
 def _auth_clear_session() -> None:
     session.pop("uid", None)
@@ -2762,9 +2759,8 @@ def sec8_welcome():
         if not accepted:
             err = "Please confirm you understand and agree to the disclaimer and terms."
         else:
-            # Mark session as accepted
+            # STABILITY: persist acceptance in session, and in user record if logged in
             session["tos_ok"] = True
-            # If logged in, persist to user record
             u = _find_user(session.get("email", "") or "")
             if u:
                 try:
@@ -2828,16 +2824,24 @@ def sec8_tos_gate():
     p = request.path or "/"
     if (
         p.startswith("/static/") or
-        p.startswith("/stripe/webhook") or  # webhook (no session)
+        p.startswith("/stripe/webhook") or
         p in ("/welcome", "/login", "/signup", "/logout", "/healthz", "/legal/terms")
     ):
         return None
 
-    if request.method == "POST" and p in ("/login", "/signup"):
-        return None
+    # STABILITY: if user is logged-in but session lost tos_ok, sync from DB to avoid redirect loop
+    if session.get("uid") and not session.get("tos_ok"):
+        try:
+            u = _find_user(session.get("email", "") or "")
+            if u and u.get("tos_ok"):
+                session["tos_ok"] = True
+        except Exception:
+            pass
 
     if not session.get("tos_ok") and request.method in ("GET", "HEAD"):
-        return redirect(url_for("sec8_welcome", next=request.full_path if request.query_string else p))
+        # preserve the original destination
+        dest = request.full_path if request.query_string else p
+        return redirect(url_for("sec8_welcome", next=dest))
     return None
 
 # ---------- Signup ----------
@@ -2956,7 +2960,6 @@ def sec1_login_post():
     if not _csrf_ok():
         abort(403)
 
-    # Simple rate limit
     rip = (request.headers.get("X-Forwarded-For") or request.remote_addr or "0.0.0.0").split(",")[0].strip()
     if not _rate_ok(f"login:{rip}", per_sec=0.5):
         nxt = _safe_next(request.form.get("next"))
@@ -2970,16 +2973,27 @@ def sec1_login_post():
     if not u or not check_password_hash(u.get("password_hash",""), pw):
         return redirect(url_for("sec1_login_page", next=nxt, error="1"))
 
-    # If the user accepted the disclaimer earlier in THIS session (as guest),
-    # persist that acceptance to their account now to avoid the welcome loop.
-    if session.get("tos_ok"):
+    # STABILITY: if guest already accepted in-session, persist to user on login
+    if session.get("tos_ok") and not u.get("tos_ok"):
         try:
             _update_user(u["id"], {"tos_ok": True})
             u["tos_ok"] = True
         except Exception:
             pass
 
-    # Set session (mirrors persisted tos_ok into session and makes session permanent)
+    # Optional: accept TOS automatically at login (useful for staging)
+    # Set env ACCEPT_TOS_ON_LOGIN=1 to enable; default is disabled for production readiness.
+    try:
+        auto_accept = _env_bool("ACCEPT_TOS_ON_LOGIN", default=False)
+    except Exception:
+        auto_accept = False
+    if auto_accept and not u.get("tos_ok"):
+        try:
+            _update_user(u["id"], {"tos_ok": True})
+            u["tos_ok"] = True
+        except Exception:
+            pass
+
     _auth_set_session(u)
 
     try:
@@ -2987,7 +3001,6 @@ def sec1_login_post():
     except Exception:
         pass
 
-    # Respect stored acceptance if present; otherwise take them to /welcome to accept once.
     if u.get("tos_ok"):
         session["tos_ok"] = True
         return redirect(nxt or "/")
@@ -3004,4 +3017,3 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
-
