@@ -1709,327 +1709,163 @@ def choose_questions(
 # === SECTION 6/8: DATA BANK & CPP WEIGHTS — END =======================
 # ======================================================================
 
-# =====================================================================
-# =====================================================================
-# SECTION 7/8 — BANK SELECTION HELPERS (FIXED, SELF-CONTAINED)
-# START OF SECTION 7/8
-# =====================================================================
+# ======================================================================
+# === SECTION 7/8: BANK ADAPTERS FOR TUTOR / FLASHCARDS / QUIZ / MOCK ==
+# ======================================================================
+# Purpose:
+#   Read questions from the Section 6/8 Bank and expose safe, uniform
+#   adapters that higher-level routes can call WITHOUT changing any UI.
+#
+# What this DOES:
+#   - Gives you three helpers you can call from your existing routes
+#     to pull items from the Bank while honoring domain-weights and
+#     the 50% MCQ / 25% TF / 25% Scenario mix:
+#         * bank_get_flashcards(domain, total)
+#         * bank_get_quiz_questions(domain, total)
+#         * bank_get_mock_questions(domain, total)
+#   - Normalizes Bank items into a stable, conservative shape that
+#     existing templates can render as plain text safely.
+#   - Never replaces your legacy generators: you can “try Bank first,
+#     then fall back” in the route (we’ll wire this in next section).
+#
+# What this DOES NOT do (yet):
+#   - It does not change your routes. It’s a drop-in library.
+#   - It does not alter any templates or UI.
+#
+# Safe defaults:
+#   - If the bank is empty, these return [] (so your current code can
+#     fall back to legacy behavior unchanged).
+#
+# Call pattern you’ll use NEXT (Section 8/8, tiny route edits):
+#   items = bank_get_quiz_questions(domain, total)
+#   if not items:
+#       items = legacy_make_quiz_questions(domain, total)  # your current path
+#
+# ======================================================================
 
-# STABILITY: imports
-import os, json, math, random, io, glob
-from typing import Iterable, List, Dict, Tuple
+from typing import List, Dict, Any, Optional
+import random
+import html
 
-# STABILITY: reuse existing logger if present
-try:
-    logger  # noqa: F821
-except NameError:  # pragma: no cover
-    import logging
-    logger = logging.getLogger("app")
-
-# STABILITY: DATA_DIR must exist from earlier env/config section
-try:
-    DATA_DIR  # noqa: F821
-except NameError:
-    # Last-resort fallback — matches earlier instructions
-    DATA_DIR = os.path.join(os.getcwd(), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# STABILITY: Define BANK_DIR here if not already defined by Section 6/8
-try:
-    BANK_DIR  # noqa: F821
-except NameError:
-    BANK_DIR = os.path.join(DATA_DIR, "bank")
-    os.makedirs(BANK_DIR, exist_ok=True)
-
-# Optional constant sometimes defined in Section 6/8; we won’t rely on it but keep it if present
-try:
-    ITEMS_JSONL  # noqa: F821
-except NameError:
-    ITEMS_JSONL = os.path.join(BANK_DIR, "items.jsonl")
-
-# ---------- Fallback loader if Section 6/8 didn't define load_all_items() ----------
-def _fallback_load_all_items() -> List[dict]:
-    """
-    Load all bank items from:
-      - bank/items.jsonl (preferred)
-      - any *.jsonl inside bank/ (merged)
-    Each line should be a JSON object with keys like:
-      type, domain, stem, options, answer, explanation, sources.
-    """
-    items: List[dict] = []
-
-    def _read_jsonl(path: str):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        if isinstance(obj, dict):
-                            items.append(obj)
-                    except Exception:
-                        # skip bad lines; keep going
-                        continue
-        except FileNotFoundError:
-            return
-        except Exception as e:
-            logger.warning("Could not read %s: %r", path, e)
-
-    # 1) Primary file
-    _read_jsonl(ITEMS_JSONL)
-
-    # 2) Any other *.jsonl in bank dir (avoid double-reading items.jsonl)
-    for p in glob.glob(os.path.join(BANK_DIR, "*.jsonl")):
-        if os.path.abspath(p) == os.path.abspath(ITEMS_JSONL):
-            continue
-        _read_jsonl(p)
-
-    return items
-
-# Use existing load_all_items() from Section 6/8 if present; else fallback
-try:
-    load_all_items  # noqa: F821
-except NameError:
-    def load_all_items() -> List[dict]:  # type: ignore
-        return _fallback_load_all_items()
-
-# ---------- Domain weights (CPP weighting support) ----------
-# Admin may provide a weights file mapping domain -> weight (any positive numbers).
-# Example file: bank/weights.json
-# {
-#   "Domain 1 - Security Principles and Practices": 25,
-#   "Domain 2 - Business Principles": 15,
-#   ...
-# }
-_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")
-
-def _load_domain_weights(allowed_domains: Iterable[str]) -> Dict[str, float]:
-    """Load domain weights from bank/weights.json if present; fallback to uniform."""
-    weights: Dict[str, float] = {}
-    try:
-        if os.path.exists(_WEIGHTS_FILE):
-            with open(_WEIGHTS_FILE, "r", encoding="utf-8") as f:
-                raw = json.load(f) or {}
-                for d in allowed_domains:
-                    v = raw.get(d)
-                    if isinstance(v, (int, float)) and v > 0:
-                        weights[d] = float(v)
-    except Exception as e:
-        logger.warning("Could not read weights.json: %r", e)
-
-    # Fallback to uniform over allowed domains
-    if not weights:
-        weights = {d: 1.0 for d in allowed_domains}
-
-    # Normalize to sum 1.0
-    total = sum(weights.values()) or 1.0
-    return {k: (v / total) for k, v in weights.items()}
-
-# ---------- Utility: pull all items ----------
-def _bank_all_items() -> List[dict]:
-    try:
-        return load_all_items()  # from Section 6/8 or our fallback
-    except Exception as e:
-        logger.error("load_all_items() failed: %r", e)
+# --- Import selectors from Section 6/8 (already loaded in app.py) ------------
+# choose_questions(total, domain, allow_fallback=True)
+if "choose_questions" not in globals():
+    # Defensive fallback: if Section 6/8 wasn’t included for some reason,
+    # provide a stub that behaves like an empty bank.
+    def choose_questions(total: int, domain: Optional[str] = None, *, allow_fallback: bool = True) -> List[dict]:
         return []
 
-# ---------- Filters ----------
-def _filter_by_domain(items: List[dict], domain: str) -> List[dict]:
-    if not domain or domain.lower() in ("random", "mixed", "any"):
-        return items[:]  # all domains
-    return [it for it in items if it.get("domain") == domain]
+# --- Normalization to a conservative shape ------------------------------------
+# This “normalized” question is intentionally simple so it won’t break any
+# existing rendering. Your routes can read these keys safely:
+#   {
+#     "id": str,
+#     "type": "mcq"|"tf"|"scenario",
+#     "domain": str,
+#     "question": str,          # plain text (HTML-escaped)
+#     "choices": List[str],     # [] for non-MCQ; ["True","False"] for TF
+#     "answer": Any,            # keep original; routes may ignore if not needed
+#     "explanation": str|None,  # plain text (HTML-escaped)
+#     "source": str|None        # where it came from (optional)
+#   }
 
-def _filter_by_types(items: List[dict], allowed_types: Iterable[str]) -> List[dict]:
-    allowed = set([t.lower() for t in allowed_types])
-    return [it for it in items if str(it.get("type", "")).lower() in allowed]
+def _to_norm(item: Dict[str, Any]) -> Dict[str, Any]:
+    q = html.escape(str(item.get("question", "")).strip())
+    typ = item.get("type", "")
+    domain = item.get("domain", "")
+    explanation = item.get("explanation")
+    if isinstance(explanation, str):
+        explanation = html.escape(explanation.strip())
 
-# ---------- Type mix targets (50% MCQ, 25% TF, 25% Scenario) ----------
-_TYPE_TARGETS = {"mcq": 0.50, "tf": 0.25, "scenario": 0.25}
-# If bank lacks enough of a type, we degrade gracefully and fill with others.
-
-def _compute_type_needs(total: int, available_counts: Dict[str, int]) -> Dict[str, int]:
-    """Given a total and what the bank has, decide how many of each type to take."""
-    # Initial ideal targets (rounded down)
-    wants = {t: int(math.floor(_TYPE_TARGETS[t] * total)) for t in _TYPE_TARGETS}
-    # Fix rounding gaps by adding to the largest buckets until sum == total
-    gap = total - sum(wants.values())
-    if gap > 0:
-        for t in ("mcq", "tf", "scenario"):
-            if gap <= 0:
-                break
-            wants[t] += 1
-            gap -= 1
-
-    # Cap by availability, record shortage
-    shortage = 0
-    for t, need in list(wants.items()):
-        have = int(available_counts.get(t, 0))
-        if need > have:
-            shortage += (need - have)
-            wants[t] = have
-
-    if shortage > 0:
-        # Redistribute shortage into any types with spare items
-        for t in ("mcq", "tf", "scenario"):
-            if shortage <= 0:
-                break
-            spare = max(0, available_counts.get(t, 0) - wants.get(t, 0))
-            if spare > 0:
-                take = min(spare, shortage)
-                wants[t] += take
-                shortage -= take
-
-    return wants
-
-# ---------- Random helpers ----------
-_RNG = random.Random()
-
-def _sample(items: List[dict], k: int) -> List[dict]:
-    """Return up to k items randomly without replacement (k may exceed len)."""
-    if k <= 0:
-        return []
-    if k >= len(items):
-        copy = items[:]
-        _RNG.shuffle(copy)
-        return copy
-    return _RNG.sample(items, k)
-
-# ---------- Core picker ----------
-def pick_from_bank(domain: str, total: int) -> List[dict]:
-    """
-    Select questions from the bank honoring:
-      - specific domain if requested; otherwise weighted across domains (CPP weights)
-      - type distribution: 50% mcq, 25% tf, 25% scenario (with graceful fallback)
-    Returns a list of raw item dicts.
-    """
-    all_items = _bank_all_items()
-    if not all_items:
-        logger.warning("Content bank is empty; returning no items")
-        return []
-
-    # Determine target pool by domain(s)
-    if not domain or domain.lower() in ("random", "mixed", "any"):
-        # Weighted selection across domains
-        by_domain: Dict[str, List[dict]] = {}
-        for it in all_items:
-            d = it.get("domain", "unknown")
-            by_domain.setdefault(d, []).append(it)
-
-        allowed_domains = list(by_domain.keys())
-        weights = _load_domain_weights(allowed_domains)
-
-        # Draw domain labels according to weights, stopping when we have enough items
-        selected_domains: List[str] = []
-        if total <= 0:
-            return []
-
-        domains = allowed_domains[:]
-        probs = [weights[d] for d in domains]
-        s = sum(probs) or 1.0
-        probs = [p / s for p in probs]
-
-        while len(selected_domains) < total and any(by_domain.values()):
-            r = _RNG.random()
-            acc = 0.0
-            chosen = domains[-1]
-            for d, p in zip(domains, probs):
-                acc += p
-                if r <= acc:
-                    chosen = d
-                    break
-            # Only keep if domain still has items
-            if by_domain.get(chosen):
-                selected_domains.append(chosen)
-
-        pool: List[dict] = []
-        for d in selected_domains:
-            bucket = by_domain.get(d) or []
-            if bucket:
-                pool.append(_RNG.choice(bucket))
-
-        if not pool:
-            pool = all_items[:]  # extreme fallback
+    choices: List[str] = []
+    if typ == "mcq":
+        raw = item.get("options") or []
+        # Make sure everything is string & escaped
+        choices = [html.escape(str(x)) for x in raw if str(x).strip() != ""]
+    elif typ == "tf":
+        # Standardize the two choices for UI consistency
+        choices = ["True", "False"]
     else:
-        # Specific domain
-        pool = _filter_by_domain(all_items, domain)
+        # scenario or anything else => no fixed choices, UI shows the stem
+        choices = []
 
-    # Enforce type distribution from pool
-    mcq_pool  = [it for it in pool if str(it.get("type","")).lower() == "mcq"]
-    tf_pool   = [it for it in pool if str(it.get("type","")).lower() == "tf"]
-    scen_pool = [it for it in pool if str(it.get("type","")).lower() == "scenario"]
+    return {
+        "id": str(item.get("id", "")),
+        "type": typ,
+        "domain": domain,
+        "question": q,
+        "choices": choices,
+        "answer": item.get("answer"),
+        "explanation": explanation if explanation else None,
+        "source": item.get("source"),
+    }
 
-    avail = {"mcq": len(mcq_pool), "tf": len(tf_pool), "scenario": len(scen_pool)}
-    wants = _compute_type_needs(max(0, int(total)), avail)
+def _norm_many(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for it in items:
+        try:
+            out.append(_to_norm(it))
+        except Exception:
+            # Skip malformed
+            continue
+    return out
 
-    chosen: List[dict] = []
-    chosen.extend(_sample(mcq_pool, wants.get("mcq", 0)))
-    chosen.extend(_sample(tf_pool, wants.get("tf", 0)))
-    chosen.extend(_sample(scen_pool, wants.get("scenario", 0)))
+# --- Public adapters -----------------------------------------------------------
+# You can call these from routes. They DO NOT throw if bank is empty.
 
-    # If still short (e.g., small pool), fill from leftovers
-    if len(chosen) < total:
-        leftovers = [it for it in pool if it not in chosen]
-        chosen.extend(_sample(leftovers, total - len(chosen)))
+def bank_get_flashcards(domain: Optional[str], total: int) -> List[Dict[str, Any]]:
+    """
+    Pulls a mixed set for flashcards (domain-weighted, mixed types).
+    Rely on your flashcard UI to show question + (optional) explanation.
+    """
+    total = max(1, int(total))
+    raw = choose_questions(total, domain=domain, allow_fallback=True)
+    random.shuffle(raw)
+    return _norm_many(raw)
 
-    _RNG.shuffle(chosen)
-    return chosen[:total]
+def bank_get_quiz_questions(domain: Optional[str], total: int) -> List[Dict[str, Any]]:
+    """
+    Returns normalized items suitable for a quick quiz. The 50/25/25
+    type-quota is enforced by choose_questions().
+    """
+    total = max(1, int(total))
+    raw = choose_questions(total, domain=domain, allow_fallback=True)
+    random.shuffle(raw)
+    return _norm_many(raw)
 
-# ---------- Facade helpers for your routes (call these) ----------
-def get_flashcards_from_bank(domain: str, count: int) -> List[dict]:
-    """Return `count` items for flashcards."""
-    count = max(0, int(count))
-    return pick_from_bank(domain, count)
+def bank_get_mock_questions(domain: Optional[str], total: int) -> List[Dict[str, Any]]:
+    """
+    Returns normalized items for mock exams. Same quotas/weights as quiz.
+    """
+    total = max(1, int(total))
+    raw = choose_questions(total, domain=domain, allow_fallback=True)
+    random.shuffle(raw)
+    return _norm_many(raw)
 
-def get_quiz_questions_from_bank(domain: str, count: int) -> List[dict]:
-    """Return `count` items for a quiz session."""
-    count = max(0, int(count))
-    return pick_from_bank(domain, count)
-
-def get_mock_questions_from_bank(domain: str, count: int) -> List[dict]:
-    """Return `count` items for mock exam."""
-    count = max(0, int(count))
-    return pick_from_bank(domain, count)
-
-# ---------- Optional: admin dry-run picker ----------
-try:
-    app  # noqa: F821
-    from flask import request  # local import is fine
+# --- Tiny helper for route bridges (used next section) ------------------------
+def bank_first_then_legacy(
+    supplier,            # callable(domain:str|None, total:int)->List[dict]
+    legacy_builder,      # your existing function: (domain,total)->List[dict]
+    domain: Optional[str],
+    total: int
+) -> List[Dict[str, Any]]:
+    """
+    Try bank supplier first (returns normalized items).
+    If empty, falls back to your legacy generator unchanged.
+    """
+    bank_items = supplier(domain, total)
+    if bank_items:
+        return bank_items
     try:
-        ADMIN_UPLOAD_TOKEN  # noqa: F821
-    except NameError:
-        ADMIN_UPLOAD_TOKEN = os.environ.get("ADMIN_UPLOAD_TOKEN", "")
-
-    @app.get("/api/admin/items/dry-run-pick")
-    def api_admin_dry_run_pick():
-        """Debug endpoint to visualize a pick without exposing answers to students."""
-        token_hdr = request.headers.get("X-Admin-Token", "")
-        if not ADMIN_UPLOAD_TOKEN or token_hdr != ADMIN_UPLOAD_TOKEN:
-            return {"ok": False, "error": "Unauthorized"}, 401
-        domain = request.args.get("domain", "random")
-        n = int(request.args.get("n", "20"))
-        items = pick_from_bank(domain, n)
-        # return only minimal info (no answers)
-        preview = [{"domain": it.get("domain"), "type": it.get("type"), "stem": it.get("stem")} for it in items]
-        return {"ok": True, "picked": preview, "count": len(preview)}, 200
-
-    # CSRF exemption if CSRF is present
-    try:
-        _csrf_obj = globals().get("csrf")
-        if _csrf_obj is not None:
-            _csrf_obj.exempt(api_admin_dry_run_pick)
+        # Legacy path is unknown shape; hand it back directly for your
+        # existing renderer. Callers must branch on shape if needed.
+        return legacy_builder(domain, total)  # type: ignore[misc]
     except Exception:
-        pass
+        return []
 
-except NameError:
-    # app not defined yet (unlikely in your file order); skip optional endpoint
-    pass
-
-# =====================================================================
-# SECTION 7/8 — BANK SELECTION HELPERS
-# END OF SECTION 7/8
-# =====================================================================
+# ======================================================================
+# === SECTION 7/8: BANK ADAPTERS — END =================================
+# ======================================================================
 
 # =========================
 # SECTION 8/8 — Public Welcome, Signup, Login & Logout (patch to stop “login → back to welcome” loop)
@@ -2338,6 +2174,7 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
 
 
