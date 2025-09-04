@@ -1357,358 +1357,357 @@ if not _sx5_route_exists("/tutor"):
 
 # ===== SECTION 5/8 — TUTOR ROUTE (RESTORE & STABLE) — END =====
 
-# =====================================================================
-# SECTION 6/8 — CONTENT BANK & ADMIN UPLOAD (FULL)
-# START OF SECTION 6/8
-# =====================================================================
+# ======================================================================
+# === SECTION 6/8: DATA BANK & CPP WEIGHTS — START =====================
+# ======================================================================
+# Purpose:
+#   - Define the on-disk question bank (DATA_DIR/bank/*).
+#   - Provide helpers to read items, dedupe them, and select questions.
+#   - Enforce CPP domain weights and per-type quotas:
+#       * Multiple Choice: 50%
+#       * True/False:      25%
+#       * Scenario:        25%
+# Notes:
+#   - No UI or route changes here. We will wire these helpers in Section 7/8.
+#   - Safe to import even if bank is empty (graceful fallbacks).
+#   - Avoids NameError if DOMAINS isn't defined yet.
+# ======================================================================
 
-# STABILITY: stdlib only
-import os, io, json, time, glob, hashlib, tempfile, shutil
-from typing import List, Dict, Tuple
+import os, json, time, uuid, random, hashlib, re
+from typing import Dict, List, Optional, Tuple, Any
 
-# STABILITY: use existing logger if present
+# --- Bank filesystem layout ---------------------------------------------------
+#  DATA_DIR/
+#    bank/
+#      mcq/        # *.json (one item per file)
+#      tf/         # *.json (one item per file)
+#      scenario/   # *.json (one item per file)
+#      weights.json     # admin-managed (optional); overrides defaults
+
+# DATA_DIR comes from Section 1/8 (env & config). Fallback to cwd/data if needed.
 try:
-    logger  # noqa: F821
-except NameError:  # pragma: no cover
-    import logging
-    logger = logging.getLogger("app")
-
-# STABILITY: DATA_DIR must exist from earlier env/config section
-try:
-    DATA_DIR  # noqa: F821
+    DATA_DIR  # type: ignore[name-defined]
 except NameError:
     DATA_DIR = os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ---------- Canonical bank paths (7/8 will reuse these) ----------
 BANK_DIR = os.path.join(DATA_DIR, "bank")
-os.makedirs(BANK_DIR, exist_ok=True)
+for _sub in ("mcq", "tf", "scenario"):
+    os.makedirs(os.path.join(BANK_DIR, _sub), exist_ok=True)
 
-ITEMS_JSONL = os.path.join(BANK_DIR, "items.jsonl")
-INDEX_JSON   = os.path.join(BANK_DIR, "index.json")   # dedup index: {dedup_key: 1}
-SOURCES_JSON = os.path.join(BANK_DIR, "sources.json") # optional metadata
+_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")
 
-# ---------- Helper: atomic JSON write (reuses earlier pattern if present) ----------
-def _atomic_write_bytes(path: str, data: bytes) -> None:
-    """Write bytes atomically (path.tmp -> fsync -> replace)."""
-    d = os.path.dirname(path) or "."
-    os.makedirs(d, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".tmp_", dir=d)
+# --- Utility: safe json load/save --------------------------------------------
+def _read_json_file(path: str) -> Optional[dict]:
     try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
     except Exception:
-        try:
-            os.unlink(tmp)
-        except Exception:
-            pass
-        raise
+        return None
 
-def _atomic_write_json(path: str, obj) -> None:
-    data = json.dumps(obj, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    _atomic_write_bytes(path, data)
-
-# ---------- Helper: safe append to JSONL with fsync ----------
-def _append_jsonl(path: str, objs: List[dict]) -> None:
-    if not objs:
-        return
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    # Open in append-binary and fsync; this is the safest without external locks.
-    with open(path, "ab") as f:
-        for o in objs:
-            line = (json.dumps(o, ensure_ascii=False) + "\n").encode("utf-8")
-            f.write(line)
+def _atomic_write_json(path: str, payload: dict) -> None:
+    """Atomic save compatible with Section 2/8's _save_json approach."""
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
+    os.replace(tmp, path)
 
-# ---------- Dedup normalization ----------
-def _normalize_text(s: str) -> str:
-    # Minimal but effective: lowercase, strip, collapse whitespace.
-    # Keep punctuation (security questions may rely on symbols).
-    return " ".join(str(s or "").lower().strip().split())
+# --- Domain helpers -----------------------------------------------------------
+def _domain_keys() -> List[str]:
+    """Use your global DOMAINS mapping if present; else infer from items; fallback to Mixed."""
+    if "DOMAINS" in globals() and isinstance(globals()["DOMAINS"], dict) and globals()["DOMAINS"]:
+        return list(globals()["DOMAINS"].keys())
+    # If DOMAINS not yet defined, provide a stable fallback:
+    return ["domain1", "domain2", "domain3", "domain4", "domain5", "domain6", "domain7"]
 
-def _dedup_key(item: dict) -> str:
-    """
-    Build a deterministic key to prevent duplicates even if uploaded again:
-    includes type, domain, normalized stem, and (for MCQ) normalized options.
-    """
-    t = _normalize_text(item.get("type", ""))
-    d = _normalize_text(item.get("domain", ""))
-    stem = _normalize_text(item.get("stem", ""))
+# --- Default CPP domain weights (adjust as needed) ---------------------------
+# These are *relative* weights (we'll normalize). If you already defined a
+# better mapping elsewhere, you can override via bank/weights.json.
+_DEFAULT_DOMAIN_WEIGHTS: Dict[str, float] = {
+    # Keys must match your DOMAINS keys (e.g., "domain1", ...), not labels.
+    # Replace these with your actual distribution if known; otherwise they
+    # will be normalized over present keys.
+}
 
-    parts = [f"type={t}", f"domain={d}", f"stem={stem}"]
+def _load_weights() -> Dict[str, float]:
+    """Load weights.json if present; otherwise use defaults stretched over known domain keys."""
+    # Start with defaults over the known keys:
+    keys = _domain_keys()
+    base = dict(_DEFAULT_DOMAIN_WEIGHTS)
+    # If defaults are empty or incomplete, fill evenly:
+    if not base or any(k not in base for k in keys):
+        even = 1.0 / max(1, len(keys))
+        base = {k: base.get(k, even) for k in keys}
 
-    # Include options for MCQ/Scenario if present
-    opts = item.get("options")
-    if isinstance(opts, list) and opts:
-        norm_opts = [ _normalize_text(x) for x in opts ]
-        parts.append("options=" + "|".join(norm_opts))
+    # Merge with file overrides if present:
+    file_data = _read_json_file(_WEIGHTS_FILE) or {}
+    if isinstance(file_data, dict):
+        for k, v in file_data.items():
+            try:
+                if isinstance(v, (int, float)) and k in keys:
+                    base[k] = float(v)
+            except Exception:
+                pass
 
-    # If True/False, include normalized answer
-    ans = item.get("answer")
-    if isinstance(ans, str):
-        parts.append("answer=" + _normalize_text(ans))
+    # Normalize to sum == 1.0
+    total = sum(max(0.0, x) for x in base.values())
+    if total <= 0:
+        even = 1.0 / max(1, len(keys))
+        return {k: even for k in keys}
+    return {k: max(0.0, base.get(k, 0.0)) / total for k in keys}
 
-    raw = "\n".join(parts).encode("utf-8")
-    return hashlib.sha256(raw).hexdigest()
+_DOMAIN_WEIGHTS = _load_weights()
 
-# ---------- Index load/save ----------
-def _load_index() -> Dict[str, int]:
+# --- Type quotas (fixed) ------------------------------------------------------
+# Enforced per selection batch: 50% MCQ, 25% T/F, 25% Scenario.
+_TYPE_QUOTAS = {
+    "mcq": 0.50,
+    "tf": 0.25,
+    "scenario": 0.25,
+}
+
+# --- Item model ---------------------------------------------------------------
+# Canonical item structure expected in each *.json file:
+# {
+#   "id": "uuid",
+#   "type": "mcq" | "tf" | "scenario",
+#   "domain": "domain1" | "...",     # DOMAINS key
+#   "question": "text",
+#   "options": ["A", "B", "C", "D"], # for mcq; optional otherwise
+#   "answer": "A" | true/false | ["multi"] | {"explain": "..."},
+#   "explanation": "text (optional)",
+#   "source": "string (optional)",
+#   "created_at": 1712345678.123
+# }
+
+def _norm_text(s: str) -> str:
+    s = s or ""
+    s = re.sub(r"\s+", " ", s, flags=re.MULTILINE).strip().lower()
+    return s
+
+def _dedupe_key(item: dict) -> str:
+    """Stable fingerprint to prevent duplicates (question + domain + type + answer core)."""
+    q = _norm_text(str(item.get("question", "")))
+    t = str(item.get("type", ""))
+    d = str(item.get("domain", ""))
+    a = item.get("answer", "")
+    a_core = json.dumps(a, sort_keys=True, ensure_ascii=False)
+    to_hash = f"{t}::{d}::{q}::{a_core}"
+    return hashlib.sha256(to_hash.encode("utf-8")).hexdigest()
+
+def _item_ok(item: Optional[dict]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    if item.get("type") not in ("mcq", "tf", "scenario"):
+        return False
+    if not item.get("question"):
+        return False
+    if not item.get("domain"):
+        return False
+    return True
+
+# --- Scan bank ---------------------------------------------------------------
+def _scan_dir(kind: str) -> List[dict]:
+    out: List[dict] = []
+    folder = os.path.join(BANK_DIR, kind)
     try:
-        with open(INDEX_JSON, "r", encoding="utf-8") as f:
-            obj = json.load(f) or {}
-            if isinstance(obj, dict):
-                return {k: int(v) for k, v in obj.items()}
-    except FileNotFoundError:
-        return {}
-    except Exception as e:
-        logger.warning("INDEX read failed: %r", e)
-    return {}
-
-def _save_index(idx: Dict[str, int]) -> None:
-    _atomic_write_json(INDEX_JSON, idx)
-
-# ---------- Canonical loader used by Section 7/8 ----------
-def load_all_items() -> List[dict]:
-    items: List[dict] = []
-
-    def _read_jsonl(path: str):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = json.loads(line)
-                        if isinstance(obj, dict):
-                            items.append(obj)
-                    except Exception:
-                        continue
-        except FileNotFoundError:
-            return
-        except Exception as e:
-            logger.warning("Could not read %s: %r", path, e)
-
-    # Primary file
-    _read_jsonl(ITEMS_JSONL)
-
-    # Any other *.jsonl files in bank/ (merging additional sources)
-    for p in glob.glob(os.path.join(BANK_DIR, "*.jsonl")):
-        if os.path.abspath(p) == os.path.abspath(ITEMS_JSONL):
-            continue
-        _read_jsonl(p)
-
-    return items
-
-# ---------- Public stats (per domain/type) for Admin ----------
-def _stats(items: List[dict]) -> Dict[str, Dict[str, int]]:
-    result: Dict[str, Dict[str, int]] = {}
-    for it in items:
-        d = it.get("domain", "unknown")
-        t = str(it.get("type", "")).lower()
-        bucket = result.setdefault(d, {})
-        bucket[t] = bucket.get(t, 0) + 1
-    return result
-
-# ---------- ADMIN UPLOAD API ----------
-try:
-    app  # noqa: F821
-    from flask import request, jsonify
-    try:
-        ADMIN_UPLOAD_TOKEN  # noqa: F821
-    except NameError:
-        ADMIN_UPLOAD_TOKEN = os.environ.get("ADMIN_UPLOAD_TOKEN", "")
-
-    MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", "5242880"))  # 5 MB default
-    ACCEPTED_MIME = {"application/json", "application/x-ndjson", "text/plain"}
-
-    def _admin_auth_ok() -> bool:
-        tok = request.headers.get("X-Admin-Token", "")
-        return bool(ADMIN_UPLOAD_TOKEN) and tok == ADMIN_UPLOAD_TOKEN
-
-    def _parse_upload_payload() -> Tuple[List[dict], List[str]]:
-        """
-        Accept either:
-          - multipart/form-data with a 'file' field (JSON or JSONL/NDJSON)
-          - raw JSON (list or object) in request.data
-          - raw NDJSON in text/plain
-        Returns (items, errors)
-        """
-        errors: List[str] = []
-        raw: bytes = b""
-
-        # Multipart path
-        if request.files:
-            f = request.files.get("file")
-            if not f:
-                return [], ["missing file"]
-            stream = f.stream.read()
-            if len(stream) > MAX_UPLOAD_BYTES:
-                return [], [f"file too large (> {MAX_UPLOAD_BYTES} bytes)"]
-            raw = stream
-        else:
-            # Raw body
-            body = request.get_data(cache=False, as_text=False)
-            if len(body) > MAX_UPLOAD_BYTES:
-                return [], [f"payload too large (> {MAX_UPLOAD_BYTES} bytes)"]
-            raw = body
-
-        # Try JSON (array or single object)
-        try:
-            obj = json.loads(raw.decode("utf-8"))
-            if isinstance(obj, list):
-                items = [x for x in obj if isinstance(x, dict)]
-            elif isinstance(obj, dict):
-                # Could be {"items":[...]}
-                if "items" in obj and isinstance(obj["items"], list):
-                    items = [x for x in obj["items"] if isinstance(x, dict)]
-                else:
-                    items = [obj]
-            else:
-                items = []
-            if items:
-                return items, errors
-        except Exception:
-            pass
-
-        # Try NDJSON/JSONL
-        items: List[dict] = []
-        try:
-            for line in raw.decode("utf-8").splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    o = json.loads(line)
-                    if isinstance(o, dict):
-                        items.append(o)
-                except Exception:
-                    continue
-        except Exception as e:
-            errors.append(f"decode error: {e!r}")
-
-        return items, errors
-
-    @app.post("/api/admin/items/upload")
-    def api_admin_items_upload():
-        if not _admin_auth_ok():
-            return jsonify({"ok": False, "error": "Unauthorized"}), 401
-
-        items, errs = _parse_upload_payload()
-        if errs:
-            return jsonify({"ok": False, "error": "; ".join(errs)}), 400
-        if not items:
-            return jsonify({"ok": False, "error": "no items parsed"}), 400
-
-        # Normalize, dedup, and minimal validation
-        idx = _load_index()
-        new_items: List[dict] = []
-        skipped = 0
-
-        for it in items:
-            # Minimal validation
-            t = (it.get("type") or "").strip().lower()
-            d = it.get("domain")
-            stem = it.get("stem")
-            if t not in ("mcq", "tf", "scenario"):
-                # normalize aliases if any
-                if t in ("truefalse", "true_false", "boolean"):
-                    t = "tf"
-                    it["type"] = "tf"
-                else:
-                    # skip unknown types
-                    skipped += 1
-                    continue
-            if not d or not stem:
-                skipped += 1
+        for name in os.listdir(folder):
+            if not name.endswith(".json"):
                 continue
-
-            # Normalize fields
-            it["type"] = t
-            it["domain"] = str(d).strip()
-            it["stem"] = str(stem).strip()
-
-            # Ensure options exist for MCQ/Scenario
-            if t in ("mcq", "scenario"):
-                opts = it.get("options")
-                if not (isinstance(opts, list) and opts):
-                    skipped += 1
-                    continue
-
-            key = _dedup_key(it)
-            if key in idx:
-                skipped += 1
-                continue
-
-            # Mark and collect
-            idx[key] = 1
-            # Attach source marker if provided
-            src = request.headers.get("X-Source-Name", "").strip()
-            if src:
-                it.setdefault("sources", [])
-                if src not in it["sources"]:
-                    it["sources"].append(src)
-            new_items.append(it)
-
-        # Persist new items and updated index
-        if new_items:
-            _append_jsonl(ITEMS_JSONL, new_items)
-            _save_index(idx)
-
-        # Optional: update a simple sources.json tally
-        try:
-            sources = {}
-            if os.path.exists(SOURCES_JSON):
-                with open(SOURCES_JSON, "r", encoding="utf-8") as f:
-                    prev = json.load(f) or {}
-                    if isinstance(prev, dict):
-                        sources = prev
-            src_name = request.headers.get("X-Source-Name", "").strip() or "unspecified"
-            sources[src_name] = int(sources.get(src_name, 0)) + len(new_items)
-            _atomic_write_json(SOURCES_JSON, sources)
-        except Exception as e:
-            logger.warning("sources.json update failed: %r", e)
-
-        return jsonify({
-            "ok": True,
-            "added": len(new_items),
-            "skipped": skipped,
-            "total_bank": len(load_all_items())
-        }), 200
-
-    @app.get("/api/admin/items/stats")
-    def api_admin_items_stats():
-        if not _admin_auth_ok():
-            return jsonify({"ok": False, "error": "Unauthorized"}), 401
-        items = load_all_items()
-        return jsonify({
-            "ok": True,
-            "count": len(items),
-            "by_domain_type": _stats(items)
-        }), 200
-
-    # CSRF exemption if Flask-WTF CSRF is present (matches earlier rule style)
-    try:
-        _csrf_obj = globals().get("csrf")
-        if _csrf_obj is not None:
-            _csrf_obj.exempt(api_admin_items_upload)
-            _csrf_obj.exempt(api_admin_items_stats)
+            data = _read_json_file(os.path.join(folder, name))
+            if _item_ok(data):
+                out.append(data)  # trust file IDs
     except Exception:
         pass
+    return out
 
-except NameError:
-    # app not defined yet (very early import); in your file order app exists already
-    pass
+def bank_index() -> Dict[str, List[dict]]:
+    """Return {'mcq': [...], 'tf': [...], 'scenario': [...]}"""
+    return {
+        "mcq": _scan_dir("mcq"),
+        "tf": _scan_dir("tf"),
+        "scenario": _scan_dir("scenario"),
+    }
 
-# =====================================================================
-# SECTION 6/8 — CONTENT BANK & ADMIN UPLOAD
-# END OF SECTION 6/8
-# =====================================================================
+# In-memory dedupe index (by fingerprint)
+_DEDUPE: set = set()
+def _refresh_dedupe() -> None:
+    _DEDUPE.clear()
+    idx = bank_index()
+    for kind, items in idx.items():
+        for it in items:
+            _DEDUPE.add(_dedupe_key(it))
 
+_refresh_dedupe()
+
+# --- Add items (admin will use in Section 7/8) -------------------------------
+def add_bank_items(new_items: List[dict]) -> Tuple[int, int]:
+    """
+    Add items to the bank with dedupe.
+    Returns: (added_count, skipped_count)
+    """
+    added = 0
+    skipped = 0
+    now = time.time()
+
+    for item in new_items:
+        if not _item_ok(item):
+            skipped += 1
+            continue
+        fp = _dedupe_key(item)
+        if fp in _DEDUPE:
+            skipped += 1
+            continue
+
+        # Assign ID if missing
+        item.setdefault("id", str(uuid.uuid4()))
+        item.setdefault("created_at", now)
+
+        kind = item["type"]
+        out_path = os.path.join(BANK_DIR, kind, f"{item['id']}.json")
+        try:
+            _atomic_write_json(out_path, item)
+            _DEDUPE.add(fp)
+            added += 1
+        except Exception:
+            skipped += 1
+
+    return added, skipped
+
+# --- Selection helpers (weights + quotas) ------------------------------------
+def _weighted_domain(dom: str) -> float:
+    return float(_DOMAIN_WEIGHTS.get(dom, 0.0))
+
+def _filter_by_domain(items: List[dict], domain: Optional[str]) -> List[dict]:
+    if not domain or domain == "random":
+        return items[:]  # no filter
+    return [x for x in items if x.get("domain") == domain]
+
+def _quota_counts(total: int) -> Dict[str, int]:
+    """Compute per-type counts from quotas; ensure sum == total."""
+    raw = {k: int(total * v) for k, v in _TYPE_QUOTAS.items()}
+    # fix rounding drift
+    used = sum(raw.values())
+    while used < total:
+        # assign the remainder to the largest quota type first
+        k = max(_TYPE_QUOTAS, key=_TYPE_QUOTAS.get)
+        raw[k] += 1
+        used += 1
+    while used > total:
+        k = min(_TYPE_QUOTAS, key=_TYPE_QUOTAS.get)
+        if raw[k] > 0:
+            raw[k] -= 1
+            used -= 1
+        else:
+            break
+    return raw
+
+def _weighted_sample(items: List[dict], count: int) -> List[dict]:
+    """Domain-weighted sampling without replacement."""
+    if count <= 0 or not items:
+        return []
+
+    # Group by domain
+    by_dom: Dict[str, List[dict]] = {}
+    for it in items:
+        by_dom.setdefault(it.get("domain", ""), []).append(it)
+
+    # Allocate per domain by weight
+    # Normalize to available pool sizes to avoid over-ask
+    available = {d: len(v) for d, v in by_dom.items()}
+    weights = {d: _weighted_domain(d) for d in by_dom}
+    wsum = sum(weights.values()) or 1.0
+    # Initial allocation
+    alloc = {d: int(round(count * (weights[d] / wsum))) for d in by_dom}
+
+    # Adjust for pool limits
+    deficit = 0
+    for d in list(alloc.keys()):
+        if alloc[d] > available[d]:
+            deficit += alloc[d] - available[d]
+            alloc[d] = available[d]
+
+    # Distribute remaining to domains with spare items
+    if deficit > 0:
+        spares = {d: available[d] - alloc[d] for d in by_dom}
+        while deficit > 0:
+            # Pick domain with biggest spare and non-zero weight
+            pick = None
+            best = -1
+            for d, s in spares.items():
+                if s > best and weights.get(d, 0.0) > 0:
+                    best = s
+                    pick = d
+            if not pick or best <= 0:
+                break
+            alloc[pick] += 1
+            spares[pick] -= 1
+            deficit -= 1
+
+    # Final pick
+    chosen: List[dict] = []
+    for d, n in alloc.items():
+        pool = by_dom[d][:]
+        random.shuffle(pool)
+        chosen.extend(pool[:max(0, n)])
+
+    # Trim or pad if still off due to rounding
+    if len(chosen) > count:
+        chosen = chosen[:count]
+    elif len(chosen) < count:
+        # Fill with any remaining (uniform)
+        remaining = [it for d, arr in by_dom.items() for it in arr if it not in chosen]
+        random.shuffle(remaining)
+        need = count - len(chosen)
+        chosen.extend(remaining[:need])
+
+    return chosen
+
+def choose_questions(
+    total: int,
+    domain: Optional[str] = None,
+    *,
+    allow_fallback: bool = True
+) -> List[dict]:
+    """
+    Return a list of questions from the bank honoring:
+      - domain weights (or a single domain filter if provided),
+      - per-type quotas (MCQ 50%, TF 25%, Scenario 25%).
+    If the bank lacks enough items and allow_fallback=True,
+    returns as many as possible (possibly less than `total`).
+    """
+    total = max(1, int(total))
+    quotas = _quota_counts(total)
+    idx = bank_index()
+
+    selected: List[dict] = []
+    for kind, n in quotas.items():
+        pool = _filter_by_domain(idx.get(kind, []), domain)
+        if not pool:
+            continue
+        picks = _weighted_sample(pool, n)
+        selected.extend(picks)
+
+    # If we are short (bank too small), optionally fill with anything left.
+    short = total - len(selected)
+    if short > 0 and allow_fallback:
+        rest = []
+        for kind, items in idx.items():
+            rest.extend(_filter_by_domain(items, domain))
+        # remove already chosen (by id)
+        seen = {it.get("id") for it in selected}
+        rest = [it for it in rest if it.get("id") not in seen]
+        random.shuffle(rest)
+        selected.extend(rest[:short])
+
+    # Final trim if somehow exceeded (shouldn’t)
+    return selected[:total]
+
+# ======================================================================
+# === SECTION 6/8: DATA BANK & CPP WEIGHTS — END =======================
+# ======================================================================
 
 # =====================================================================
 # =====================================================================
@@ -2339,6 +2338,7 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
 
 
