@@ -488,6 +488,66 @@ def sec1_legal_terms():
     </div>
     """
     return base_layout("Terms", body)
+# ---- Health probe & /healthz (append to end of Section 1/8; do NOT remove anything above) ----
+
+# Service start time (used for uptime)
+_SERVICE_STARTED_AT = time.time()
+
+def _probe_data_dir() -> dict:
+    """Check that DATA_DIR exists and is writable via an atomic write probe."""
+    exists = os.path.isdir(DATA_DIR)
+    writable = False
+    err = ""
+    probe_path = os.path.join(DATA_DIR, ".health_probe.tmp")
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(probe_path, "w", encoding="utf-8") as f:
+            f.write(str(time.time()))
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(probe_path, probe_path + ".done")
+        os.remove(probe_path + ".done")
+        writable = True
+    except Exception as e:
+        err = str(e)
+        try:
+            # Clean up if partial files exist
+            if os.path.exists(probe_path):
+                os.remove(probe_path)
+            if os.path.exists(probe_path + ".done"):
+                os.remove(probe_path + ".done")
+        except Exception:
+            pass
+    return {
+        "exists": exists,
+        "writable": writable,
+        "error": err,
+    }
+
+@app.get("/healthz", endpoint="sec1_healthz")
+def sec1_healthz():
+    """
+    Lightweight health endpoint for Render.
+    Returns 200 with basic service and filesystem status.
+    """
+    probe = _probe_data_dir()
+    payload = {
+        "service": "cpp-test-prep",
+        "version": APP_VERSION,
+        "debug": bool(DEBUG),
+        "staging": bool(IS_STAGING),
+        "started_at": datetime.utcfromtimestamp(_SERVICE_STARTED_AT).isoformat() + "Z",
+        "uptime_seconds": int(time.time() - _SERVICE_STARTED_AT),
+        "data_dir": DATA_DIR,
+        "data_dir_exists": probe["exists"],
+        "data_dir_writable": probe["writable"],
+    }
+    # If the directory is missing or unwritable, still return 200 so Render doesn't kill the deploy,
+    # but include the error detail to logs.
+    if not probe["writable"] and probe["error"]:
+        logger.warning("healthz data_dir probe issue: %s", probe["error"])
+    return jsonify(payload), 200
+
 
 # ==== START SECTION 2/8 — Terms & Conditions (Standalone) + Footer Helper ====
 # STABILITY: Footer snippet appended to pages without altering existing templates.
@@ -2236,6 +2296,7 @@ def root_redirect():
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
 ### END OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
+
 
 
 
