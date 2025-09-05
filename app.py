@@ -748,315 +748,301 @@ def legal_alias():
 
 
 # =========================
+# SECTION 3/8: Tutor (UI + API, intro, rotating suggested questions, safe OpenAI call)
 # =========================
-# SECTION 3/8 — Quiz & Practice
-# Routes (must match your existing ownership):
-#   /quiz                   [GET, POST]
-#   /practice               [GET, POST]
-#   /results                [GET]
-# =========================
-from flask import render_template_string
+import json as _json
+import urllib.request as _urlreq
+import urllib.error as _urlerr
 
-# NOTE: This section intentionally renders any HTML that contains <script> with
-#       render_template_string to avoid Python f-string parsing of JS braces.
+# ---- Tutor config / helpers ----
 
-# ---------- Shared tiny helpers ----------
-def _domain_label(key: str) -> str:
-    return DOMAINS.get(key, "Mixed") if key and key != "random" else "Random (all)"
+# Curated pool of suggested questions; page shows 4 at a time and replaces any clicked one.
+_TUTOR_SUGGESTIONS = [
+    "Explain the three lines of defense in corporate risk governance.",
+    "How do you calculate risk using likelihood and impact? Give an example.",
+    "What are common CPTED principles and how do they reduce incidents?",
+    "Outline an incident response plan for a data breach at HQ.",
+    "What is the purpose of due diligence in vendor management?",
+    "Compare proprietary vs. contract security forces—pros and cons.",
+    "What is a vulnerability assessment vs. a threat assessment?",
+    "How should evidence be preserved during an internal investigation?",
+    "What are common access control models (DAC, MAC, RBAC)?",
+    "Define business continuity vs. disaster recovery with examples.",
+    "What KPIs would you use to measure a security program’s performance?",
+    "Explain executive protection advance work and site surveys.",
+    "How to apply the crime triangle to reduce theft incidents?",
+    "What are key elements of a workplace violence prevention program?",
+    "Describe a layered physical security approach for a data center.",
+]
 
-def _safe_int(v, default: int) -> int:
-    try:
-        x = int(v)
-        return x
-    except Exception:
-        return default
+def _ai_enabled() -> bool:
+    return bool(OPENAI_API_KEY)
 
-# ---------- QUIZ PICKER ----------
-@app.route("/quiz", methods=["GET", "POST"], endpoint="sec3_quiz_page")
-@login_required
-def sec3_quiz_page():
-    if request.method == "GET":
-        csrf_val = csrf_token()
-        domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
-
-        tpl = """
-        <div class="container">
-          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-            <div class="card">
-              <div class="card-header bg-primary text-white">
-                <h3 class="mb-0"><i class="bi bi-check2-circle me-2"></i>Quiz</h3>
-              </div>
-              <div class="card-body">
-                <form method="POST" class="mb-3">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_val }}"/>
-                  <label class="form-label fw-semibold">Domain</label>
-                  {{ domain_buttons|safe }}
-                  <div class="row g-3 mt-2">
-                    <div class="col-sm-6">
-                      <label class="form-label fw-semibold">Number of questions</label>
-                      <div class="d-flex flex-wrap gap-2">
-                        <button class="btn btn-outline-primary" name="count" value="10">10</button>
-                        <button class="btn btn-outline-primary" name="count" value="20">20</button>
-                        <button class="btn btn-outline-primary" name="count" value="30">30</button>
-                      </div>
-                    </div>
-                    <div class="col-sm-6">
-                      <label class="form-label fw-semibold">Mode</label>
-                      <div>
-                        <label class="me-3"><input type="radio" name="mode" value="exam" checked> Exam</label>
-                        <label class="me-3"><input type="radio" name="mode" value="practice"> Practice</label>
-                      </div>
-                    </div>
-                  </div>
-                </form>
-                <div class="text-muted small">Tip: Choose a domain or use Random to mix all.</div>
-              </div>
-            </div>
-          </div></div>
-        </div>
-
-        <script>
-          (function() {
-            var container = document.currentScript.closest('.card').querySelector('.card-body');
-            var hidden = container.querySelector('#domain_val');
-            container.querySelectorAll('.domain-btn').forEach(function(btn) {
-              btn.addEventListener('click', function() {
-                container.querySelectorAll('.domain-btn').forEach(function(b) { b.classList.remove('active'); });
-                btn.classList.add('active');
-                if (hidden) hidden.value = btn.getAttribute('data-value');
-              });
-            });
-          })();
-        </script>
-        """
-        return base_layout("Quiz", render_template_string(tpl, csrf_val=csrf_val, domain_buttons=domain_buttons))
-
-    # POST: start a quiz session (client-side rendered; server just prepares items)
-    if not _csrf_ok():
-        abort(403)
-
-    domain = (request.form.get("domain") or "random").strip()
-    mode = (request.form.get("mode") or "exam").strip()
-    count = _safe_int(request.form.get("count"), 20)
-    if count not in (10, 20, 30):
-        count = 20
-
-    # Load bank questions and filter
-    bank = _load_json("bank/cpp_questions_v1.json", [])
-    pool = []
-    dk = domain.lower()
-    for q in bank:
-        d = str(q.get("domain", "")).strip().lower()
-        if domain == "random" or d == dk:
-            pool.append(q)
-    random.shuffle(pool)
-    items = pool[:max(0, min(count, len(pool)))]
-
-    # Render client quiz (no server session)
-    rows = []
-    for idx, q in enumerate(items, start=1):
-        stem = html.escape(q.get("question", ""))
-        opts = q.get("options", {}) or {}
-        def esc(k): return html.escape(opts.get(k, ""))
-        rows.append(f"""
-          <div class="quiz-q mb-3" data-idx="{idx}" data-correct="{html.escape(q.get('correct',''))}">
-            <div class="fw-semibold mb-1">{idx}. {stem}</div>
-            <div class="ps-2">
-              <div><label><input type="radio" name="q{idx}" value="A"> A) {esc('A')}</label></div>
-              <div><label><input type="radio" name="q{idx}" value="B"> B) {esc('B')}</label></div>
-              <div><label><input type="radio" name="q{idx}" value="C"> C) {esc('C')}</label></div>
-              <div><label><input type="radio" name="q{idx}" value="D"> D) {esc('D')}</label></div>
-            </div>
-          </div>
-        """)
-    questions_html = "".join(rows) or "<div class='text-muted'>No questions available. Add items to <code>data/bank/cpp_questions_v1.json</code>.</div>"
-
-    tpl = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-check2-circle me-2"></i>Quiz</h3>
-            <a href="/quiz" class="btn btn-outline-light btn-sm">New Quiz</a>
-          </div>
-          <div class="card-body">
-            <div class="small text-muted mb-2">Domain: <strong>{{ domain_label }}</strong> &bull; Questions: {{ n_items }} &bull; Mode: {{ mode }}</div>
-            <form id="quizForm">
-              {{ questions_html|safe }}
-              <div class="mt-3">
-                <button type="button" id="submitBtn" class="btn btn-primary"><i class="bi bi-clipboard-check me-1"></i>Submit</button>
-                <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-                <span class="ms-3 small text-muted" id="scoreLabel"></span>
-              </div>
-            </form>
-          </div>
-        </div>
-      </div></div>
-    </div>
-
-    <script>
-    (function() {
-      var form = document.getElementById('quizForm');
-      var btn = document.getElementById('submitBtn');
-      function grade() {
-        var total = 0, ok = 0;
-        document.querySelectorAll('.quiz-q').forEach(function(block) {
-          total += 1;
-          var correct = block.getAttribute('data-correct') || '';
-          var checked = block.querySelector('input[type=radio]:checked');
-          var val = checked ? checked.value : '';
-          if (val === correct) ok += 1;
-        });
-        var pct = total ? Math.round(100.0 * ok / total) : 0;
-        document.getElementById('scoreLabel').textContent = 'Score: ' + ok + '/' + total + ' (' + pct + '%)';
-      }
-      btn.addEventListener('click', grade);
-    })();
-    </script>
+def _openai_chat_completion(user_prompt: str) -> Tuple[bool, str]:
     """
-    # (Optional) record usage
+    Calls OpenAI's /chat/completions API using stdlib (no external deps).
+    Returns (ok, text). If API key is missing or any error, returns (False, reason or fallback).
+    """
+    if not _ai_enabled():
+        return False, ("Tutor is currently in offline mode. "
+                       "No API key configured. You can still study with flashcards, quizzes, and mock exams.")
+    url = f"{OPENAI_API_BASE.rstrip('/')}/chat/completions"
+    sys_prompt = (
+        "You are an expert CPP (Certified Protection Professional) study tutor. "
+        "Explain clearly, cite general best practices, and avoid proprietary or member-only ASIS content. "
+        "Keep answers concise and actionable. When useful, give short bullet points or an example scenario. "
+        "Never claim this platform is ASIS-approved."
+    )
+    payload = {
+        "model": OPENAI_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 700,
+    }
+    data = _json.dumps(payload).encode("utf-8")
+    req = _urlreq.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+        method="POST",
+    )
     try:
-        _bump_usage("quizzes", 1)
-    except Exception:
-        pass
+        with _urlreq.urlopen(req, timeout=25) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+            obj = _json.loads(raw)
+            msg = (obj.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if not msg:
+                return False, "The Tutor did not return a response. Please try again."
+            return True, msg.strip()
+    except _urlerr.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", "ignore")
+        except Exception:
+            err_body = str(e)
+        logger.warning("Tutor HTTPError: %s %s", e, err_body)
+        return False, "Tutor request failed. Please try again."
+    except Exception as e:
+        logger.warning("Tutor error: %s", e)
+        return False, "Tutor is temporarily unavailable. Please try again."
 
-    return base_layout("Quiz", render_template_string(
-        tpl,
-        domain_label=_domain_label(domain),
-        n_items=len(items),
-        mode=("Exam" if mode == "exam" else "Practice"),
-        questions_html=questions_html
-    ))
+def _append_tutor_attempt(uid: str, question: str, answer: str, ok: bool):
+    rec = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "user_id": uid,
+        "mode": "tutor",
+        "question": question,
+        "answer": answer,
+        "ok": bool(ok),
+    }
+    attempts = _load_json("attempts.json", [])
+    attempts.append(rec)
+    _save_json("attempts.json", attempts)
 
-# ---------- PRACTICE (single Q per page; simple client) ----------
-@app.route("/practice", methods=["GET", "POST"], endpoint="sec3_practice_page")
+# ---- Routes ----
+
+@app.get("/tutor", endpoint="sec3_tutor_page")
 @login_required
-def sec3_practice_page():
-    if request.method == "GET":
-        csrf_val = csrf_token()
-        domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
+def sec3_tutor_page():
+    """
+    Tutor landing with intro + 4 rotating suggestions.
+    Clicking a suggestion auto-submits and replaces it with a new one (client-side).
+    """
+    # Seed suggestions on each render (client JS randomizes and rotates)
+    suggestions_js = _json.dumps(_TUTOR_SUGGESTIONS, ensure_ascii=False)
 
-        tpl = """
-        <div class="container">
-          <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-            <div class="card">
-              <div class="card-header bg-success text-white">
-                <h3 class="mb-0"><i class="bi bi-lightning-charge me-2"></i>Practice</h3>
-              </div>
-              <div class="card-body">
-                <form method="POST" class="mb-3">
-                  <input type="hidden" name="csrf_token" value="{{ csrf_val }}"/>
-                  <label class="form-label fw-semibold">Domain</label>
-                  {{ domain_buttons|safe }}
-                  <div class="mt-3">
-                    <button class="btn btn-success" type="submit" name="start" value="1"><i class="bi bi-play-circle me-1"></i>Start</button>
-                    <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-                  </div>
-                </form>
-                <div class="text-muted small">Tip: Pick a domain, then tap Start.</div>
-              </div>
-            </div>
-          </div></div>
-        </div>
+    # Display a soft banner if Tutor is offline (no key)
+    offline_note = ""
+    if not _ai_enabled():
+        offline_note = (
+            '<div class="alert alert-warning small mb-3">'
+            '<i class="bi bi-wifi-off me-1"></i>'
+            'Tutor is in offline mode (no API key configured). '
+            'You can still use Flashcards, Quiz, and Mock Exam.'
+            "</div>"
+        )
 
-        <script>
-          (function() {
-            var container = document.currentScript.closest('.card').querySelector('.card-body');
-            var hidden = container.querySelector('#domain_val');
-            container.querySelectorAll('.domain-btn').forEach(function(btn) {
-              btn.addEventListener('click', function() {
-                container.querySelectorAll('.domain-btn').forEach(function(b) { b.classList.remove('active'); });
-                btn.classList.add('active');
-                if (hidden) hidden.value = btn.getAttribute('data-value');
-              });
-            });
-          })();
-        </script>
-        """
-        return base_layout("Practice", render_template_string(tpl, csrf_val=csrf_val, domain_buttons=domain_buttons))
-
-    # POST -> pick one random question and render it client-side
-    if not _csrf_ok():
-        abort(403)
-
-    domain = (request.form.get("domain") or "random").strip()
-    bank = _load_json("bank/cpp_questions_v1.json", [])
-    pool = []
-    dk = domain.lower()
-    for q in bank:
-        d = str(q.get("domain", "")).strip().lower()
-        if domain == "random" or d == dk:
-            pool.append(q)
-    random.shuffle(pool)
-    q = pool[0] if pool else None
-
-    if not q:
-        body = """
-        <div class="container"><div class="row justify-content-center"><div class="col-md-6">
-          <div class="alert alert-info mt-4">No questions available for this domain.</div>
-          <a href="/practice" class="btn btn-outline-secondary"><i class="bi bi-arrow-left me-1"></i>Back</a>
-        </div></div></div>
-        """
-        return base_layout("Practice", body)
-
-    stem = html.escape(q.get("question", ""))
-    opts = q.get("options", {}) or {}
-    def esc(k): return html.escape(opts.get(k, ""))
-
-    tpl = """
+    body = render_template_string("""
     <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-        <div class="card">
-          <div class="card-header bg-success text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-lightning-charge me-2"></i>Practice</h3>
-            <a href="/practice" class="btn btn-outline-light btn-sm">New</a>
-          </div>
-          <div class="card-body">
-            <div class="small text-muted mb-2">Domain: <strong>{{ domain_label }}</strong></div>
-            <div class="mb-2 fw-semibold">{{ stem }}</div>
-            <div class="ps-2" id="practiceBlock">
-              <div><label><input type="radio" name="a" value="A"> A) {{ A }}</label></div>
-              <div><label><input type="radio" name="a" value="B"> B) {{ B }}</label></div>
-              <div><label><input type="radio" name="a" value="C"> C) {{ C }}</label></div>
-              <div><label><input type="radio" name="a" value="D"> D) {{ D }}</label></div>
-            </div>
-            <div class="mt-3">
-              <button type="button" id="revealBtn" class="btn btn-success"><i class="bi bi-eye me-1"></i>Reveal</button>
-              <a class="btn btn-outline-secondary ms-2" href="/"><i class="bi bi-house me-1"></i>Home</a>
-              <span class="ms-3 small text-muted" id="resultLabel"></span>
+      <div class="mb-3">
+        <h1 class="h4 mb-1"><i class="bi bi-chat-dots"></i> AI Tutor</h1>
+        <p class="text-muted mb-0">
+          Ask concept questions, get explanations, and see short examples. 
+          You can also click a suggested question on the right — it will send automatically.
+        </p>
+      </div>
+
+      {{ offline_note|safe }}
+
+      <div class="row g-3">
+        <!-- Main chat area -->
+        <div class="col-lg-8">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <div id="chat-log" class="mb-3" style="min-height: 160px;">
+                <div class="text-muted small">No messages yet. Ask a question to get started.</div>
+              </div>
+              <form id="ask-form" method="post" action="/tutor/ask">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <div class="mb-2">
+                  <label for="q" class="form-label">Your question</label>
+                  <textarea id="q" name="q" class="form-control" rows="3" 
+                            placeholder="e.g., How should I structure a workplace violence prevention program?"></textarea>
+                </div>
+                <div class="d-flex gap-2 align-items-center">
+                  <button id="ask-btn" type="submit" class="btn btn-primary">
+                    <i class="bi bi-send"></i> Ask
+                  </button>
+                  <div id="ask-pending" class="text-muted small d-none">
+                    <span class="spinner-border spinner-border-sm"></span> Tutor is thinking...
+                  </div>
+                </div>
+              </form>
             </div>
           </div>
         </div>
-      </div></div>
+
+        <!-- Suggestions -->
+        <div class="col-lg-4">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h2 class="h6 mb-3"><i class="bi bi-lightbulb"></i> Suggested questions</h2>
+              <div id="sugg-container" class="d-grid gap-2"></div>
+              <div class="text-muted small mt-2">
+                Click any suggestion — it sends automatically and a new one appears.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
-    <script>
-    (function() {
-      var correct = "{{ correct }}";
-      var btn = document.getElementById('revealBtn');
-      var label = document.getElementById('resultLabel');
-      btn.addEventListener('click', function() {
-        var checked = document.querySelector('#practiceBlock input[type=radio]:checked');
-        var val = checked ? checked.value : '';
-        if (!val) { label.textContent = 'Choose an option'; return; }
-        label.textContent = (val === correct) ? 'Correct!' : ('Incorrect — correct answer is ' + correct);
+<script>
+(function(){
+  const SUGG_POOL = {{ suggestions_js|safe }};
+  const shown = new Set();
+  const maxShown = 4;
+
+  function pickNewSuggestion() {
+    // pick an index not currently shown; allow repeats only if pool is tiny
+    const candidates = SUGG_POOL.filter(s => !shown.has(s));
+    const pool = candidates.length ? candidates : SUGG_POOL;
+    const s = pool[Math.floor(Math.random() * pool.length)];
+    shown.add(s);
+    return s;
+  }
+
+  function renderSuggestions() {
+    const cont = document.getElementById('sugg-container');
+    cont.innerHTML = '';
+    // ensure exactly 4 visible
+    while (shown.size < maxShown) pickNewSuggestion();
+    Array.from(shown).slice(0, maxShown).forEach(txt => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-outline-secondary text-start';
+      btn.textContent = txt;
+      btn.addEventListener('click', function(){
+        autoAsk(txt);
+        // replace this suggestion with a fresh one
+        shown.delete(txt);
+        // ensure we keep 4 visible by re-rendering after sending
+        setTimeout(renderSuggestions, 100);
       });
-    })();
-    </script>
-    """
-    # optional usage bump
+      cont.appendChild(btn);
+    });
+  }
+
+  async function autoAsk(text){
+    const form = document.getElementById('ask-form');
+    const qEl = document.getElementById('q');
+    qEl.value = text;
+    await submitForm();
+  }
+
+  async function submitForm(){
+    const form = document.getElementById('ask-form');
+    const btn = document.getElementById('ask-btn');
+    const pending = document.getElementById('ask-pending');
+    const qEl = document.getElementById('q');
+    const chat = document.getElementById('chat-log');
+
+    const question = (qEl.value || '').trim();
+    if (!question) return;
+
+    btn.disabled = true; pending.classList.remove('d-none');
+
+    // optimistic render user message
+    const me = document.createElement('div');
+    me.className = 'mb-2';
+    me.innerHTML = '<div class="fw-semibold">You</div><div>' + escapeHtml(question) + '</div>';
+    chat.appendChild(me);
+
+    try {
+      const formData = new FormData(form);
+      const resp = await fetch('/tutor/ask', { method: 'POST', body: formData });
+      const data = await resp.json();
+      const ai = document.createElement('div');
+      ai.className = 'mb-3';
+      ai.innerHTML = '<div class="fw-semibold">Tutor</div><div>' + (data.answer_html || escapeHtml(data.answer || '')) + '</div>';
+      chat.appendChild(ai);
+      qEl.value = '';
+      chat.scrollTop = chat.scrollHeight;
+    } catch (e) {
+      const err = document.createElement('div');
+      err.className = 'text-danger small';
+      err.textContent = 'Error sending to Tutor. Please try again.';
+      chat.appendChild(err);
+    } finally {
+      btn.disabled = false; pending.classList.add('d-none');
+    }
+  }
+
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, (c) => ({
+      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
+    }[c]));
+  }
+
+  document.getElementById('ask-form').addEventListener('submit', function(e){
+    e.preventDefault();
+    submitForm();
+  });
+
+  // initial paint
+  renderSuggestions();
+})();
+</script>
+    """, suggestions_js=suggestions_js, offline_note=offline_note, csrf_token=csrf_token)
+    return base_layout("Tutor", body)
+
+@app.post("/tutor/ask", endpoint="sec3_tutor_ask")
+@login_required
+def sec3_tutor_ask():
+    if not _csrf_ok():
+        abort(403)
+    q = (request.form.get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "empty"}), 400
+
+    ok, ans = _openai_chat_completion(q)
+    # Minimal Markdown-ish to HTML (bold lists etc.) — keep very light to avoid XSS risks.
+    # We escape on the client unless we trust this transform.
+    safe_html = "<p>" + html.escape(ans).replace("\n\n", "</p><p>").replace("\n", "<br/>") + "</p>"
+
+    uid = _user_id()
     try:
-        _bump_usage("questions", 1)
+        _append_tutor_attempt(uid, q, ans, ok)
+        _log_event(uid, "tutor.ask", {"ok": ok})
     except Exception:
         pass
 
-    return base_layout("Practice", render_template_string(
-        tpl,
-        domain_label=_domain_label(domain),
-        stem=stem,
-        A=esc("A"), B=esc("B"), C=esc("C"), D=esc("D"),
-        correct=q.get("correct", "")
-    ))
+    return jsonify({"ok": ok, "answer": ans, "answer_html": safe_html})
 
 
 ### START OF SECTION 4/8 — QUIZ & MOCK (BANK-POWERED, UI PRESERVED)
@@ -2296,6 +2282,7 @@ def root_redirect():
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
 ### END OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
+
 
 
 
