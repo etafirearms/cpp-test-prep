@@ -743,6 +743,167 @@ def legal_terms():
 @app.get("/legal")
 def legal_alias():
     return redirect(url_for("legal_terms"), code=302)
+# =========================
+# SECTION 2.x: Ops hardening + restore utility pages if missing
+# (Place after Section 1, before Tutor/Quiz sections.)
+# =========================
+
+# Ensure we have a boot timestamp for uptime calc
+app.config.setdefault("_BOOT_TS", time.time())
+
+def _path_writable_probe(base_dir: str) -> Tuple[bool, str]:
+    """
+    Try to create, fsync, and atomically move a tiny probe file inside base_dir.
+    Returns (ok, error_message_if_any). Robust to FS quirks.
+    """
+    try:
+        os.makedirs(base_dir, exist_ok=True)
+        test_tmp = os.path.join(base_dir, ".health_probe.tmp")
+
+        # Create+write+fsync probe file
+        with open(test_tmp, "w", encoding="utf-8") as f:
+            f.write("ok")
+            f.flush()
+            os.fsync(f.fileno())
+
+        # Try atomic replace to verify rename semantics
+        done = test_tmp + ".done"
+        try:
+            os.replace(test_tmp, done)
+        except FileNotFoundError as e:
+            # If a quirky FS removed tmp, report the truth (not writable) with detail
+            if not os.path.exists(test_tmp):
+                return False, f"tmp missing after write: {e}"
+        except Exception as e:
+            return False, f"replace failed: {e}"
+
+        # Cleanup best-effort
+        try:
+            if os.path.exists(done):
+                os.remove(done)
+        except Exception:
+            pass
+
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+@app.get("/healthz", endpoint="sec2_healthz")
+def sec2_healthz():
+    """
+    Simple, stable health endpoint.
+    - Verifies DATA_DIR exists and is writable (tolerant of FS quirks).
+    - Never does outbound calls.
+    """
+    ok, err = _path_writable_probe(DATA_DIR)
+    if not ok:
+        logger.warning("healthz data_dir writable check failed: %s", err)
+    resp = {
+        "service": "cpp-exam-prep",
+        "version": APP_VERSION,
+        "debug": DEBUG,
+        "staging": IS_STAGING,
+        "started_at": datetime.utcfromtimestamp(app.config.get("_BOOT_TS", time.time())).isoformat() + "Z",
+        "uptime_seconds": int(time.time() - app.config.get("_BOOT_TS", time.time())),
+        "data_dir": DATA_DIR,
+        "data_dir_exists": os.path.isdir(DATA_DIR),
+        "data_dir_writable": ok,
+        "note": ("If data_dir_writable is false, ensure the Render Disk is attached and DATA_DIR "
+                 "matches the mount path (e.g., /data)."),
+    }
+    return jsonify(resp), 200
+
+# ---------- Restore utility pages if missing ----------
+def _route_missing(path: str) -> bool:
+    try:
+        for r in app.url_map.iter_rules():
+            if r.rule == path:
+                return False
+    except Exception:
+        pass
+    return True
+
+# /progress (login required)
+if _route_missing("/progress"):
+    @app.get("/progress", endpoint="sec2_progress_page")
+    @login_required
+    def sec2_progress_page():
+        attempts = _load_json("attempts.json", [])
+        mine = [a for a in attempts if a.get("user_id") == _user_id()]
+        body = render_template_string("""
+        <div class="container">
+          <h1 class="h4 mb-3"><i class="bi bi-graph-up"></i> Your Progress</h1>
+          {% if not items %}
+            <div class="text-muted">No attempts yet. Try a quiz, mock, or the tutor to get started.</div>
+          {% else %}
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead><tr><th>When (UTC)</th><th>Mode</th><th>Domain</th><th>Score / Notes</th></tr></thead>
+                <tbody>
+                  {% for a in items[-200:] %}
+                    <tr>
+                      <td class="small">{{ a.ts }}</td>
+                      <td class="small">{{ a.mode }}</td>
+                      <td class="small">{{ a.get('domain','-') }}</td>
+                      <td class="small">
+                        {% if a.mode in ('quiz','mock') %}
+                          {{ a.get('score','-') }} / {{ a.get('total','-') }}
+                        {% elif a.mode == 'tutor' %}
+                          Asked: {{ a.get('question','')[:80] }}{% if a.get('question','')|length>80 %}…{% endif %}
+                        {% else %}-{% endif %}
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          {% endif %}
+        </div>
+        """, items=mine)
+        return base_layout("Progress", body)
+
+# /usage (login required)
+if _route_missing("/usage"):
+    @app.get("/usage", endpoint="sec2_usage_page")
+    @login_required
+    def sec2_usage_page():
+        evts = _load_json("events.json", [])
+        mine = [e for e in evts if e.get("user_id") == _user_id()]
+        body = render_template_string("""
+        <div class="container">
+          <h1 class="h4 mb-3"><i class="bi bi-speedometer2"></i> Usage</h1>
+          <p class="text-muted small">Lightweight event log (last 200 entries).</p>
+          <ul class="list-group list-group-flush">
+            {% for e in items[-200:] %}
+              <li class="list-group-item small">
+                <span class="text-muted">{{ e.ts }}</span> — <strong>{{ e.name }}</strong>
+              </li>
+            {% else %}
+              <li class="list-group-item text-muted small">No usage yet.</li>
+            {% endfor %}
+          </ul>
+        </div>
+        """, items=mine)
+        return base_layout("Usage", body)
+
+# /billing (login required placeholder)
+if _route_missing("/billing"):
+    @app.get("/billing", endpoint="sec2_billing_page")
+    @login_required
+    def sec2_billing_page():
+        body = """
+        <div class="container">
+          <h1 class="h4 mb-3"><i class="bi bi-credit-card"></i> Billing</h1>
+          <p class="text-muted">Billing setup coming soon. If you already have access, continue studying.</p>
+          <div class="d-flex gap-2">
+            <a class="btn btn-outline-primary btn-sm" href="/quiz">Go to Quiz</a>
+            <a class="btn btn-outline-success btn-sm" href="/flashcards">Flashcards</a>
+            <a class="btn btn-outline-secondary btn-sm" href="/tutor">Tutor</a>
+          </div>
+        </div>
+        """
+        return base_layout("Billing", body)
+
 
 # ==== END SECTION 2/8 — Terms & Conditions (Standalone) + Footer Helper ====
 
@@ -2282,6 +2443,7 @@ def root_redirect():
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
 ### END OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
+
 
 
 
