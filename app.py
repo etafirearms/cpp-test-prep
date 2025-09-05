@@ -1357,515 +1357,552 @@ if not _sx5_route_exists("/tutor"):
 
 # ===== SECTION 5/8 — TUTOR ROUTE (RESTORE & STABLE) — END =====
 
-# ======================================================================
-# === SECTION 6/8: DATA BANK & CPP WEIGHTS — START =====================
-# ======================================================================
-# Purpose:
-#   - Define the on-disk question bank (DATA_DIR/bank/*).
-#   - Provide helpers to read items, dedupe them, and select questions.
-#   - Enforce CPP domain weights and per-type quotas:
-#       * Multiple Choice: 50%
-#       * True/False:      25%
-#       * Scenario:        25%
-# Notes:
-#   - No UI or route changes here. We will wire these helpers in Section 7/8.
-#   - Safe to import even if bank is empty (graceful fallbacks).
-#   - Avoids NameError if DOMAINS isn't defined yet.
-# ======================================================================
+### START OF SECTION 6/8 — CONTENT BANK & DATA MODEL (NEW)
 
-import os, json, time, uuid, random, hashlib, re
-from typing import Dict, List, Optional, Tuple, Any
+# STABILITY: stdlib-only imports (no new deps)
+import os, json, time, uuid, random, hashlib, tempfile, io, difflib
+from typing import List, Dict, Any, Optional, Tuple
 
-# --- Bank filesystem layout ---------------------------------------------------
-#  DATA_DIR/
-#    bank/
-#      mcq/        # *.json (one item per file)
-#      tf/         # *.json (one item per file)
-#      scenario/   # *.json (one item per file)
-#      weights.json     # admin-managed (optional); overrides defaults
-
-# DATA_DIR comes from Section 1/8 (env & config). Fallback to cwd/data if needed.
-try:
-    DATA_DIR  # type: ignore[name-defined]
-except NameError:
+# STABILITY: reuse existing DATA_DIR if defined; else fall back to cwd/data
+if "DATA_DIR" not in globals():
     DATA_DIR = os.path.join(os.getcwd(), "data")
 os.makedirs(DATA_DIR, exist_ok=True)
 
+# STABILITY: establish bank/ tree under DATA_DIR; no rename of existing data files elsewhere
 BANK_DIR = os.path.join(DATA_DIR, "bank")
-for _sub in ("mcq", "tf", "scenario"):
-    os.makedirs(os.path.join(BANK_DIR, _sub), exist_ok=True)
+os.makedirs(BANK_DIR, exist_ok=True)
 
-_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")
+# STABILITY: file paths for the shared content bank
+_QUESTIONS_FILE = os.path.join(BANK_DIR, "questions.jsonl")   # one JSON object per line
+_FLASHCARDS_FILE = os.path.join(BANK_DIR, "flashcards.jsonl") # one JSON object per line
+_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")        # {"Domain 1": 0.15, ...}
 
-# --- Utility: safe json load/save --------------------------------------------
-def _read_json_file(path: str) -> Optional[dict]:
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
+# -------------------------------------------------------------------------------------------------
+# Atomic I/O helpers
+# -------------------------------------------------------------------------------------------------
 
-def _atomic_write_json(path: str, payload: dict) -> None:
-    """Atomic save compatible with Section 2/8's _save_json approach."""
-    tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    """Write bytes to a temp file then atomic replace to avoid partial writes."""
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
         f.flush()
         os.fsync(f.fileno())
-    os.replace(tmp, path)
+    os.replace(tmp_path, path)
 
-# --- Domain helpers -----------------------------------------------------------
-def _domain_keys() -> List[str]:
-    """Use your global DOMAINS mapping if present; else infer from items; fallback to Mixed."""
-    if "DOMAINS" in globals() and isinstance(globals()["DOMAINS"], dict) and globals()["DOMAINS"]:
-        return list(globals()["DOMAINS"].keys())
-    # If DOMAINS not yet defined, provide a stable fallback:
-    return ["domain1", "domain2", "domain3", "domain4", "domain5", "domain6", "domain7"]
+def _atomic_write_text(path: str, text: str) -> None:
+    _atomic_write_bytes(path, text.encode("utf-8"))
 
-# --- Default CPP domain weights (adjust as needed) ---------------------------
-# These are *relative* weights (we'll normalize). If you already defined a
-# better mapping elsewhere, you can override via bank/weights.json.
-_DEFAULT_DOMAIN_WEIGHTS: Dict[str, float] = {
-    # Keys must match your DOMAINS keys (e.g., "domain1", ...), not labels.
-    # Replace these with your actual distribution if known; otherwise they
-    # will be normalized over present keys.
-}
+def _atomic_write_json(path: str, obj: Any) -> None:
+    _atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
 
-def _load_weights() -> Dict[str, float]:
-    """Load weights.json if present; otherwise use defaults stretched over known domain keys."""
-    # Start with defaults over the known keys:
-    keys = _domain_keys()
-    base = dict(_DEFAULT_DOMAIN_WEIGHTS)
-    # If defaults are empty or incomplete, fill evenly:
-    if not base or any(k not in base for k in keys):
-        even = 1.0 / max(1, len(keys))
-        base = {k: base.get(k, even) for k in keys}
+# STABILITY: keep shape and call-sites if an old _save_json exists; otherwise define it now.
+if "_save_json" not in globals():
+    def _save_json(path: str, obj: Any) -> None:
+        # STABILITY: atomic write as required; preserves signature
+        _atomic_write_json(path, obj)
 
-    # Merge with file overrides if present:
-    file_data = _read_json_file(_WEIGHTS_FILE) or {}
-    if isinstance(file_data, dict):
-        for k, v in file_data.items():
+# STABILITY: existing _load_json stays untouched if already defined; otherwise provide it.
+if "_load_json" not in globals():
+    def _load_json(path: str, default: Any) -> Any:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except FileNotFoundError:
+            return default
+        except Exception as e:
+            # Keep existing warnings style (if any) minimal
             try:
-                if isinstance(v, (int, float)) and k in keys:
-                    base[k] = float(v)
+                app.logger.warning("Failed to load JSON %s: %s", path, e)
             except Exception:
                 pass
+            return default
 
-    # Normalize to sum == 1.0
-    total = sum(max(0.0, x) for x in base.values())
-    if total <= 0:
-        even = 1.0 / max(1, len(keys))
-        return {k: even for k in keys}
-    return {k: max(0.0, base.get(k, 0.0)) / total for k in keys}
+# JSONL convenience
+def _read_jsonl(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    out: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                # skip corrupted lines (do not break)
+                continue
+    return out
 
-_DOMAIN_WEIGHTS = _load_weights()
+def _write_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
+    # atomic write: construct full text then replace
+    buf = io.StringIO()
+    for r in rows:
+        buf.write(json.dumps(r, ensure_ascii=False))
+        buf.write("\n")
+    _atomic_write_text(path, buf.getvalue())
 
-# --- Type quotas (fixed) ------------------------------------------------------
-# Enforced per selection batch: 50% MCQ, 25% T/F, 25% Scenario.
-_TYPE_QUOTAS = {
-    "mcq": 0.50,
-    "tf": 0.25,
-    "scenario": 0.25,
-}
+# -------------------------------------------------------------------------------------------------
+# Normalization, IDs, and de-dup
+# -------------------------------------------------------------------------------------------------
 
-# --- Item model ---------------------------------------------------------------
-# Canonical item structure expected in each *.json file:
-# {
-#   "id": "uuid",
-#   "type": "mcq" | "tf" | "scenario",
-#   "domain": "domain1" | "...",     # DOMAINS key
-#   "question": "text",
-#   "options": ["A", "B", "C", "D"], # for mcq; optional otherwise
-#   "answer": "A" | true/false | ["multi"] | {"explain": "..."},
-#   "explanation": "text (optional)",
-#   "source": "string (optional)",
-#   "created_at": 1712345678.123
-# }
+def _new_id(prefix: str) -> str:
+    return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
 def _norm_text(s: str) -> str:
-    s = s or ""
-    s = re.sub(r"\s+", " ", s, flags=re.MULTILINE).strip().lower()
-    return s
+    return " ".join(str(s).strip().lower().split())
 
-def _dedupe_key(item: dict) -> str:
-    """Stable fingerprint to prevent duplicates (question + domain + type + answer core)."""
-    q = _norm_text(str(item.get("question", "")))
-    t = str(item.get("type", ""))
-    d = str(item.get("domain", ""))
-    a = item.get("answer", "")
-    a_core = json.dumps(a, sort_keys=True, ensure_ascii=False)
-    to_hash = f"{t}::{d}::{q}::{a_core}"
-    return hashlib.sha256(to_hash.encode("utf-8")).hexdigest()
+def _q_signature(q: Dict[str, Any]) -> str:
+    """
+    A stable signature for de-dup across types.
+    MC  : stem + sorted choices
+    TF  : stem + 'true/false'
+    SCN : stem + sorted options (if present)
+    """
+    t = q.get("type", "").lower()
+    stem = _norm_text(q.get("stem", ""))
+    if t == "mc":
+        choices = [_norm_text(c) for c in q.get("choices", [])]
+        choices.sort()
+        base = stem + "||" + "|".join(choices)
+    elif t in ("tf", "truefalse", "true_false"):
+        base = stem + "||tf"
+    else:  # scenario or custom
+        opts = [_norm_text(c) for c in q.get("options", [])]
+        opts.sort()
+        base = stem + "||" + "|".join(opts)
+    return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
-def _item_ok(item: Optional[dict]) -> bool:
-    if not isinstance(item, dict):
+def _looks_like_dup(a: str, b: str, threshold: float = 0.92) -> bool:
+    """Fuzzy near-duplicate check on normalized stems."""
+    ra = _norm_text(a); rb = _norm_text(b)
+    if not ra or not rb:
         return False
-    if item.get("type") not in ("mcq", "tf", "scenario"):
-        return False
-    if not item.get("question"):
-        return False
-    if not item.get("domain"):
-        return False
-    return True
+    return difflib.SequenceMatcher(a=ra, b=rb).ratio() >= threshold
 
-# --- Scan bank ---------------------------------------------------------------
-def _scan_dir(kind: str) -> List[dict]:
-    out: List[dict] = []
-    folder = os.path.join(BANK_DIR, kind)
+# -------------------------------------------------------------------------------------------------
+# Public read API
+# -------------------------------------------------------------------------------------------------
+
+def get_domain_weights() -> Dict[str, float]:
+    """
+    Returns a dict mapping domain -> weight (sums ≈ 1).
+    If file absent, return a sane default CPP blueprint and write it.
+    """
+    default = {
+        # STABILITY: safe defaults; admin can edit weights.json
+        "Domain 1": 0.15,
+        "Domain 2": 0.10,
+        "Domain 3": 0.20,
+        "Domain 4": 0.15,
+        "Domain 5": 0.12,
+        "Domain 6": 0.13,
+        "Domain 7": 0.15,
+    }
+    data = _load_json(_WEIGHTS_FILE, None)
+    if not data:
+        _save_json(_WEIGHTS_FILE, default)
+        return default
+    # normalize
     try:
-        for name in os.listdir(folder):
-            if not name.endswith(".json"):
-                continue
-            data = _read_json_file(os.path.join(folder, name))
-            if _item_ok(data):
-                out.append(data)  # trust file IDs
+        total = float(sum(float(v) for v in data.values())) or 1.0
+        return {k: float(v)/total for k, v in data.items()}
+    except Exception:
+        return default
+
+def get_all_questions(domains: Optional[List[str]] = None,
+                      types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    rows = _read_jsonl(_QUESTIONS_FILE)
+    if domains:
+        dset = set([d.lower() for d in domains])
+        rows = [r for r in rows if str(r.get("domain","")).lower() in dset]
+    if types:
+        tset = set([t.lower() for t in types])
+        rows = [r for r in rows if str(r.get("type","")).lower() in tset]
+    return rows
+
+def get_all_flashcards(domains: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    rows = _read_jsonl(_FLASHCARDS_FILE)
+    if domains:
+        dset = set([d.lower() for d in domains])
+        rows = [r for r in rows if str(r.get("domain","")).lower() in dset]
+    return rows
+
+# -------------------------------------------------------------------------------------------------
+# Ingestion (admin or background)
+# -------------------------------------------------------------------------------------------------
+
+def ingest_questions(new_items: List[Dict[str, Any]], source: str = "upload") -> Tuple[int,int]:
+    """
+    Ingest question dicts. Each item should include:
+      - type: "mc" | "tf" | "scenario"
+      - domain: string (e.g., "Domain 3")
+      - stem: question text
+      - choices (mc): list[str]
+      - answer (mc): int index in choices
+      - answer (tf): bool
+      - options/answers (scenario): options: list[str], answers: list[int] or list[str]
+      - explanation (optional)
+      - tags (optional list[str])
+    Returns: (added_count, skipped_as_dupe)
+    """
+    existing = _read_jsonl(_QUESTIONS_FILE)
+    seen_sigs = { _q_signature(q) for q in existing }
+    existing_stems = [ _norm_text(q.get("stem","")) for q in existing ]
+
+    added, skipped = 0, 0
+    out = list(existing)
+
+    now = int(time.time())
+    for raw in new_items:
+        q = dict(raw)  # shallow copy
+        q.setdefault("id", _new_id("q"))
+        q.setdefault("source", source)
+        q.setdefault("created_at", now)
+
+        # normalize type aliases
+        t = str(q.get("type","")).lower().strip()
+        if t in ("truefalse", "true_false"):
+            t = "tf"
+        elif t in ("multiplechoice", "multiple_choice"):
+            t = "mc"
+        elif t in ("scenario", "scn"):
+            t = "scenario"
+        q["type"] = t
+
+        # minimal schema guard
+        if not q.get("stem") or not q.get("domain") or t not in ("mc","tf","scenario"):
+            skipped += 1
+            continue
+
+        sig = _q_signature(q)
+        stem_norm = _norm_text(q.get("stem",""))
+
+        if sig in seen_sigs:
+            skipped += 1
+            continue
+        # fuzzy stem near-dup against existing stems
+        if any(_looks_like_dup(stem_norm, s) for s in existing_stems):
+            skipped += 1
+            continue
+
+        out.append(q)
+        seen_sigs.add(sig)
+        existing_stems.append(stem_norm)
+        added += 1
+
+    _write_jsonl(_QUESTIONS_FILE, out)
+    try:
+        app.logger.info("Bank ingest: questions added=%s skipped=%s total=%s", added, skipped, len(out))
     except Exception:
         pass
-    return out
-
-def bank_index() -> Dict[str, List[dict]]:
-    """Return {'mcq': [...], 'tf': [...], 'scenario': [...]}"""
-    return {
-        "mcq": _scan_dir("mcq"),
-        "tf": _scan_dir("tf"),
-        "scenario": _scan_dir("scenario"),
-    }
-
-# In-memory dedupe index (by fingerprint)
-_DEDUPE: set = set()
-def _refresh_dedupe() -> None:
-    _DEDUPE.clear()
-    idx = bank_index()
-    for kind, items in idx.items():
-        for it in items:
-            _DEDUPE.add(_dedupe_key(it))
-
-_refresh_dedupe()
-
-# --- Add items (admin will use in Section 7/8) -------------------------------
-def add_bank_items(new_items: List[dict]) -> Tuple[int, int]:
-    """
-    Add items to the bank with dedupe.
-    Returns: (added_count, skipped_count)
-    """
-    added = 0
-    skipped = 0
-    now = time.time()
-
-    for item in new_items:
-        if not _item_ok(item):
-            skipped += 1
-            continue
-        fp = _dedupe_key(item)
-        if fp in _DEDUPE:
-            skipped += 1
-            continue
-
-        # Assign ID if missing
-        item.setdefault("id", str(uuid.uuid4()))
-        item.setdefault("created_at", now)
-
-        kind = item["type"]
-        out_path = os.path.join(BANK_DIR, kind, f"{item['id']}.json")
-        try:
-            _atomic_write_json(out_path, item)
-            _DEDUPE.add(fp)
-            added += 1
-        except Exception:
-            skipped += 1
-
     return added, skipped
 
-# --- Selection helpers (weights + quotas) ------------------------------------
-def _weighted_domain(dom: str) -> float:
-    return float(_DOMAIN_WEIGHTS.get(dom, 0.0))
-
-def _filter_by_domain(items: List[dict], domain: Optional[str]) -> List[dict]:
-    if not domain or domain == "random":
-        return items[:]  # no filter
-    return [x for x in items if x.get("domain") == domain]
-
-def _quota_counts(total: int) -> Dict[str, int]:
-    """Compute per-type counts from quotas; ensure sum == total."""
-    raw = {k: int(total * v) for k, v in _TYPE_QUOTAS.items()}
-    # fix rounding drift
-    used = sum(raw.values())
-    while used < total:
-        # assign the remainder to the largest quota type first
-        k = max(_TYPE_QUOTAS, key=_TYPE_QUOTAS.get)
-        raw[k] += 1
-        used += 1
-    while used > total:
-        k = min(_TYPE_QUOTAS, key=_TYPE_QUOTAS.get)
-        if raw[k] > 0:
-            raw[k] -= 1
-            used -= 1
-        else:
-            break
-    return raw
-
-def _weighted_sample(items: List[dict], count: int) -> List[dict]:
-    """Domain-weighted sampling without replacement."""
-    if count <= 0 or not items:
-        return []
-
-    # Group by domain
-    by_dom: Dict[str, List[dict]] = {}
-    for it in items:
-        by_dom.setdefault(it.get("domain", ""), []).append(it)
-
-    # Allocate per domain by weight
-    # Normalize to available pool sizes to avoid over-ask
-    available = {d: len(v) for d, v in by_dom.items()}
-    weights = {d: _weighted_domain(d) for d in by_dom}
-    wsum = sum(weights.values()) or 1.0
-    # Initial allocation
-    alloc = {d: int(round(count * (weights[d] / wsum))) for d in by_dom}
-
-    # Adjust for pool limits
-    deficit = 0
-    for d in list(alloc.keys()):
-        if alloc[d] > available[d]:
-            deficit += alloc[d] - available[d]
-            alloc[d] = available[d]
-
-    # Distribute remaining to domains with spare items
-    if deficit > 0:
-        spares = {d: available[d] - alloc[d] for d in by_dom}
-        while deficit > 0:
-            # Pick domain with biggest spare and non-zero weight
-            pick = None
-            best = -1
-            for d, s in spares.items():
-                if s > best and weights.get(d, 0.0) > 0:
-                    best = s
-                    pick = d
-            if not pick or best <= 0:
-                break
-            alloc[pick] += 1
-            spares[pick] -= 1
-            deficit -= 1
-
-    # Final pick
-    chosen: List[dict] = []
-    for d, n in alloc.items():
-        pool = by_dom[d][:]
-        random.shuffle(pool)
-        chosen.extend(pool[:max(0, n)])
-
-    # Trim or pad if still off due to rounding
-    if len(chosen) > count:
-        chosen = chosen[:count]
-    elif len(chosen) < count:
-        # Fill with any remaining (uniform)
-        remaining = [it for d, arr in by_dom.items() for it in arr if it not in chosen]
-        random.shuffle(remaining)
-        need = count - len(chosen)
-        chosen.extend(remaining[:need])
-
-    return chosen
-
-def choose_questions(
-    total: int,
-    domain: Optional[str] = None,
-    *,
-    allow_fallback: bool = True
-) -> List[dict]:
+def ingest_flashcards(new_items: List[Dict[str, Any]], source: str = "upload") -> Tuple[int,int]:
     """
-    Return a list of questions from the bank honoring:
-      - domain weights (or a single domain filter if provided),
-      - per-type quotas (MCQ 50%, TF 25%, Scenario 25%).
-    If the bank lacks enough items and allow_fallback=True,
-    returns as many as possible (possibly less than `total`).
+    Flashcard item fields:
+      - domain: string
+      - front: str
+      - back: str
+      - tags (optional)
     """
-    total = max(1, int(total))
-    quotas = _quota_counts(total)
-    idx = bank_index()
+    existing = _read_jsonl(_FLASHCARDS_FILE)
+    # simple hash on front/back
+    def f_sig(fc: Dict[str, Any]) -> str:
+        base = _norm_text(fc.get("front","")) + "||" + _norm_text(fc.get("back",""))
+        return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
-    selected: List[dict] = []
-    for kind, n in quotas.items():
-        pool = _filter_by_domain(idx.get(kind, []), domain)
-        if not pool:
+    seen = { f_sig(x) for x in existing }
+    existing_fronts = [ _norm_text(x.get("front","")) for x in existing ]
+
+    added, skipped = 0, 0
+    out = list(existing)
+    now = int(time.time())
+
+    for raw in new_items:
+        fc = dict(raw)
+        if not fc.get("front") or not fc.get("back") or not fc.get("domain"):
+            skipped += 1
             continue
-        picks = _weighted_sample(pool, n)
-        selected.extend(picks)
-
-    # If we are short (bank too small), optionally fill with anything left.
-    short = total - len(selected)
-    if short > 0 and allow_fallback:
-        rest = []
-        for kind, items in idx.items():
-            rest.extend(_filter_by_domain(items, domain))
-        # remove already chosen (by id)
-        seen = {it.get("id") for it in selected}
-        rest = [it for it in rest if it.get("id") not in seen]
-        random.shuffle(rest)
-        selected.extend(rest[:short])
-
-    # Final trim if somehow exceeded (shouldn’t)
-    return selected[:total]
-
-# ======================================================================
-# === SECTION 6/8: DATA BANK & CPP WEIGHTS — END =======================
-# ======================================================================
-
-# ======================================================================
-# === SECTION 7/8: BANK ADAPTERS FOR TUTOR / FLASHCARDS / QUIZ / MOCK ==
-# ======================================================================
-# Purpose:
-#   Read questions from the Section 6/8 Bank and expose safe, uniform
-#   adapters that higher-level routes can call WITHOUT changing any UI.
-#
-# What this DOES:
-#   - Gives you three helpers you can call from your existing routes
-#     to pull items from the Bank while honoring domain-weights and
-#     the 50% MCQ / 25% TF / 25% Scenario mix:
-#         * bank_get_flashcards(domain, total)
-#         * bank_get_quiz_questions(domain, total)
-#         * bank_get_mock_questions(domain, total)
-#   - Normalizes Bank items into a stable, conservative shape that
-#     existing templates can render as plain text safely.
-#   - Never replaces your legacy generators: you can “try Bank first,
-#     then fall back” in the route (we’ll wire this in next section).
-#
-# What this DOES NOT do (yet):
-#   - It does not change your routes. It’s a drop-in library.
-#   - It does not alter any templates or UI.
-#
-# Safe defaults:
-#   - If the bank is empty, these return [] (so your current code can
-#     fall back to legacy behavior unchanged).
-#
-# Call pattern you’ll use NEXT (Section 8/8, tiny route edits):
-#   items = bank_get_quiz_questions(domain, total)
-#   if not items:
-#       items = legacy_make_quiz_questions(domain, total)  # your current path
-#
-# ======================================================================
-
-from typing import List, Dict, Any, Optional
-import random
-import html
-
-# --- Import selectors from Section 6/8 (already loaded in app.py) ------------
-# choose_questions(total, domain, allow_fallback=True)
-if "choose_questions" not in globals():
-    # Defensive fallback: if Section 6/8 wasn’t included for some reason,
-    # provide a stub that behaves like an empty bank.
-    def choose_questions(total: int, domain: Optional[str] = None, *, allow_fallback: bool = True) -> List[dict]:
-        return []
-
-# --- Normalization to a conservative shape ------------------------------------
-# This “normalized” question is intentionally simple so it won’t break any
-# existing rendering. Your routes can read these keys safely:
-#   {
-#     "id": str,
-#     "type": "mcq"|"tf"|"scenario",
-#     "domain": str,
-#     "question": str,          # plain text (HTML-escaped)
-#     "choices": List[str],     # [] for non-MCQ; ["True","False"] for TF
-#     "answer": Any,            # keep original; routes may ignore if not needed
-#     "explanation": str|None,  # plain text (HTML-escaped)
-#     "source": str|None        # where it came from (optional)
-#   }
-
-def _to_norm(item: Dict[str, Any]) -> Dict[str, Any]:
-    q = html.escape(str(item.get("question", "")).strip())
-    typ = item.get("type", "")
-    domain = item.get("domain", "")
-    explanation = item.get("explanation")
-    if isinstance(explanation, str):
-        explanation = html.escape(explanation.strip())
-
-    choices: List[str] = []
-    if typ == "mcq":
-        raw = item.get("options") or []
-        # Make sure everything is string & escaped
-        choices = [html.escape(str(x)) for x in raw if str(x).strip() != ""]
-    elif typ == "tf":
-        # Standardize the two choices for UI consistency
-        choices = ["True", "False"]
-    else:
-        # scenario or anything else => no fixed choices, UI shows the stem
-        choices = []
-
-    return {
-        "id": str(item.get("id", "")),
-        "type": typ,
-        "domain": domain,
-        "question": q,
-        "choices": choices,
-        "answer": item.get("answer"),
-        "explanation": explanation if explanation else None,
-        "source": item.get("source"),
-    }
-
-def _norm_many(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    out: List[Dict[str, Any]] = []
-    for it in items:
-        try:
-            out.append(_to_norm(it))
-        except Exception:
-            # Skip malformed
+        fc.setdefault("id", _new_id("fc"))
+        fc.setdefault("source", source)
+        fc.setdefault("created_at", now)
+        sig = f_sig(fc)
+        if sig in seen:
+            skipped += 1
             continue
+        if any(_looks_like_dup(_norm_text(fc.get("front","")), s) for s in existing_fronts):
+            skipped += 1
+            continue
+        out.append(fc)
+        seen.add(sig)
+        existing_fronts.append(_norm_text(fc.get("front","")))
+        added += 1
+
+    _write_jsonl(_FLASHCARDS_FILE, out)
+    try:
+        app.logger.info("Bank ingest: flashcards added=%s skipped=%s total=%s", added, skipped, len(out))
+    except Exception:
+        pass
+    return added, skipped
+
+# -------------------------------------------------------------------------------------------------
+# Seed minimal content (safe no-op if files already exist)
+# -------------------------------------------------------------------------------------------------
+
+def ensure_bank_seeded() -> None:
+    """Create default weights and a handful of sample items if bank is empty."""
+    # weights
+    if not os.path.exists(_WEIGHTS_FILE):
+        _save_json(_WEIGHTS_FILE, get_domain_weights())  # writes defaults
+
+    # questions
+    if not os.path.exists(_QUESTIONS_FILE) or not _read_jsonl(_QUESTIONS_FILE):
+        sample_qs = [
+            {
+                "type": "mc",
+                "domain": "Domain 1",
+                "stem": "Which control primarily reduces likelihood rather than impact?",
+                "choices": ["Deterrent", "Corrective", "Compensating", "Recovery"],
+                "answer": 0,
+                "explanation": "Deterrent controls aim to discourage an action.",
+                "tags": ["controls", "risk"]
+            },
+            {
+                "type": "tf",
+                "domain": "Domain 3",
+                "stem": "Chain of custody must document every transfer of evidence.",
+                "answer": True,
+                "explanation": "Accuracy and integrity rely on continuous documentation.",
+                "tags": ["investigations"]
+            },
+            {
+                "type": "scenario",
+                "domain": "Domain 6",
+                "stem": "You inherit a legacy access control system with shared admin logins. Pick all best-first remediation steps.",
+                "options": [
+                    "Enforce unique accounts with MFA",
+                    "Rotate all shared credentials",
+                    "Disable audit logging to reduce storage",
+                    "Implement least privilege for admins"
+                ],
+                "answers": [0,1,3],
+                "explanation": "Unique identities, rotation, and least privilege are foundational."
+            }
+        ]
+        ingest_questions(sample_qs, source="seed")
+
+    # flashcards
+    if not os.path.exists(_FLASHCARDS_FILE) or not _read_jsonl(_FLASHCARDS_FILE):
+        sample_fc = [
+            {"domain": "Domain 2", "front": "Risk = ?", "back": "Threat × Vulnerability × Impact"},
+            {"domain": "Domain 4", "front": "Business Impact Analysis (BIA)", "back": "Assesses critical processes and impacts of disruption."},
+        ]
+        ingest_flashcards(sample_fc, source="seed")
+
+# Ensure seed once at import
+try:
+    ensure_bank_seeded()
+except Exception as _e:
+    try:
+        app.logger.warning("ensure_bank_seeded warning: %s", _e)
+    except Exception:
+        pass
+
+### END OF SECTION 6/8 — CONTENT BANK & DATA MODEL (NEW)
+
+### START OF SECTION 7/8 — SELECTION ENGINE FOR QUIZ/MOCK (NEW)
+
+import math
+from typing import List, Dict, Any, Optional, Tuple
+
+# Domain weights (CPP blueprint) come from Section 6/8
+# Questions loaded via get_all_questions()
+
+_DEFAULT_TYPE_MIX = {
+    "mc": 0.50,        # ~50% Multiple Choice
+    "tf": 0.25,        # ~25% True/False
+    "scenario": 0.25,  # ~25% Scenario
+}
+
+def _canonical_type(t: str) -> str:
+    t = (t or "").lower().strip()
+    if t in ("multiplechoice","multiple_choice"): return "mc"
+    if t in ("truefalse","true_false"): return "tf"
+    if t in ("scn",): return "scenario"
+    return t
+
+def _rng_for_user_context(user_id: Optional[str]) -> random.Random:
+    """
+    Deterministic-ish RNG per user/day to give varied but stable sets.
+    Falls back to time if user id not available.
+    """
+    try:
+        day = int(time.time() // 86400)
+        seed_str = f"{user_id or 'anon'}::{day}"
+        seed = int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16) % (2**31)
+        return random.Random(seed)
+    except Exception:
+        return random.Random()
+
+def _weighted_domain_allocation(domains: List[str], weights: Dict[str, float], total: int) -> Dict[str, int]:
+    """
+    Allocate total questions across selected domains according to weights.
+    Rounds fairly then fixes rounding drift.
+    """
+    if not domains:
+        return {}
+    # normalize a local weight map restricted to selected domains
+    local = {d: float(weights.get(d, 0.0)) for d in domains}
+    if sum(local.values()) <= 0:
+        # equal split if no weights known
+        eq = max(1, total // max(1, len(domains)))
+        alloc = {d: eq for d in domains}
+        # fix remainder
+        rem = total - sum(alloc.values())
+        for d in domains[:rem]:
+            alloc[d] += 1
+        return alloc
+    # proportional, then round
+    raw = {d: (weights.get(d, 0.0)) for d in domains}
+    s = sum(raw.values()) or 1.0
+    target = {d: (raw[d]/s)*total for d in domains}
+    alloc = {d: int(math.floor(target[d])) for d in domains}
+    rem = total - sum(alloc.values())
+    # give remainder to largest fractional parts
+    fr = sorted(domains, key=lambda d: target[d]-alloc[d], reverse=True)
+    for d in fr[:rem]:
+        alloc[d] += 1
+    return alloc
+
+def _split_type_mix(n: int, mix: Dict[str, float]) -> Dict[str, int]:
+    mix = { _canonical_type(k): float(v) for k, v in mix.items() }
+    # initial floor
+    alloc = {k: int(math.floor(n * mix.get(k, 0.0))) for k in mix}
+    rem = n - sum(alloc.values())
+    # top up by largest residuals
+    residuals = sorted(mix.keys(), key=lambda k: (n*mix[k]) - alloc[k], reverse=True)
+    for k in residuals[:rem]:
+        alloc[k] += 1
+    # ensure only known keys
+    out = {"mc": alloc.get("mc",0), "tf": alloc.get("tf",0), "scenario": alloc.get("scenario",0)}
+    # fix drift if any
+    delta = n - sum(out.values())
+    for k in ("mc","tf","scenario"):
+        if delta == 0: break
+        out[k] += 1
+        delta -= 1
     return out
 
-# --- Public adapters -----------------------------------------------------------
-# You can call these from routes. They DO NOT throw if bank is empty.
+def _filter_by_type(rows: List[Dict[str, Any]], t: str) -> List[Dict[str, Any]]:
+    t = _canonical_type(t)
+    return [r for r in rows if _canonical_type(r.get("type","")) == t]
 
-def bank_get_flashcards(domain: Optional[str], total: int) -> List[Dict[str, Any]]:
+def select_questions(domains: List[str],
+                     count: int,
+                     mix: Optional[Dict[str, float]] = None,
+                     user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """
-    Pulls a mixed set for flashcards (domain-weighted, mixed types).
-    Rely on your flashcard UI to show question + (optional) explanation.
-    """
-    total = max(1, int(total))
-    raw = choose_questions(total, domain=domain, allow_fallback=True)
-    random.shuffle(raw)
-    return _norm_many(raw)
+    Core selector used by Quiz/Mock.
+    - domains: selected domain labels (must match what's in bank/weights)
+    - count  : total questions to return (your UI picker still controls this)
+    - mix    : optional override of type mix; defaults to 50/25/25 (MC/TF/Scenario)
+    - user_id: optional for stable randomness day-to-day per user
 
-def bank_get_quiz_questions(domain: Optional[str], total: int) -> List[Dict[str, Any]]:
+    Returns a list of question dicts from the bank.
     """
-    Returns normalized items suitable for a quick quiz. The 50/25/25
-    type-quota is enforced by choose_questions().
-    """
-    total = max(1, int(total))
-    raw = choose_questions(total, domain=domain, allow_fallback=True)
-    random.shuffle(raw)
-    return _norm_many(raw)
+    mix = mix or dict(_DEFAULT_TYPE_MIX)
+    weights = get_domain_weights()
+    rng = _rng_for_user_context(user_id)
 
-def bank_get_mock_questions(domain: Optional[str], total: int) -> List[Dict[str, Any]]:
-    """
-    Returns normalized items for mock exams. Same quotas/weights as quiz.
-    """
-    total = max(1, int(total))
-    raw = choose_questions(total, domain=domain, allow_fallback=True)
-    random.shuffle(raw)
-    return _norm_many(raw)
+    # domain allocation
+    domains = list(domains or [])
+    if not domains:
+        # if nothing chosen, include all from weights file (keeps historical behavior)
+        domains = list(weights.keys())
 
-# --- Tiny helper for route bridges (used next section) ------------------------
-def bank_first_then_legacy(
-    supplier,            # callable(domain:str|None, total:int)->List[dict]
-    legacy_builder,      # your existing function: (domain,total)->List[dict]
-    domain: Optional[str],
-    total: int
-) -> List[Dict[str, Any]]:
-    """
-    Try bank supplier first (returns normalized items).
-    If empty, falls back to your legacy generator unchanged.
-    """
-    bank_items = supplier(domain, total)
-    if bank_items:
-        return bank_items
-    try:
-        # Legacy path is unknown shape; hand it back directly for your
-        # existing renderer. Callers must branch on shape if needed.
-        return legacy_builder(domain, total)  # type: ignore[misc]
-    except Exception:
-        return []
+    per_domain = _weighted_domain_allocation(domains, weights, count)
+    inventory_by_domain = {d: get_all_questions(domains=[d]) for d in domains}
 
-# ======================================================================
-# === SECTION 7/8: BANK ADAPTERS — END =================================
-# ======================================================================
+    selected: List[Dict[str, Any]] = []
+
+    for d, n_d in per_domain.items():
+        if n_d <= 0:
+            continue
+        pool = inventory_by_domain.get(d, [])
+        if not pool:
+            continue
+        # type split inside this domain
+        t_alloc = _split_type_mix(n_d, mix)
+
+        for t, need in t_alloc.items():
+            if need <= 0: 
+                continue
+            sub = _filter_by_type(pool, t)
+            if len(sub) <= need:
+                # take all if not enough; we’ll backfill later if needed
+                selected.extend(sub)
+            else:
+                selected.extend(rng.sample(sub, need))
+
+    # Backfill if we fell short due to inventory constraints (keep domain pref then any)
+    short = count - len(selected)
+    if short > 0:
+        # prefer remaining in selected domains first
+        remaining = [q for d in domains for q in inventory_by_domain.get(d, []) if q not in selected]
+        if len(remaining) >= short:
+            selected.extend(rng.sample(remaining, short))
+        else:
+            selected.extend(remaining)
+            # as a last resort, pull any domain
+            all_pool = get_all_questions()
+            extra = [q for q in all_pool if q not in selected]
+            extra_need = count - len(selected)
+            if extra_need > 0 and len(extra) > 0:
+                take = min(extra_need, len(extra))
+                selected.extend(rng.sample(extra, take))
+
+    # Truncate if we somehow exceeded (shouldn’t), but guard anyway.
+    if len(selected) > count:
+        selected = selected[:count]
+
+    return selected
+
+# Optional helper to adapt bank questions into a generic UI-friendly shape
+def to_ui_question(q: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Non-destructive adapter. Use only if you need a consistent shape:
+      {
+        "id": ..., "domain": ..., "type": "mc|tf|scenario",
+        "stem": "...",
+        "choices": [...],          # for "mc"
+        "answer": 0,               # index for "mc"; bool for "tf"; list[int] for "scenario"
+        "options": [...],          # for "scenario" only
+        "explanation": "..."
+      }
+    """
+    t = _canonical_type(q.get("type",""))
+    out = {
+        "id": q.get("id"),
+        "domain": q.get("domain"),
+        "type": t,
+        "stem": q.get("stem"),
+        "explanation": q.get("explanation"),
+    }
+    if t == "mc":
+        out["choices"] = q.get("choices", [])
+        out["answer"]  = q.get("answer", 0)
+    elif t == "tf":
+        out["answer"]  = bool(q.get("answer"))
+    else:  # scenario
+        out["options"] = q.get("options", [])
+        out["answers"] = q.get("answers", [])
+    return out
+
+### END OF SECTION 7/8 — SELECTION ENGINE FOR QUIZ/MOCK (NEW)
 
 # =========================
 # SECTION 8/8 — Public Welcome, Signup, Login & Logout (patch to stop “login → back to welcome” loop)
@@ -2174,6 +2211,7 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
 
 
