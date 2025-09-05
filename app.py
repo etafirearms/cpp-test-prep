@@ -489,131 +489,203 @@ def sec1_legal_terms():
     """
     return base_layout("Terms", body)
 
-# =========================
-# SECTION 2/8 — Operational & Security Utilities
-# Owner notes:
-#   - This section is the ONLY owner of:
-#       * GET /healthz
-#       * GET /robots.txt
-#       * GET /favicon.ico
-#   - Endpoints are prefixed with "sec2_" to avoid collisions.
-#   - Security headers here are applied with `setdefault` only, so they DO NOT
-#     override the definitive CSP & headers set in Section 1.
-# =========================
+# ==== START SECTION 2/8 — Terms & Conditions (Standalone) + Footer Helper ====
+# STABILITY: Footer snippet appended to pages without altering existing templates.
+TERMS_EFFECTIVE_DATE = os.getenv("TERMS_EFFECTIVE_DATE", "2025-09-04")
 
-# STABILITY: local imports (explicit here to avoid cross-section coupling issues)
-import os
-import time
-from datetime import datetime, timezone
-from flask import jsonify, make_response, Response
+# STABILITY: Small, non-intrusive footer to show on pages (opt-in via _with_footer()).
+FOOTER_HTML = f"""
+<div class="app-footer text-center text-muted" style="margin-top:24px;font-size:0.9rem;">
+  <hr style="margin:8px 0 12px 0;">
+  <div>
+    CPP_Test_Prep is an independent study resource and is <strong>not</strong> affiliated with, endorsed by, or
+    sponsored by ASIS International. Use is subject to our
+    <a href="{ { } if False else '' }" onclick="window.location.href='{ { } if False else '' }'; return false;" style="display:none"></a>
+    <a href="/terms" rel="noopener">Terms &amp; Conditions</a>.
+  </div>
+</div>
+"""
 
-# Monotonic start reference for uptime (local to Section 2)
-_SEC2_START_TS = time.time()
+def _with_footer(inner_html: str) -> str:
+    """Append a standard footer under page content."""
+    return f"{inner_html}\n{FOOTER_HTML}"
 
-def _sec2_safe_get(name: str, default=None):
-    """Safely read globals defined in other sections (e.g., Section 1) without import-order issues."""
-    return globals().get(name, default)
+# STABILITY: Standalone Terms & Conditions page (GET only). Kept self-contained to avoid template churn.
+@app.get("/terms")
+def legal_terms():
+    content = f"""
+    <div class="container" style="max-width:960px;">
+      <h1 id="terms-top" class="mb-3">CPP_Test_Prep — Terms and Conditions</h1>
+      <div class="text-muted mb-4">Effective Date: {TERMS_EFFECTIVE_DATE}</div>
 
-@app.get("/healthz", endpoint="sec2_healthz")
-def sec2_healthz():
+      <ol class="lh-base" style="padding-left: 1.2rem;">
+        <li id="t1"><strong>Who we are</strong><br>
+          CPP_Test_Prep is a study platform owned and operated by Strategic Security Advisors, LLC (“SSA,” “we,” “us,” “our”).
+          Contact: <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a>.
+        </li>
+
+        <li id="t2" class="mt-3"><strong>What we do and what we do not do</strong><br>
+          CPP_Test_Prep provides study tools for candidates preparing for the ASIS Certified Protection Professional examination.
+          We are not affiliated with, endorsed by, or sponsored by ASIS International. We do not use or reproduce ASIS
+          International protected, proprietary, or member-only materials. The platform is for education and training. It does not
+          guarantee that you will pass any exam or achieve any certification.
+        </li>
+
+        <li id="t3" class="mt-3"><strong>Eligibility and accounts</strong><br>
+          You must be at least 18 and able to form a binding contract. Keep your login secure and notify us of any unauthorized use.
+          You are responsible for activity on your account.
+        </li>
+
+        <li id="t4" class="mt-3"><strong>Your license to use CPP_Test_Prep</strong><br>
+          We grant you a limited, personal, non-exclusive, non-transferable license to access and use the platform for your own study.
+          You may not resell, sublicense, share, copy at scale, scrape, or otherwise exploit the content or software.
+        </li>
+
+        <li id="t5" class="mt-3"><strong>Intellectual property</strong><br>
+          All platform content that we create or license, including questions, explanations, flashcards, text, code, and UI,
+          belongs to SSA or its licensors. All rights reserved. Any trademarks, service marks, and logos displayed are the
+          property of their respective owners. “ASIS,” “CPP,” and other marks are the property of ASIS International. Use of the
+          platform does not grant you any ownership in our IP.
+        </li>
+
+        <li id="t6" class="mt-3"><strong>Open sources and third-party content</strong><br>
+          We curate content from publicly available, lawful open sources that permit educational use. We attribute sources when
+          required. Third-party links and resources are provided for convenience. We do not control and are not responsible for
+          third-party content.
+        </li>
+
+        <li id="t7" class="mt-3"><strong>Prohibited conduct</strong><br>
+          You agree not to:
+          <ul>
+            <li>Upload, copy, or request content that infringes copyrights or violates law.</li>
+            <li>Attempt to obtain or use ASIS International proprietary or member-only materials on or through our platform.</li>
+            <li>Reverse engineer, decompile, interfere with, or bypass security.</li>
+            <li>Use automated means to access, download, or index content.</li>
+            <li>Share subscription access or post answer banks publicly.</li>
+          </ul>
+        </li>
+
+        <li id="t8" class="mt-3"><strong>Academic integrity</strong><br>
+          You must use the platform ethically. Do not represent our practice items as actual exam questions. Do not solicit or
+          upload real exam content.
+        </li>
+
+        <li id="t9" class="mt-3"><strong>User submissions</strong><br>
+          If you submit suggestions, corrections, or original study items, you grant SSA a perpetual, worldwide, royalty-free
+          license to use, modify, and publish them for the platform. Do not submit anything you lack the right to share.
+        </li>
+
+        <li id="t10" class="mt-3"><strong>Payments, renewals, and refunds</strong><br>
+          If your plan is paid, you authorize recurring charges until you cancel. Prices may change on notice. Unless we state
+          otherwise in writing, fees are nonrefundable once a billing period begins. You may cancel at any time, which stops
+          future renewals.
+        </li>
+
+        <li id="t11" class="mt-3"><strong>Availability and changes</strong><br>
+          We may update, suspend, or discontinue features or the platform. We are not liable for outages, data loss, or delays.
+          We may update these Terms by posting the revised version with a new Effective Date.
+        </li>
+
+        <li id="t12" class="mt-3"><strong>Privacy</strong><br>
+          Your use is subject to our Privacy Notice, which explains what data we collect and how we use it. Do not upload
+          sensitive personal data you do not want processed.
+        </li>
+
+        <li id="t13" class="mt-3"><strong>Copyright policy and takedown procedure</strong><br>
+          We respect intellectual property. If you believe content infringes your rights, email a notice to
+          <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a> with:
+          <ul>
+            <li>Your contact information.</li>
+            <li>A description and location of the alleged infringing content.</li>
+            <li>A statement that you have a good-faith belief the use is not authorized.</li>
+            <li>A statement under penalty of perjury that your notice is accurate and you are the rights holder or authorized agent.</li>
+            <li>Your physical or electronic signature.</li>
+          </ul>
+          We may remove content and, where appropriate, terminate repeat infringers.
+        </li>
+
+        <li id="t14" class="mt-3"><strong>No warranties</strong><br>
+          The platform and all content are provided “as is” and “as available.” We disclaim all warranties, including fitness
+          for a particular purpose, accuracy, and non-infringement. Study results vary by user. No advice or information creates
+          any warranty.
+        </li>
+
+        <li id="t15" class="mt-3"><strong>Limitation of liability</strong><br>
+          To the fullest extent permitted by law, SSA and its officers, employees, contractors, and affiliates are not liable for
+          indirect, incidental, special, consequential, exemplary, or punitive damages, or any loss of profits, revenues, data,
+          or goodwill. Our total liability for any claim related to the platform will not exceed the amount you paid to us in
+          the 3 months before the claim.
+        </li>
+
+        <li id="t16" class="mt-3"><strong>Indemnification</strong><br>
+          You agree to defend, indemnify, and hold SSA harmless from claims, losses, and costs arising from your use of the
+          platform, your submissions, or your violation of these Terms or applicable law.
+        </li>
+
+        <li id="t17" class="mt-3"><strong>Governing law and venue</strong><br>
+          These Terms are governed by the laws of the State of Arizona, without regard to conflicts rules. The exclusive venue
+          for disputes is the state or federal courts located in Maricopa County, Arizona, and you consent to personal
+          jurisdiction there.
+        </li>
+
+        <li id="t18" class="mt-3"><strong>Export and compliance</strong><br>
+          You may not use the platform where prohibited by law or in violation of export controls or sanctions.
+        </li>
+
+        <li id="t19" class="mt-3"><strong>Severability and waiver</strong><br>
+          If any provision is found unenforceable, the rest remains in effect. Our failure to enforce a provision is not a waiver.
+        </li>
+
+        <li id="t20" class="mt-3"><strong>Contact</strong><br>
+          Questions, notices, or legal requests: <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a>.
+        </li>
+      </ol>
+
+      <hr class="my-4">
+
+      <h2 class="mb-3">CPP_Test_Prep — Legal Disclaimer</h2>
+      <p><strong>Independent study resource.</strong> CPP_Test_Prep is not affiliated with ASIS International and is not an
+         ASIS-approved or ASIS-endorsed course. References to “CPP” and “ASIS” are for identification and descriptive
+         purposes only. All trademarks belong to their owners.</p>
+
+      <p><strong>No proprietary ASIS materials.</strong> We do not use, reproduce, or distribute ASIS International protected,
+         proprietary, or member-only materials. Our practice items and explanations are original or derived from lawful,
+         publicly available open sources that permit educational use.</p>
+
+      <p><strong>Educational use only.</strong> Content is for study and professional development. It is not legal, compliance,
+         or engineering advice. Use your professional judgment and consult primary standards and official guidance.</p>
+
+      <p><strong>No guarantee of results.</strong> Your use of CPP_Test_Prep does not guarantee any outcome on the CPP exam or
+         any certification.</p>
+
+      <p><strong>Copyright and fair use.</strong> We respect copyright. Limited quotations or references to third-party works
+         are used for purposes such as commentary, criticism, scholarship, or education, consistent with applicable law. If you
+         believe any material on the platform infringes your rights, contact
+         <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a> with a detailed notice and we will review promptly.</p>
+
+      <p><strong>User responsibilities.</strong> Do not upload, request, or share exam-confidential content, proprietary training
+         materials, or content you do not have a right to share. Do not represent our practice items as real exam questions.</p>
+
+      <p><strong>Open source and citations.</strong> When a source requires attribution, we provide it. Where license terms
+         restrict reuse, those terms control. Use external sources according to their licenses.</p>
+
+      <p><strong>Technology and availability.</strong> The platform may experience interruptions or errors. Content is provided
+         “as is” and may change.</p>
+
+      <div class="mt-4">
+        <a class="btn btn-primary" href="{url_for('sec8_welcome')}">Back to Welcome</a>
+      </div>
+    </div>
     """
-    Lightweight liveness/readiness probe for Render/ingress health checks.
-    Returns static/low-cost info only (no DB, no network).
-    """
-    now = time.time()
-    uptime_s = int(now - _SEC2_START_TS)
+    return base_layout("Terms & Conditions", _with_footer(content))
 
-    # Pull shared metadata if available; fall back safely.
-    app_version = _sec2_safe_get("APP_VERSION", "unknown")
-    debug_mode = bool(_sec2_safe_get("DEBUG", False))
-    is_staging = bool(_sec2_safe_get("IS_STAGING", False))
+# STABILITY: Simple alias for convenience (no new behavior).
+@app.get("/legal")
+def legal_alias():
+    return redirect(url_for("legal_terms"), code=302)
 
-    # STABILITY: Determine DATA_DIR from Section 1, then check existence & writability.
-    data_dir = _sec2_safe_get("DATA_DIR", os.path.join(os.getcwd(), "data"))
-    data_dir_exists = bool(data_dir and os.path.isdir(data_dir))
+# ==== END SECTION 2/8 — Terms & Conditions (Standalone) + Footer Helper ====
 
-    data_dir_writable = False
-    if data_dir_exists:
-        try:
-            # Try a tiny write/delete to confirm actual write permissions.
-            test_name = f".healthz_{int(now)}_{os.getpid()}.tmp"
-            test_path = os.path.join(data_dir, test_name)
-            with open(test_path, "w", encoding="utf-8") as f:
-                f.write("ok")
-                f.flush()
-                os.fsync(f.fileno())
-            os.remove(test_path)
-            data_dir_writable = True
-        except Exception:
-            data_dir_writable = False
-
-    return jsonify({
-        "ok": True,
-        "service": "cpp-exam-prep",
-        "version": str(app_version),         # kept for backward compatibility
-        "app_version": str(app_version),     # STABILITY: explicit field as requested
-        "debug": debug_mode,
-        "staging": is_staging,
-        "started_at": datetime.fromtimestamp(_SEC2_START_TS, tz=timezone.utc).isoformat(),
-        "uptime_seconds": uptime_s,
-        # STABILITY: new health fields
-        "data_dir_exists": data_dir_exists,
-        "data_dir_writable": data_dir_writable,
-    })
-
-@app.get("/robots.txt", endpoint="sec2_robots_txt")
-def sec2_robots_txt():
-    """
-    Minimal robots policy to reduce 404 noise and make crawler intent explicit.
-    """
-    body = "User-agent: *\nDisallow: /admin/\nDisallow: /api/\n"
-    resp = make_response(body, 200)
-    resp.headers["Content-Type"] = "text/plain; charset=utf-8"
-    return resp
-
-@app.get("/favicon.ico", endpoint="sec2_favicon")
-def sec2_favicon():
-    """
-    Favicon handler to stop 404 spam. If/when you add a real icon, replace with send_from_directory.
-    Returning 204 is acceptable for browsers.
-    """
-    # Example for later:
-    # from flask import send_from_directory
-    # return send_from_directory("static", "favicon.ico")
-    return Response(status=204)
-
-# ---- Additive Security Headers (idempotent) ---------------------------------
-# Important: Section 1 is the single owner of CSP and core headers. Here we only
-# provide defaults where they are missing. We NEVER overwrite values set earlier.
-@app.after_request
-def sec2_apply_security_headers(resp):
-    # DO NOT overwrite CSP set in Section 1; only provide a default if somehow missing.
-    csp_default = (
-        "default-src 'self'; "
-        "img-src 'self' data: https:; "
-        "style-src 'self' 'unsafe-inline' https:; "
-        "script-src 'self' 'unsafe-inline'; "
-        "font-src 'self' https: data:; "
-        "connect-src 'self' https:; "
-        "frame-ancestors 'none'; "
-        "base-uri 'self'; "
-        "form-action 'self'"
-    )
-    resp.headers.setdefault("Content-Security-Policy", csp_default)
-
-    # Common hardening headers (only set if not already present)
-    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
-    resp.headers.setdefault("X-Frame-Options", "DENY")
-    # Use the stricter variant when we are the one providing the default
-    resp.headers.setdefault("Referrer-Policy", "no-referrer")
-    resp.headers.setdefault("Permissions-Policy", "geolocation=(), microphone=(), camera=()")
-
-    # HSTS default if HTTPS is expected (true on Render). Section 1 already sets this;
-    # this is just a safety net if order ever changes.
-    if _sec2_safe_get("ENABLE_HSTS", True):
-        resp.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-    return resp
-# ========================= END SECTION 2/8 =========================
 
 # =========================
 # =========================
@@ -2164,6 +2236,8 @@ def root_redirect():
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
 ### END OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
+
+
 
 
 
