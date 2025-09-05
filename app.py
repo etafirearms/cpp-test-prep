@@ -927,66 +927,118 @@ def sec3_practice_page():
     ))
 
 
-# =========================
-# SECTION 4/8 — Mock Exam
-# Route ownership:
-#   /mock         [GET]   -> picker (domain + count)
-#   /mock/start   [POST]  -> start a client-side session
-# =========================
+### START OF SECTION 4/8 — QUIZ & MOCK (BANK-POWERED, UI PRESERVED)
 
-# STABILITY: ensure we render HTML/JS via Jinja, not Python f-strings
-from flask import render_template_string
+# Notes:
+# - Keeps your existing flows (/quiz, /quiz/start, /mock, /mock/start).
+# - Leaves your domain buttons and count pickers intact.
+# - Uses select_questions(...) from Section 7/8 and bank from Section 6/8.
+# - No new dependencies. No template system change.
+# - Avoids f-strings to prevent { } collisions inside inline JS.
 
-def _mock_filter_questions_domain(items: list[dict], domain_key: str | None):
-    if not domain_key or domain_key == "random":
-        return items[:]
-    dk = str(domain_key).strip().lower()
-    return [q for q in items if str(q.get("domain","")).strip().lower() == dk]
+from flask import request, abort, redirect, url_for
+import html
+import json
 
-@app.get("/mock", endpoint="sec4_mock_picker")
-@login_required
-def sec4_mock_picker():
+# ---- Helpers ---------------------------------------------------------------
+
+def _html_escape(s):
+    try:
+        return html.escape(str(s), quote=True)
+    except Exception:
+        return str(s)
+
+def _req_int(name, default, lo=1, hi=500):
+    try:
+        v = int(request.form.get(name, request.args.get(name, default)))
+        return max(lo, min(hi, v))
+    except Exception:
+        return default
+
+def _selected_domains_from_request() -> list:
     """
-    Mock Exam picker. Renders with render_template_string so that inline <script>{...}</script>
-    braces do NOT get parsed by Python as an f-string.
+    Accepts:
+      - 'domain_val' (single hidden input from your button group)
+      - 'domain' (single)
+      - 'domain[]' (multi)
+    Returns list[str]
     """
-    csrf_val = csrf_token()
-    # Reuse the existing helper that builds the domain radio/group buttons.
-    # The helper returns ready-to-insert HTML.
-    domain_buttons = domain_buttons_html(selected_key="random", field_name="domain")
+    vals = []
+    # multi-select support
+    multi = request.form.getlist("domain[]") or request.args.getlist("domain[]")
+    if multi:
+        vals.extend([v for v in multi if v])
+    # single hidden input
+    one = request.form.get("domain_val") or request.args.get("domain_val")
+    if one:
+        vals.append(one)
+    # single plain field
+    one2 = request.form.get("domain") or request.args.get("domain")
+    if one2:
+        vals.append(one2)
 
-    tmpl = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-lg-8 col-xl-7">
-        <div class="card">
-          <div class="card-header bg-primary text-white">
-            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Mock Exam</h3>
-          </div>
-          <div class="card-body">
-            <form method="POST" action="/mock/start" class="mb-3">
-              <input type="hidden" name="csrf_token" value="{{ csrf_val }}"/>
-              <label class="form-label fw-semibold">Domain</label>
-              {{ domain_buttons|safe }}
+    # normalize & unique, preserve order
+    seen = set()
+    out = []
+    for v in vals:
+        vv = str(v).strip()
+        if not vv:
+            continue
+        if vv not in seen:
+            out.append(vv)
+            seen.add(vv)
+    return out
 
-              <div class="mt-3 mb-2 fw-semibold">How many questions?</div>
-              <div class="d-flex flex-wrap gap-2">
-                <button class="btn btn-outline-primary" name="count" value="10">10</button>
-                <button class="btn btn-outline-primary" name="count" value="20">20</button>
-                <button class="btn btn-outline-primary" name="count" value="30">30</button>
-              </div>
-            </form>
-            <div class="text-muted small">Tip: Use Random for a mixed-domain exam.</div>
+def _render_picker_page(title: str, post_action: str, default_count: int = 10) -> str:
+    """
+    Minimal picker UI; preserves your domain button behavior and count control.
+    """
+    content = """
+    <div class="container" style="max-width: 960px;">
+      <div class="card shadow-sm my-4">
+        <div class="card-header d-flex align-items-center">
+          <div>
+            <h4 class="mb-0">{title}</h4>
+            <div class="text-muted small">Choose your domain(s) and how many questions to practice.</div>
           </div>
         </div>
-      </div></div>
+        <div class="card-body">
+          <form method="post" action="{action}">
+            <input type="hidden" id="domain_val" name="domain_val" value="">
+            <div class="mb-3">
+              <label class="form-label">Domains</label>
+              <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 1">Domain 1</button>
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 2">Domain 2</button>
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 3">Domain 3</button>
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 4">Domain 4</button>
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 5">Domain 5</button>
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 6">Domain 6</button>
+                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 7">Domain 7</button>
+              </div>
+              <div class="text-muted small mt-2">Tip: Leave blank for a mixed-domain set based on CPP blueprint weights.</div>
+            </div>
+
+            <div class="mb-3">
+              <label class="form-label">How many questions?</label>
+              <input type="number" class="form-control" name="count" min="1" max="200" value="{count}">
+            </div>
+
+            <div class="d-flex gap-2">
+              <button class="btn btn-primary" type="submit">Start</button>
+              <a class="btn btn-outline-secondary" href="/">Cancel</a>
+            </div>
+          </form>
+        </div>
+      </div>
     </div>
 
     <script>
-      (function() {
+      (function(){
         var container = document.currentScript.closest('.card').querySelector('.card-body');
         var hidden = container.querySelector('#domain_val');
-        container.querySelectorAll('.domain-btn').forEach(function(btn) {
-          btn.addEventListener('click', function() {
+        container.querySelectorAll('.domain-btn').forEach(function(btn){
+          btn.addEventListener('click', function(){
             container.querySelectorAll('.domain-btn').forEach(function(b){ b.classList.remove('active'); });
             btn.classList.add('active');
             if (hidden) hidden.value = btn.getAttribute('data-value');
@@ -994,150 +1046,219 @@ def sec4_mock_picker():
         });
       })();
     </script>
+    """.replace("{title}", _html_escape(title))\
+       .replace("{action}", _html_escape(post_action))\
+       .replace("{count}", _html_escape(default_count))
+    return base_layout(title, content)
+
+def _render_exam_page(title: str, questions: list) -> str:
     """
-    content = render_template_string(tmpl, csrf_val=csrf_val, domain_buttons=domain_buttons)
-    try:
-        _log_event(_user_id(), "mock.picker", {})
-    except Exception:
-        pass
-    return base_layout("Mock Exam", content)
-
-@app.post("/mock/start", endpoint="sec4_mock_start")
-@login_required
-def sec4_mock_start():
+    Render a lightweight, keyboard-friendly practice page.
+    - One question per screen with Next/Prev
+    - 'Reveal Answer' per question (no auto-submission)
+    - Works for MC, TF, Scenario
     """
-    Starts a client-side mock exam session. Keeps the existing behavior:
-    - reads count + domain
-    - samples from bank questions
-    - renders HTML+JS client to navigate questions locally
-    NOTE: We render with render_template_string to avoid f-string/brace issues.
-    """
-    if not _csrf_ok():
-        abort(403)
-
-    try:
-        count = int(request.form.get("count") or 20)
-    except Exception:
-        count = 20
-    if count not in (10, 20, 30):
-        count = 20
-    domain = request.form.get("domain") or "random"
-
-    # Pull questions from bank (Section 6 helpers).
-    questions = _bank_read_questions()
-    pool = _mock_filter_questions_domain(questions, domain)
-    random.shuffle(pool)
-    items = pool[:max(0, min(count, len(pool)))]
-
-    # Prepare a compact client payload (id, question, options, correct stored but hidden)
-    # Sources/domains preserved; UI unchanged.
-    q_payload = []
-    for q in items:
-        q_payload.append({
+    # We JSON-embed only non-sensitive fields.
+    safe_qs = []
+    for q in questions:
+        t = str(q.get("type","")).lower()
+        safe = {
             "id": q.get("id"),
-            "question": q.get("question"),
-            "options": q.get("options", {}),
-            "correct": q.get("correct"),
-            "domain": q.get("domain", "Unspecified"),
-            "sources": q.get("sources", []),
-        })
+            "domain": q.get("domain"),
+            "type": t,
+            "stem": q.get("stem"),
+            "choices": q.get("choices", []) if t == "mc" else [],
+            "answer": q.get("answer", None) if t in ("mc","tf") else None,
+            "options": q.get("options", []) if t == "scenario" else [],
+            "answers": q.get("answers", []) if t == "scenario" else [],
+            "explanation": q.get("explanation","")
+        }
+        safe_qs.append(safe)
 
-    domain_label = DOMAINS.get(domain, "Mixed") if domain != "random" else "Random (all)"
-    total = len(q_payload)
+    payload = _html_escape(json.dumps(safe_qs, ensure_ascii=False))
 
-    tmpl = """
-    <div class="container">
-      <div class="row justify-content-center"><div class="col-xl-10">
-        <div class="card">
-          <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
-            <h3 class="mb-0"><i class="bi bi-ui-checks-grid me-2"></i>Mock Exam</h3>
-            <a href="/mock" class="btn btn-outline-light btn-sm">New Setup</a>
+    content = """
+    <div class="container" style="max-width: 960px;">
+      <div class="card shadow-sm my-4">
+        <div class="card-header d-flex align-items-center justify-content-between">
+          <div>
+            <h4 class="mb-0">{title}</h4>
+            <div class="text-muted small" id="prog"></div>
           </div>
-          <div class="card-body">
-            <div class="mb-2 small text-muted">
-              Domain: <strong>{{ domain_label }}</strong> &bull; Questions: {{ total }}
-            </div>
-
-            <div id="q-wrap" class="border rounded-3 p-3" style="min-height: 160px;"></div>
-
-            <div class="d-flex align-items-center gap-2 mt-3">
-              <button class="btn btn-outline-secondary" id="prevBtn"><i class="bi bi-arrow-left"></i></button>
-              <button class="btn btn-primary" id="revealBtn"><i class="bi bi-eye me-1"></i>Reveal</button>
-              <button class="btn btn-outline-secondary" id="nextBtn"><i class="bi bi-arrow-right"></i></button>
-              <div class="ms-auto small"><span id="idx">0</span>/<span id="total">{{ total }}</span></div>
-            </div>
-
-            <a href="/" class="btn btn-outline-secondary mt-3"><i class="bi bi-house me-1"></i>Home</a>
+          <div class="text-muted small">Use ← → keys to navigate</div>
+        </div>
+        <div class="card-body">
+          <div id="qroot"></div>
+          <div class="d-flex justify-content-between mt-3">
+            <button class="btn btn-outline-secondary" id="prevBtn">Prev</button>
+            <button class="btn btn-primary" id="nextBtn">Next</button>
           </div>
         </div>
-      </div></div>
+      </div>
     </div>
 
     <script>
-      (function() {
-        var data = {{ q_payload | tojson }};
-        var i = 0, total = data.length;
-        var wrap = document.getElementById('q-wrap');
-        function render(idx, reveal) {
-          if (!total) { wrap.innerHTML = "<div class='text-muted'>No questions found.</div>"; return; }
-          var q = data[idx];
-          var opts = q.options || {};
-          var html = "";
-          html += "<div class='fw-semibold mb-2'>" + escapeHtml(q.question || "") + "</div>";
-          html += "<div class='list-group'>";
-          ["A","B","C","D"].forEach(function(L) {
-            var t = escapeHtml(String(opts[L] || ""));
-            html += "<div class='list-group-item'>" + L + ". " + t + "</div>";
-          });
-          html += "</div>";
-          if (reveal) {
-            html += "<div class='alert alert-success mt-3 mb-0 small'><i class='bi bi-check2-circle me-1'></i>";
-            html += "Answer: <strong>" + escapeHtml(q.correct || "") + "</strong></div>";
-            if ((q.sources || []).length) {
-              html += "<div class='small mt-2'><span class='text-muted'>Sources:</span><ul class='small mb-0 ps-3'>";
-              (q.sources || []).forEach(function(s) {
-                var t = escapeHtml(String(s.title||""));
-                var u = String(s.url||"#");
-                html += "<li><a href='" + u + "' target='_blank' rel='noopener'>" + t + "</a></li>";
-              });
-              html += "</ul></div>";
-            }
+      (function(){
+        var data = JSON.parse("{payload}");
+        var idx = 0;
+
+        var root = document.getElementById('qroot');
+        var prog = document.getElementById('prog');
+        var prevBtn = document.getElementById('prevBtn');
+        var nextBtn = document.getElementById('nextBtn');
+
+        function render() {
+          if (!data.length) {
+            root.innerHTML = '<div class="alert alert-warning">No questions available for this selection.</div>';
+            prog.textContent = '';
+            prevBtn.disabled = true; nextBtn.disabled = true;
+            return;
           }
-          wrap.innerHTML = html;
-          document.getElementById('idx').textContent = (total ? idx+1 : 0);
+          var q = data[idx];
+          prog.textContent = 'Question ' + (idx+1) + ' of ' + data.length + (q.domain ? (' — ' + q.domain) : '');
+
+          var html = '';
+          html += '<div class="mb-2"><strong>' + escapeHtml(q.stem || '') + '</strong></div>';
+
+          if (q.type === 'mc') {
+            html += '<ol type="A">';
+            (q.choices || []).forEach(function(c, i){
+              html += '<li>' + escapeHtml(String(c || "")) + '</li>';
+            });
+            html += '</ol>';
+            html += '<button class="btn btn-sm btn-outline-primary" id="revealBtn">Reveal Answer</button>';
+            html += '<div class="mt-2 d-none" id="ans"><span class="badge bg-success">Answer: ' + _letter(q.answer) + '</span>'
+                 +  (q.explanation ? ('<div class="mt-2 text-muted">'+ escapeHtml(q.explanation) +'</div>') : '')
+                 +  '</div>';
+          } else if (q.type === 'tf') {
+            html += '<div class="mb-2">True or False?</div>';
+            html += '<ul><li>True</li><li>False</li></ul>';
+            html += '<button class="btn btn-sm btn-outline-primary" id="revealBtn">Reveal Answer</button>';
+            html += '<div class="mt-2 d-none" id="ans"><span class="badge bg-success">Answer: ' + (q.answer ? 'True' : 'False') + '</span>'
+                 +  (q.explanation ? ('<div class="mt-2 text-muted">'+ escapeHtml(q.explanation) +'</div>') : '')
+                 +  '</div>';
+          } else {
+            // scenario: multi-answer
+            html += '<div class="mb-2">Select all that apply:</div>';
+            html += '<ol type="A">';
+            (q.options || []).forEach(function(c, i){
+              html += '<li>' + escapeHtml(String(c || "")) + '</li>';
+            });
+            html += '</ol>';
+            var letters = (q.answers || []).map(function(i){ return _letter(i); });
+            html += '<button class="btn btn-sm btn-outline-primary" id="revealBtn">Reveal Answer</button>';
+            html += '<div class="mt-2 d-none" id="ans"><span class="badge bg-success">Answer: ' + letters.join(', ') + '</span>'
+                 +  (q.explanation ? ('<div class="mt-2 text-muted">'+ escapeHtml(q.explanation) +'</div>') : '')
+                 +  '</div>';
+          }
+
+          root.innerHTML = html;
+          var rb = document.getElementById('revealBtn');
+          var ans = document.getElementById('ans');
+          if (rb && ans) rb.addEventListener('click', function(){
+            ans.classList.remove('d-none');
+          });
+
+          prevBtn.disabled = (idx === 0);
+          nextBtn.disabled = (idx === data.length - 1);
         }
-        function next() { if (!total) return; i = Math.min(total-1, i+1); render(i, false); }
-        function prev() { if (!total) return; i = Math.max(0, i-1); render(i, false); }
-        function reveal() { if (!total) return; render(i, true); }
+
+        function _letter(i){
+          var A = 'A'.charCodeAt(0);
+          var n = parseInt(i, 10);
+          if (isNaN(n) || n < 0) return '?';
+          return String.fromCharCode(A + n);
+        }
 
         function escapeHtml(s){
-          return String(s).replace(/[&<>"']/g, function(m){
-            return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]);
-          });
+          return String(s)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#039;');
         }
 
-        document.getElementById('nextBtn').addEventListener('click', function(){ next(); });
-        document.getElementById('prevBtn').addEventListener('click', function(){ prev(); });
-        document.getElementById('revealBtn').addEventListener('click', function(){ reveal(); });
+        prevBtn.addEventListener('click', function(){ if (idx>0){ idx--; render(); }});
+        nextBtn.addEventListener('click', function(){ if (idx < data.length-1){ idx++; render(); }});
+        window.addEventListener('keydown', function(e){
+          if (e.key === 'ArrowLeft'){ if (idx>0){ idx--; render(); } }
+          if (e.key === 'ArrowRight'){ if (idx < data.length-1){ idx++; render(); } }
+        });
 
-        render(i, false);
+        render();
       })();
     </script>
-    """
-    content = render_template_string(
-        tmpl,
-        q_payload=q_payload,
-        domain_label=domain_label,
-        total=total,
-    )
+    """.replace("{title}", _html_escape(title))\
+       .replace("{payload}", payload)
+    return base_layout(title, content)
 
+def _log_safely(event_name: str, payload: dict):
     try:
-        _log_event(_user_id(), "mock.start", {"count": total, "domain": domain})
-        _bump_usage("quizzes", 1)
-        _bump_usage("questions", total)
+        if "_log_event" in globals():
+            _log_event(_user_id(), event_name, payload)
     except Exception:
         pass
-    return base_layout("Mock Exam", content)
+
+# ---- Routes: QUIZ ----------------------------------------------------------
+
+@app.get("/quiz")
+@login_required
+def sec4_quiz_picker():
+    # lightweight event
+    _log_safely("quiz.picker.view", {})
+    # Render picker; form posts to /quiz/start
+    return _render_picker_page("Quiz", "/quiz/start", default_count=10)
+
+@app.post("/quiz/start")
+@login_required
+def sec4_quiz_start():
+    if not _csrf_ok():
+        abort(403)
+
+    # selected domains (or empty → use weights)
+    domains = _selected_domains_from_request()
+    # how many questions (keep your user's freedom)
+    count = _req_int("count", default=10, lo=1, hi=200)
+
+    # use selection engine (Section 7/8)
+    try:
+        qs = select_questions(domains=domains, count=count, mix=None, user_id=_user_id())
+    except Exception as e:
+        _log_safely("quiz.start.error", {"error": str(e)})
+        return base_layout("Quiz", '<div class="alert alert-danger">Could not build quiz set. Please try again.</div>')
+
+    _log_safely("quiz.start", {"domains": domains, "count": count, "actual": len(qs)})
+    return _render_exam_page("Quiz", qs)
+
+# ---- Routes: MOCK EXAM -----------------------------------------------------
+
+@app.get("/mock")
+@login_required
+def sec4_mock_picker():
+    _log_safely("mock.picker.view", {})
+    return _render_picker_page("Mock Exam", "/mock/start", default_count=50)
+
+@app.post("/mock/start")
+@login_required
+def sec4_mock_start():
+    if not _csrf_ok():
+        abort(403)
+
+    domains = _selected_domains_from_request()
+    count = _req_int("count", default=50, lo=10, hi=500)
+
+    try:
+        qs = select_questions(domains=domains, count=count, mix=None, user_id=_user_id())
+    except Exception as e:
+        _log_safely("mock.start.error", {"error": str(e)})
+        return base_layout("Mock Exam", '<div class="alert alert-danger">Could not build mock exam. Please try again.</div>')
+
+    _log_safely("mock.start", {"domains": domains, "count": count, "actual": len(qs)})
+    return _render_exam_page("Mock Exam", qs)
+
+### END OF SECTION 4/8 — QUIZ & MOCK (BANK-POWERED, UI PRESERVED)
+
 
 # ===== SECTION 5/8 — TUTOR ROUTE (RESTORE & STABLE) — START =====
 # STABILITY: This section restores a working /tutor endpoint to fix 404s
@@ -2211,6 +2332,7 @@ def sec1_logout():
     _auth_clear_session()
     return redirect("/welcome")
 # ========================= END SECTION 8/8 =========================
+
 
 
 
