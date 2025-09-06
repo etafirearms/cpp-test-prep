@@ -1009,12 +1009,14 @@ def tutor_suggestions_html() -> str:
     
     suggestion_buttons = ""
     for i, suggestion in enumerate(suggestions[:6]):  # Show first 6
-        suggestion_buttons += f"""
+        # Escape quotes properly for JavaScript
+        js_safe_suggestion = suggestion.replace("'", "\\'").replace('"', '\\"')
+        suggestion_buttons += f'''
         <button type="button" class="btn btn-outline-primary btn-sm mb-2 me-2 suggestion-btn" 
-                onclick="document.querySelector('textarea[name=question]').value = '{html.escape(suggestion)}'; document.querySelector('textarea[name=question]').focus();">
+                onclick="document.querySelector('textarea[name=question]').value = '{js_safe_suggestion}'; document.querySelector('textarea[name=question]').focus();">
           {html.escape(suggestion)}
         </button>
-        """
+        '''
     
     return f"""
     <div class="card mb-4">
@@ -1613,4 +1615,5 @@ def tutor():
           <div class="card shadow-sm">
             <div class="card-header bg-light">
               <h5
+
 
