@@ -734,13 +734,13 @@ def _footer_html():
     """
 
 def progress_meter_html(progress_data: Dict[str, Any]) -> str:
-    """Generate progress meter HTML (speedometer style)"""
+    """Generate progress meter HTML (speedometer style) - FIXED"""
     percentage = progress_data.get("overall_percentage", 0)
     color = progress_data.get("color", "red")
     status = progress_data.get("status", "Getting Started")
     
-    # Calculate rotation for needle (0% = -90deg, 100% = 90deg)
-    rotation = max(-90, min(90, -90 + (percentage * 1.8)))
+    # Fixed rotation calculation: 0% = -90deg, 100% = 90deg (180 degree range)
+    rotation = -90 + (percentage * 1.8)  # Simplified calculation
     
     color_map = {"red": "#dc3545", "orange": "#fd7e14", "green": "#198754"}
     needle_color = color_map.get(color, "#dc3545")
@@ -748,28 +748,33 @@ def progress_meter_html(progress_data: Dict[str, Any]) -> str:
     return f"""
     <div class="progress-meter text-center mb-3">
       <div class="position-relative d-inline-block">
-        <svg width="120" height="80" viewBox="0 0 120 80">
+        <svg width="140" height="90" viewBox="0 0 140 90">
           <!-- Background arc -->
-          <path d="M 20 60 A 40 40 0 0 1 100 60" stroke="#e9ecef" stroke-width="8" fill="none"/>
+          <path d="M 20 70 A 50 50 0 0 1 120 70" stroke="#e9ecef" stroke-width="10" fill="none"/>
           
           <!-- Red zone (0-40%) -->
-          <path d="M 20 60 A 40 40 0 0 0 60 20" stroke="#dc3545" stroke-width="6" fill="none"/>
+          <path d="M 20 70 A 50 50 0 0 0 70 20" stroke="#dc3545" stroke-width="8" fill="none"/>
           
           <!-- Orange zone (40-79%) -->
-          <path d="M 60 20 A 40 40 0 0 0 88 44" stroke="#fd7e14" stroke-width="6" fill="none"/>
+          <path d="M 70 20 A 50 50 0 0 0 110 48" stroke="#fd7e14" stroke-width="8" fill="none"/>
           
           <!-- Green zone (80-100%) -->
-          <path d="M 88 44 A 40 40 0 0 0 100 60" stroke="#198754" stroke-width="6" fill="none"/>
+          <path d="M 110 48 A 50 50 0 0 0 120 70" stroke="#198754" stroke-width="8" fill="none"/>
           
           <!-- Needle -->
-          <line x1="60" y1="60" x2="60" y2="25" stroke="{needle_color}" stroke-width="3" 
-                transform="rotate({rotation} 60 60)"/>
+          <line x1="70" y1="70" x2="70" y2="30" stroke="{needle_color}" stroke-width="4" 
+                transform="rotate({rotation} 70 70)"/>
           
           <!-- Center dot -->
-          <circle cx="60" cy="60" r="4" fill="{needle_color}"/>
+          <circle cx="70" cy="70" r="5" fill="{needle_color}"/>
+          
+          <!-- Percentage labels -->
+          <text x="25" y="80" font-size="10" fill="#6c757d" text-anchor="middle">0%</text>
+          <text x="70" y="15" font-size="10" fill="#6c757d" text-anchor="middle">50%</text>
+          <text x="115" y="80" font-size="10" fill="#6c757d" text-anchor="middle">100%</text>
         </svg>
         
-        <div class="position-absolute w-100" style="bottom: -10px;">
+        <div class="position-absolute w-100" style="bottom: -15px;">
           <div class="fw-bold text-{color}">{percentage}%</div>
           <div class="small text-muted">{html.escape(status)}</div>
         </div>
@@ -778,7 +783,7 @@ def progress_meter_html(progress_data: Dict[str, Any]) -> str:
     """
 
 def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
-    """Base layout with navigation and footer"""
+    """Base layout with COMPLETE navigation including all missing links"""
     nav_html = ""
     if show_nav:
         user = _current_user()
@@ -801,6 +806,10 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
             nav_html += """
                 <a class="text-decoration-none" href="/tutor">Tutor</a>
                 <a class="text-decoration-none" href="/quiz">Quiz</a>
+                <a class="text-decoration-none" href="/mock-exam">Mock Exam</a>
+                <a class="text-decoration-none" href="/flashcards">Flashcards</a>
+                <a class="text-decoration-none" href="/progress">Progress</a>
+                <a class="text-decoration-none" href="/billing">Billing</a>
                 <a class="text-decoration-none" href="/dashboard">Dashboard</a>
                 <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
             """
@@ -876,6 +885,12 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
           animation: slideIn 0.5s ease-out;
           box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         }}
+        .domain-selector {{
+          background: linear-gradient(45deg, #f8f9fa, #e9ecef);
+          border-radius: 10px;
+          padding: 1rem;
+          margin-bottom: 1rem;
+        }}
         @keyframes slideIn {{
           from {{ opacity: 0; transform: translateY(-20px); }}
           to {{ opacity: 1; transform: translateY(0); }}
@@ -903,6 +918,114 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
       <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     </body>
     </html>
+    """
+
+def domain_selector_html(form_name: str = "domains") -> str:
+    """Generate domain selection checkboxes for quiz/tutor"""
+    return f"""
+    <div class="domain-selector">
+      <h6 class="mb-3"><i class="bi bi-tags-fill me-2"></i>Select Study Domains</h6>
+      <div class="row g-2">
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="all" id="domain_all" checked>
+            <label class="form-check-label fw-bold" for="domain_all">
+              All Domains (Recommended)
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain1" id="domain1">
+            <label class="form-check-label" for="domain1">
+              <small>D1: Security Principles (22%)</small>
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain2" id="domain2">
+            <label class="form-check-label" for="domain2">
+              <small>D2: Business Principles (15%)</small>
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain3" id="domain3">
+            <label class="form-check-label" for="domain3">
+              <small>D3: Investigations (9%)</small>
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain4" id="domain4">
+            <label class="form-check-label" for="domain4">
+              <small>D4: Personnel Security (11%)</small>
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain5" id="domain5">
+            <label class="form-check-label" for="domain5">
+              <small>D5: Physical Security (16%)</small>
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain6" id="domain6">
+            <label class="form-check-label" for="domain6">
+              <small>D6: Information Security (14%)</small>
+            </label>
+          </div>
+        </div>
+        <div class="col-md-6">
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" name="{form_name}" value="domain7" id="domain7">
+            <label class="form-check-label" for="domain7">
+              <small>D7: Crisis Management (13%)</small>
+            </label>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+
+def tutor_suggestions_html() -> str:
+    """Generate suggested questions for AI tutor"""
+    suggestions = [
+        "Explain the difference between administrative, physical, and technical controls",
+        "What are the key elements of a comprehensive security risk assessment?",
+        "How do you develop an effective crisis management plan?",
+        "What are the legal considerations in workplace investigations?",
+        "Describe the principles of Defense in Depth strategy",
+        "How do you calculate Return on Security Investment (ROSI)?",
+        "What are the components of an effective security awareness program?",
+        "Explain the difference between due care and due diligence in security"
+    ]
+    
+    suggestion_buttons = ""
+    for i, suggestion in enumerate(suggestions[:6]):  # Show first 6
+        suggestion_buttons += f"""
+        <button type="button" class="btn btn-outline-primary btn-sm mb-2 me-2 suggestion-btn" 
+                onclick="document.querySelector('textarea[name=question]').value = '{html.escape(suggestion)}'; document.querySelector('textarea[name=question]').focus();">
+          {html.escape(suggestion)}
+        </button>
+        """
+    
+    return f"""
+    <div class="card mb-4">
+      <div class="card-header bg-info text-white">
+        <h6 class="mb-0"><i class="bi bi-lightbulb me-2"></i>Suggested Questions</h6>
+      </div>
+      <div class="card-body">
+        <p class="text-muted small mb-3">Click any suggestion to use it, or ask your own question:</p>
+        {suggestion_buttons}
+      </div>
+    </div>
     """
 
 def _render_question_choices(q):
@@ -1490,3 +1613,4 @@ def tutor():
           <div class="card shadow-sm">
             <div class="card-header bg-light">
               <h5
+
