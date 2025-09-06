@@ -428,6 +428,39 @@ def get_random_encouragement():
     """Get a random encouragement message"""
     return random.choice(ENCOURAGEMENT_MESSAGES)
 
+# Basic content to avoid empty database
+SEED_QUESTIONS = [
+    {
+        "id": "seed_q_1",
+        "type": "mc",
+        "domain": "Domain 1",
+        "stem": "Which control type prevents incidents before they occur?",
+        "choices": ["Detective", "Preventive", "Corrective", "Compensating"],
+        "answer": 1,
+        "explanation": "Preventive controls stop incidents before they happen.",
+        "module": "Security Controls"
+    },
+    {
+        "id": "seed_q_2",
+        "type": "tf", 
+        "domain": "Domain 1",
+        "stem": "Risk can be completely eliminated.",
+        "answer": False,
+        "explanation": "Risk can only be reduced, transferred, or accepted - never completely eliminated.",
+        "module": "Risk Management"
+    }
+]
+
+SEED_FLASHCARDS = [
+    {
+        "id": "seed_fc_1",
+        "domain": "Domain 1",
+        "front": "What are the three types of security controls?",
+        "back": "Administrative, Physical, and Technical controls",
+        "tags": ["controls", "fundamentals"]
+    }
+]
+
 # ====================================================================================================
 # CONTENT BANK MANAGEMENT
 # ====================================================================================================
@@ -435,48 +468,12 @@ def get_random_encouragement():
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
 
-def _norm_text(s: str) -> str:
-    return " ".join(str(s).strip().lower().split())
-
-def _q_signature(q: Dict[str, Any]) -> str:
-    """Generate signature for question deduplication"""
-    t = q.get("type", "").lower()
-    stem = _norm_text(q.get("stem", ""))
-    if t == "mc":
-        choices = [_norm_text(c) for c in q.get("choices", [])]
-        choices.sort()
-        base = stem + "||" + "|".join(choices)
-    elif t in ("tf", "truefalse", "true_false"):
-        base = stem + "||tf"
-    else:  # scenario
-        opts = [_norm_text(c) for c in q.get("options", [])]
-        opts.sort()
-        base = stem + "||" + "|".join(opts)
-    return hashlib.sha256(base.encode("utf-8")).hexdigest()
-
-def _looks_like_dup(a: str, b: str, threshold: float = 0.92) -> bool:
-    """Fuzzy duplicate detection"""
-    ra = _norm_text(a); rb = _norm_text(b)
-    if not ra or not rb:
-        return False
-    return difflib.SequenceMatcher(a=ra, b=rb).ratio() >= threshold
-
-def get_domain_weights() -> Dict[str, float]:
-    """Get domain weights, create defaults if missing"""
-    default = {f"Domain {i+1}": info["weight"] for i, info in enumerate(CPP_DOMAINS.values())}
-    data = _load_json(_WEIGHTS_FILE, None)
-    if not data:
-        _save_json(_WEIGHTS_FILE, default)
-        return default
-    try:
-        total = float(sum(float(v) for v in data.values())) or 1.0
-        return {k: float(v)/total for k, v in data.items()}
-    except Exception:
-        return default
-
 def get_all_questions(domains: Optional[List[str]] = None,
                       types: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     rows = _read_jsonl(_QUESTIONS_FILE)
+    if not rows:
+        # Return seed questions if none exist
+        return SEED_QUESTIONS
     if domains:
         dset = set([d.lower() for d in domains])
         rows = [r for r in rows if str(r.get("domain","")).lower() in dset]
@@ -487,103 +484,13 @@ def get_all_questions(domains: Optional[List[str]] = None,
 
 def get_all_flashcards(domains: Optional[List[str]] = None) -> List[Dict[str, Any]]:
     rows = _read_jsonl(_FLASHCARDS_FILE)
+    if not rows:
+        # Return seed flashcards if none exist
+        return SEED_FLASHCARDS
     if domains:
         dset = set([d.lower() for d in domains])
         rows = [r for r in rows if str(r.get("domain","")).lower() in dset]
     return rows
-
-def ingest_questions(new_items: List[Dict[str, Any]], source: str = "upload") -> Tuple[int,int]:
-    """Ingest questions with deduplication"""
-    existing = _read_jsonl(_QUESTIONS_FILE)
-    seen_sigs = { _q_signature(q) for q in existing }
-    existing_stems = [ _norm_text(q.get("stem","")) for q in existing ]
-
-    added, skipped = 0, 0
-    out = list(existing)
-    now = int(time.time())
-    
-    for raw in new_items:
-        q = dict(raw)
-        q.setdefault("id", _new_id("q"))
-        q.setdefault("source", source)
-        q.setdefault("created_at", now)
-
-        # Normalize type
-        t = str(q.get("type","")).lower().strip()
-        if t in ("truefalse", "true_false"):
-            t = "tf"
-        elif t in ("multiplechoice", "multiple_choice"):
-            t = "mc"
-        elif t in ("scenario", "scn"):
-            t = "scenario"
-        q["type"] = t
-
-        # Validate
-        if not q.get("stem") or not q.get("domain") or t not in ("mc","tf","scenario"):
-            skipped += 1
-            continue
-
-        sig = _q_signature(q)
-        stem_norm = _norm_text(q.get("stem",""))
-
-        if sig in seen_sigs:
-            skipped += 1
-            continue
-        if any(_looks_like_dup(stem_norm, s) for s in existing_stems):
-            skipped += 1
-            continue
-
-        out.append(q)
-        seen_sigs.add(sig)
-        existing_stems.append(stem_norm)
-        added += 1
-
-    _write_jsonl(_QUESTIONS_FILE, out)
-    logger.info("Bank ingest: questions added=%s skipped=%s total=%s", added, skipped, len(out))
-    return added, skipped
-
-def ingest_flashcards(new_items: List[Dict[str, Any]], source: str = "upload") -> Tuple[int,int]:
-    """Ingest flashcards with deduplication"""
-    existing = _read_jsonl(_FLASHCARDS_FILE)
-    
-    def f_sig(fc: Dict[str, Any]) -> str:
-        base = _norm_text(fc.get("front","")) + "||" + _norm_text(fc.get("back",""))
-        return hashlib.sha256(base.encode("utf-8")).hexdigest()
-
-    seen = { f_sig(x) for x in existing }
-    existing_fronts = [ _norm_text(x.get("front","")) for x in existing ]
-
-    added, skipped = 0, 0
-    out = list(existing)
-    now = int(time.time())
-
-    for raw in new_items:
-        fc = dict(raw)
-        if not fc.get("front") or not fc.get("back") or not fc.get("domain"):
-            skipped += 1
-            continue
-        fc.setdefault("id", _new_id("fc"))
-        fc.setdefault("source", source)
-        fc.setdefault("created_at", now)
-        sig = f_sig(fc)
-        if sig in seen:
-            skipped += 1
-            continue
-        if any(_looks_like_dup(_norm_text(fc.get("front","")), s) for s in existing_fronts):
-            skipped += 1
-            continue
-        out.append(fc)
-        seen.add(sig)
-        existing_fronts.append(_norm_text(fc.get("front","")))
-        added += 1
-
-    _write_jsonl(_FLASHCARDS_FILE, out)
-    logger.info("Bank ingest: flashcards added=%s skipped=%s total=%s", added, skipped, len(out))
-    return added, skipped
-
-# ====================================================================================================
-# PROGRESS CALCULATION SYSTEM
-# ====================================================================================================
 
 def calculate_user_progress(user_id: str) -> Dict[str, Any]:
     """Calculate comprehensive user progress for speedometer display"""
@@ -681,133 +588,30 @@ def calculate_user_progress(user_id: str) -> Dict[str, Any]:
         }
     }
 
-# ====================================================================================================
-# SELECTION ENGINE
-# ====================================================================================================
-
-def _canonical_type(t: str) -> str:
-    t = (t or "").lower().strip()
-    if t in ("multiplechoice","multiple_choice"): return "mc"
-    if t in ("truefalse","true_false"): return "tf"
-    if t in ("scn",): return "scenario"
-    return t
-
-def _rng_for_user_context(user_id: Optional[str]) -> random.Random:
-    """Deterministic RNG per user/day for stable question sets"""
-    try:
-        day = int(time.time() // 86400)
-        seed_str = f"{user_id or 'anon'}::{day}"
-        seed = int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16) % (2**31)
-        return random.Random(seed)
-    except Exception:
-        return random.Random()
-
-def _weighted_domain_allocation(domains: List[str], weights: Dict[str, float], total: int) -> Dict[str, int]:
-    """Allocate questions across domains by weight"""
-    if not domains:
-        return {}
-    
-    # Normalize weights for selected domains
-    local = {d: float(weights.get(d, 0.0)) for d in domains}
-    if sum(local.values()) <= 0:
-        # Equal split if no weights
-        eq = max(1, total // max(1, len(domains)))
-        alloc = {d: eq for d in domains}
-        rem = total - sum(alloc.values())
-        for d in domains[:rem]:
-            alloc[d] += 1
-        return alloc
-    
-    # Proportional allocation
-    raw = {d: weights.get(d, 0.0) for d in domains}
-    s = sum(raw.values()) or 1.0
-    target = {d: (raw[d]/s)*total for d in domains}
-    alloc = {d: int(math.floor(target[d])) for d in domains}
-    rem = total - sum(alloc.values())
-    
-    # Distribute remainder by largest fractional parts
-    fr = sorted(domains, key=lambda d: target[d]-alloc[d], reverse=True)
-    for d in fr[:rem]:
-        alloc[d] += 1
-    return alloc
-
-def _split_type_mix(n: int, mix: Dict[str, float]) -> Dict[str, int]:
-    """Split questions by type according to mix percentages"""
-    mix = { _canonical_type(k): float(v) for k, v in mix.items() }
-    alloc = {k: int(math.floor(n * mix.get(k, 0.0))) for k in mix}
-    rem = n - sum(alloc.values())
-    
-    residuals = sorted(mix.keys(), key=lambda k: (n*mix[k]) - alloc[k], reverse=True)
-    for k in residuals[:rem]:
-        alloc[k] += 1
-    
-    out = {"mc": alloc.get("mc",0), "tf": alloc.get("tf",0), "scenario": alloc.get("scenario",0)}
-    delta = n - sum(out.values())
-    for k in ("mc","tf","scenario"):
-        if delta == 0: break
-        out[k] += 1
-        delta -= 1
-    return out
-
-def _filter_by_type(rows: List[Dict[str, Any]], t: str) -> List[Dict[str, Any]]:
-    t = _canonical_type(t)
-    return [r for r in rows if _canonical_type(r.get("type","")) == t]
-
 def select_questions(domains: List[str],
                      count: int,
                      mix: Optional[Dict[str, float]] = None,
                      user_id: Optional[str] = None) -> List[Dict[str, Any]]:
     """Core question selection engine"""
-    mix = mix or dict(QUESTION_TYPE_MIX)
-    weights = get_domain_weights()
-    rng = _rng_for_user_context(user_id)
-
-    domains = list(domains or [])
-    if not domains:
-        domains = list(weights.keys())
-
-    per_domain = _weighted_domain_allocation(domains, weights, count)
-    inventory_by_domain = {d: get_all_questions(domains=[d]) for d in domains}
-
-    selected: List[Dict[str, Any]] = []
-
-    for d, n_d in per_domain.items():
-        if n_d <= 0:
-            continue
-        pool = inventory_by_domain.get(d, [])
-        if not pool:
-            continue
-        
-        t_alloc = _split_type_mix(n_d, mix)
-
-        for t, need in t_alloc.items():
-            if need <= 0: 
-                continue
-            sub = _filter_by_type(pool, t)
-            if len(sub) <= need:
-                selected.extend(sub)
-            else:
-                selected.extend(rng.sample(sub, need))
-
-    # Backfill if short
-    short = count - len(selected)
-    if short > 0:
-        remaining = [q for d in domains for q in inventory_by_domain.get(d, []) if q not in selected]
-        if len(remaining) >= short:
-            selected.extend(rng.sample(remaining, short))
-        else:
-            selected.extend(remaining)
-            all_pool = get_all_questions()
-            extra = [q for q in all_pool if q not in selected]
-            extra_need = count - len(selected)
-            if extra_need > 0 and len(extra) > 0:
-                take = min(extra_need, len(extra))
-                selected.extend(rng.sample(extra, take))
-
-    if len(selected) > count:
-        selected = selected[:count]
-
-    return selected
+    questions = get_all_questions()
+    
+    # Simple selection for now
+    if not questions:
+        return SEED_QUESTIONS[:count]
+    
+    # Filter by domains if specified
+    if domains and "all" not in domains:
+        filtered = []
+        for q in questions:
+            if any(domain.lower() in str(q.get("domain", "")).lower() for domain in domains):
+                filtered.append(q)
+        questions = filtered if filtered else questions
+    
+    # Return random selection up to count
+    if len(questions) <= count:
+        return questions
+    
+    return random.sample(questions, count)
 
 # ====================================================================================================
 # AI TUTOR SYSTEM
@@ -903,7 +707,7 @@ def _append_attempt(uid: str, mode: str, score: int = None, total: int = None,
     _save_json("attempts.json", attempts)
 
 # ====================================================================================================
-# UI HELPERS & BASE LAYOUT
+# UI HELPERS & BASE LAYOUT - MUST BE DEFINED BEFORE ROUTES
 # ====================================================================================================
 
 def _footer_html():
@@ -997,11 +801,8 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
         if user:
             nav_html += """
                 <a class="text-decoration-none" href="/tutor">Tutor</a>
-                <a class="text-decoration-none" href="/flashcards">Flashcards</a>
                 <a class="text-decoration-none" href="/quiz">Quiz</a>
-                <a class="text-decoration-none" href="/mock">Mock Exam</a>
-                <a class="text-decoration-none" href="/progress">Progress</a>
-                <a class="text-decoration-none" href="/billing">Billing</a>
+                <a class="text-decoration-none" href="/dashboard">Dashboard</a>
                 <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
             """
         else:
@@ -1076,21 +877,6 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
           animation: slideIn 0.5s ease-out;
           box-shadow: 0 4px 15px rgba(0,0,0,0.2);
         }}
-        .choice-option {{
-          transition: all 0.2s ease;
-          border-radius: 10px;
-          padding: 1rem;
-          margin: 0.5rem 0;
-          cursor: pointer;
-        }}
-        .choice-option:hover {{
-          background-color: #f8f9fa;
-          transform: translateX(5px);
-        }}
-        .choice-option.selected {{
-          background-color: #e3f2fd;
-          border-color: #2196F3;
-        }}
         @keyframes slideIn {{
           from {{ opacity: 0; transform: translateY(-20px); }}
           to {{ opacity: 1; transform: translateY(0); }}
@@ -1104,14 +890,6 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
           25% {{ transform: translateX(-5px); }}
           75% {{ transform: translateX(5px); }}
         }}
-        .password-strength {{
-          height: 5px;
-          border-radius: 3px;
-          transition: all 0.3s ease;
-        }}
-        .strength-weak {{ background: #dc3545; }}
-        .strength-medium {{ background: #ffc107; }}
-        .strength-strong {{ background: #28a745; }}
       </style>
     </head>
     <body class="d-flex flex-column min-vh-100">
@@ -1124,564 +902,934 @@ def base_layout(title: str, body_html: str, show_nav: bool = True) -> str:
       {_footer_html()}
 
       <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-      <script>
-        // Password strength indicator
-        function checkPasswordStrength(password) {{
-          let strength = 0;
-          if (password.length >= 8) strength++;
-          if (/[A-Z]/.test(password)) strength++;
-          if (/[a-z]/.test(password)) strength++;
-          if (/[0-9]/.test(password)) strength++;
-          if (/[^A-Za-z0-9]/.test(password)) strength++;
-          return strength;
-        }}
-        
-        // Auto-refresh for encouragement messages
-        if (window.location.pathname === '/dashboard') {{
-          setTimeout(() => location.reload(), 30000);
-        }}
-      </script>
     </body>
     </html>
     """
 
-def domain_buttons_html(selected_key="all", field_name="domain"):
-    """Generate domain selection buttons"""
-    buttons = []
-    domains = ["all"] + [f"domain{i+1}" for i in range(7)]
-    labels = {
-        "all": "All Domains",
-        "domain1": "D1: Security Principles",
-        "domain2": "D2: Business Principles", 
-        "domain3": "D3: Investigations",
-        "domain4": "D4: Personnel Security",
-        "domain5": "D5: Physical Security",
-        "domain6": "D6: Information Security",
-        "domain7": "D7: Crisis Management"
-    }
+def _render_question_choices(q):
+    """Helper to render question choices"""
+    qtype = q.get("type", "")
+    if qtype == "mc":
+        choices_html = ""
+        for i, choice in enumerate(q.get("choices", [])):
+            choices_html += f"""
+            <div class="border rounded p-3 mb-2">
+              <div class="form-check">
+                <input class="form-check-input" type="radio" name="answer" value="{i}" id="choice{i}" required>
+                <label class="form-check-label w-100" for="choice{i}">
+                  <strong>{chr(65+i)}.</strong> {html.escape(choice)}
+                </label>
+              </div>
+            </div>
+            """
+        return choices_html
+    elif qtype == "tf":
+        return """
+        <div class="border rounded p-3 mb-2">
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="answer" value="true" id="true" required>
+            <label class="form-check-label w-100" for="true">
+              <strong>True</strong>
+            </label>
+          </div>
+        </div>
+        <div class="border rounded p-3 mb-2">
+          <div class="form-check">
+            <input class="form-check-input" type="radio" name="answer" value="false" id="false" required>
+            <label class="form-check-label w-100" for="false">
+              <strong>False</strong>
+            </label>
+          </div>
+        </div>
+        """
+    return "<p>Question type not supported</p>"
+
+def _render_quiz_question(questions, current_idx):
+    """Render a single quiz question"""
+    q = questions[current_idx]
+    total = len(questions)
+    progress_percent = ((current_idx + 1) / total) * 100
     
-    for domain in domains:
-        active = " active" if selected_key == domain else ""
-        label = labels.get(domain, domain)
-        buttons.append(
-            f'<button type="button" class="btn btn-outline-success domain-btn{active}" '
-            f'data-value="{html.escape(domain)}">{html.escape(label)}</button>'
-        )
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-10">
+          <!-- Progress bar -->
+          <div class="mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h5 class="mb-0">Question {current_idx + 1} of {total}</h5>
+              <span class="badge bg-warning">{html.escape(q.get('domain', 'Unknown'))}</span>
+            </div>
+            <div class="progress">
+              <div class="progress-bar bg-warning" style="width: {progress_percent}%"></div>
+            </div>
+          </div>
+          
+          <!-- Question card -->
+          <div class="card shadow-sm question-card">
+            <div class="card-header bg-light">
+              <h6 class="mb-0 text-muted">
+                <i class="bi bi-question-circle me-2"></i>
+                {html.escape(q.get('type', '').upper())} Question
+              </h6>
+            </div>
+            <div class="card-body">
+              <h5 class="card-title mb-4">{html.escape(q.get('stem', ''))}</h5>
+              
+              <form method="post" action="/quiz/answer">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <input type="hidden" name="question_id" value="{html.escape(q.get('id', ''))}"/>
+                
+                {_render_question_choices(q)}
+                
+                <div class="d-grid gap-2 mt-4">
+                  <button type="submit" class="btn btn-primary btn-lg">
+                    <i class="bi bi-check-circle me-2"></i>Submit Answer
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Quiz", content)
+
+def _show_quiz_results():
+    """Display quiz results"""
+    if "quiz_answers" not in session:
+        return redirect("/quiz")
     
-    hidden = f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" value="{html.escape(selected_key)}"/>'
-    return f'<div class="d-flex flex-wrap gap-2 mb-3">{" ".join(buttons)}</div>{hidden}'
+    answers = session["quiz_answers"]
+    total_questions = len(answers)
+    correct_count = sum(1 for a in answers if a.get("is_correct", False))
+    score_percentage = (correct_count / total_questions * 100) if total_questions > 0 else 0
+    
+    # Determine performance level
+    if score_percentage >= 80:
+        performance_class = "success"
+        performance_text = "Excellent"
+        performance_icon = "bi-trophy-fill"
+    elif score_percentage >= 70:
+        performance_class = "info"
+        performance_text = "Good"
+        performance_icon = "bi-star-fill"
+    elif score_percentage >= 60:
+        performance_class = "warning"
+        performance_text = "Fair"
+        performance_icon = "bi-exclamation-triangle-fill"
+    else:
+        performance_class = "danger"
+        performance_text = "Needs Improvement"
+        performance_icon = "bi-arrow-repeat"
+    
+    # Clear session
+    session.pop("quiz_questions", None)
+    session.pop("quiz_current", None)
+    session.pop("quiz_answers", None)
+    
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-8">
+          <!-- Results Header -->
+          <div class="card shadow-sm mb-4">
+            <div class="card-header bg-{performance_class} text-white text-center">
+              <h4 class="mb-0">
+                <i class="bi {performance_icon} me-2"></i>
+                Quiz Complete - {performance_text}!
+              </h4>
+            </div>
+            <div class="card-body text-center">
+              <div class="row">
+                <div class="col-md-4">
+                  <h2 class="text-{performance_class}">{correct_count}/{total_questions}</h2>
+                  <p class="text-muted mb-0">Correct Answers</p>
+                </div>
+                <div class="col-md-4">
+                  <h2 class="text-{performance_class}">{score_percentage:.1f}%</h2>
+                  <p class="text-muted mb-0">Overall Score</p>
+                </div>
+                <div class="col-md-4">
+                  <h2 class="text-{performance_class}">{performance_text}</h2>
+                  <p class="text-muted mb-0">Performance Level</p>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <!-- Action Buttons -->
+          <div class="text-center">
+            <a href="/quiz" class="btn btn-primary btn-lg me-2">
+              <i class="bi bi-arrow-repeat me-2"></i>Take Another Quiz
+            </a>
+            <a href="/tutor" class="btn btn-success btn-lg me-2">
+              <i class="bi bi-chat-dots me-2"></i>Ask Tutor
+            </a>
+            <a href="/dashboard" class="btn btn-outline-secondary btn-lg">
+              <i class="bi bi-house me-2"></i>Dashboard
+            </a>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Quiz Results", content)
 
 # ====================================================================================================
-# CONTENT GENERATION SYSTEM
+# HEALTH CHECK ROUTE (REQUIRED FOR RENDER) - MUST BE FIRST ROUTE
 # ====================================================================================================
 
-class CPPContentGenerator:
-    """Generate comprehensive CPP study content"""
+@app.route("/healthz")
+def health_check():
+    """Health check endpoint for deployment platform"""
+    return jsonify({
+        "status": "healthy",
+        "version": APP_VERSION,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+# ====================================================================================================
+# ROUTES - LANDING PAGE & AUTHENTICATION
+# ====================================================================================================
+
+@app.route("/")
+def landing_page():
+    """Landing page with subscription options"""
+    if _current_user():
+        return redirect("/dashboard")
     
-    @classmethod
-    def generate_sample_questions(cls) -> List[Dict[str, Any]]:
-        """Generate a comprehensive set of unique sample questions"""
-        questions = []
-        now = int(time.time())
+    content = """
+    <div class="hero-section bg-primary text-white py-5 mb-5">
+      <div class="container">
+        <div class="row align-items-center">
+          <div class="col-lg-6">
+            <h1 class="display-4 fw-bold mb-3">Master the CPP Exam</h1>
+            <p class="lead mb-4">
+              Comprehensive preparation for the ASIS Certified Protection Professional certification. 
+              Study smarter with our adaptive learning platform featuring expert-designed content.
+            </p>
+            <div class="d-flex gap-3 flex-wrap">
+              <a href="/register" class="btn btn-light btn-lg">Start Free Trial</a>
+              <a href="/login" class="btn btn-outline-light btn-lg">Sign In</a>
+            </div>
+          </div>
+          <div class="col-lg-6 text-center">
+            <i class="bi bi-shield-check display-1 text-white-50"></i>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <div class="container mb-5">
+      <div class="alert alert-warning border-warning">
+        <div class="d-flex align-items-center">
+          <i class="bi bi-exclamation-triangle-fill me-2"></i>
+          <div>
+            <strong>Important Disclaimer:</strong> This program is not affiliated with or approved by ASIS International. 
+            We use only open-source and publicly available study materials. No ASIS-protected content is included.
+          </div>
+        </div>
+      </div>
+      
+      <div class="row mb-5">
+        <div class="col-12">
+          <h2 class="text-center mb-4">Study Features</h2>
+        </div>
+        <div class="col-md-6 text-center mb-4">
+          <div class="card h-100 border-0 shadow-sm question-card">
+            <div class="card-body">
+              <div class="tutor-chat p-3 rounded-3 mb-3">
+                <i class="bi bi-chat-dots display-4 text-white"></i>
+              </div>
+              <h5>AI Tutor</h5>
+              <p class="text-muted">Get instant explanations and personalized guidance on complex CPP topics</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6 text-center mb-4">
+          <div class="card h-100 border-0 shadow-sm question-card">
+            <div class="card-body">
+              <i class="bi bi-ui-checks-grid text-warning display-4 mb-3"></i>
+              <h5>Practice Quizzes</h5>
+              <p class="text-muted">Test your knowledge with realistic exam questions</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="text-center mb-4">
+        <p class="text-muted">Ready to start your CPP preparation journey?</p>
+        <a href="/register" class="btn btn-primary btn-lg">Get Started Free</a>
+      </div>
+    </div>
+    """
+    
+    return base_layout("CPP Exam Prep - Master Your Certification", content, show_nav=False)
+
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        next_url = request.args.get("next", "/dashboard")
         
-        # Generate unique questions for each domain
-        for domain_num in range(1, 8):
-            domain_name = f"Domain {domain_num}"
-            domain_questions = cls._generate_unique_domain_questions(domain_name, domain_num)
+        content = f"""
+        <div class="container" style="max-width: 600px;">
+          <div class="card shadow-sm">
+            <div class="card-header text-center bg-primary text-white">
+              <h4 class="mb-0">Create Your Account</h4>
+              <p class="mb-0 text-light">Start your free trial today</p>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <input type="hidden" name="next" value="{html.escape(next_url)}"/>
+                
+                <div class="mb-3">
+                  <label class="form-label">Email Address</label>
+                  <input type="email" name="email" class="form-control" required 
+                         placeholder="your.email@example.com"/>
+                </div>
+                
+                <div class="mb-3">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" required 
+                         minlength="8"/>
+                  <div class="form-text">
+                    Password must contain: uppercase, lowercase, number (minimum 8 characters)
+                  </div>
+                </div>
+                
+                <div class="mb-3">
+                  <label class="form-label">Confirm Password</label>
+                  <input type="password" name="confirm_password" class="form-control" required/>
+                </div>
+                
+                <div class="mb-3">
+                  <div class="form-check">
+                    <input class="form-check-input" type="checkbox" name="accept_terms" 
+                           id="accept_terms" required>
+                    <label class="form-check-label" for="accept_terms">
+                      I agree to the <a href="/terms" target="_blank">Terms &amp; Conditions</a>
+                    </label>
+                  </div>
+                </div>
+                
+                <div class="d-grid gap-2">
+                  <button type="submit" class="btn btn-primary btn-lg">
+                    Create Account
+                  </button>
+                  <a href="/login" class="btn btn-outline-secondary">Already have an account? Sign in</a>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Create Account", content, show_nav=False)
+    
+    # POST - process registration
+    if not _csrf_ok():
+        abort(403)
+    
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    confirm_password = request.form.get("confirm_password") or ""
+    next_url = request.form.get("next") or "/dashboard"
+    accept_terms = request.form.get("accept_terms") == "on"
+    
+    # Validation
+    if not accept_terms:
+        content = """
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">
+            You must accept the Terms & Conditions to continue.
+          </div>
+          <a href="/register" class="btn btn-primary">Back to Registration</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content, show_nav=False)
+    
+    if password != confirm_password:
+        content = """
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">
+            Passwords do not match.
+          </div>
+          <a href="/register" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content, show_nav=False)
+    
+    valid, msg = validate_password(password)
+    if not valid:
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">
+            {html.escape(msg)}
+          </div>
+          <a href="/register" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content, show_nav=False)
+    
+    success, result = _create_user(email, password)
+    if not success:
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">
+            {html.escape(result)}
+          </div>
+          <a href="/register" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content, show_nav=False)
+    
+    # Success - auto login and redirect to dashboard
+    session["uid"] = result
+    session["email"] = email
+    _log_event(result, "register.success")
+    
+    return redirect("/dashboard")
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        next_url = request.args.get("next", "/dashboard")
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="card shadow-sm">
+            <div class="card-header text-center bg-primary text-white">
+              <h4 class="mb-0">Welcome Back</h4>
+              <p class="mb-0 text-light">Sign in to continue your CPP preparation</p>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <input type="hidden" name="next" value="{html.escape(next_url)}"/>
+                
+                <div class="mb-3">
+                  <label class="form-label">Email Address</label>
+                  <input type="email" name="email" class="form-control" required
+                         placeholder="your.email@example.com"/>
+                </div>
+                
+                <div class="mb-3">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" required/>
+                </div>
+                
+                <div class="d-grid gap-2">
+                  <button type="submit" class="btn btn-primary btn-lg">Sign In</button>
+                  <a href="/register" class="btn btn-outline-secondary">Create New Account</a>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Sign In", content, show_nav=False)
+    
+    # POST - process login
+    if not _csrf_ok():
+        abort(403)
+    
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    next_url = request.form.get("next") or "/dashboard"
+    
+    user = _find_user(email)
+    if not user or not check_password_hash(user.get("password_hash", ""), password):
+        content = """
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">
+            Invalid email or password. Please check your credentials and try again.
+          </div>
+          <a href="/login" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Sign In Failed", content, show_nav=False)
+    
+    # Success
+    session["uid"] = user["id"]
+    session["email"] = user["email"]
+    _log_event(user["id"], "login.success")
+    
+    return redirect(next_url)
+
+@app.route("/logout")
+def logout():
+    uid = _user_id()
+    if uid:
+        _log_event(uid, "logout")
+    session.clear()
+    return redirect("/")
+
+@app.route("/dashboard")
+@login_required
+def dashboard():
+    """Main dashboard with progress meter and encouragement"""
+    user = _current_user()
+    progress_data = calculate_user_progress(_user_id())
+    encouragement = get_random_encouragement()
+    
+    user_name = user.get('email', '').split('@')[0] if user else 'Student'
+    
+    content = f"""
+    <div class="container">
+      <div class="row mb-4">
+        <div class="col-md-8">
+          <h1 class="h3 mb-2">Welcome back, {html.escape(user_name)}!</h1>
+          <div class="encouragement-message mb-3">
+            <i class="bi bi-lightbulb me-2"></i>
+            {html.escape(encouragement)}
+          </div>
+        </div>
+        <div class="col-md-4">
+          {progress_meter_html(progress_data)}
+        </div>
+      </div>
+      
+      <div class="row g-4 mb-4">
+        <div class="col-md-6">
+          <div class="card h-100 shadow-sm question-card">
+            <div class="card-body text-center">
+              <div class="tutor-chat p-3 rounded-3 mb-3">
+                <i class="bi bi-chat-dots display-4 text-white"></i>
+              </div>
+              <h5>AI Tutor</h5>
+              <p class="text-muted mb-3">Get instant explanations and study guidance</p>
+              <a href="/tutor" class="btn btn-primary">Ask Tutor</a>
+            </div>
+          </div>
+        </div>
+        
+        <div class="col-md-6">
+          <div class="card h-100 shadow-sm question-card">
+            <div class="card-body text-center">
+              <i class="bi bi-ui-checks-grid display-4 text-warning mb-3"></i>
+              <h5>Practice Quiz</h5>
+              <p class="text-muted mb-3">Test your knowledge with realistic exam questions</p>
+              <a href="/quiz" class="btn btn-warning">Take Quiz</a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-header">
+          <h5 class="mb-0">CPP Exam Domains</h5>
+        </div>
+        <div class="card-body">
+          <div class="row g-2">
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 1:</strong> Security Principles &amp; Practices (22%)
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 2:</strong> Business Principles &amp; Practices (15%)
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 3:</strong> Investigations (9%)
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 4:</strong> Personnel Security (11%)
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 5:</strong> Physical Security (16%)
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 6:</strong> Information Security (14%)
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="border rounded p-2 small">
+                <strong>Domain 7:</strong> Crisis Management (13%)
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    
+    return base_layout("Dashboard", content)
+
+@app.route("/tutor", methods=["GET", "POST"])
+@login_required
+def tutor():
+    if request.method == "GET":
+        content = f"""
+        <div class="container">
+          <div class="tutor-chat p-4 mb-4">
+            <div class="row">
+              <div class="col-md-8">
+                <h1 class="h4 text-white mb-2">
+                  <i class="bi bi-chat-dots me-2"></i>AI Tutor
+                </h1>
+                <p class="text-white-50 mb-0">Ask questions about CPP exam topics and get expert explanations</p>
+              </div>
+              <div class="col-md-4">
+                <div class="text-center">
+                  <i class="bi bi-robot display-4 text-white-50"></i>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          <div class="card shadow-sm">
+            <div class="card-header bg-light">
+              <h5 class="mb-0">Ask Your Question</h5>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <div class="mb-3">
+                  <textarea name="question" class="form-control" rows="4" 
+                           placeholder="e.g., 'Explain the difference between administrative, physical, and technical controls'" 
+                           required></textarea>
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                  <small class="text-muted">
+                    <i class="bi bi-lightbulb me-1"></i>
+                    Tip: Be specific for better explanations
+                  </small>
+                  <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-send me-1"></i>Ask Tutor
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("AI Tutor", content)
+    
+    # POST - handle question
+    if not _csrf_ok():
+        abort(403)
+    
+    question = request.form.get("question", "").strip()
+    if not question:
+        return redirect("/tutor")
+    
+    # Rate limiting
+    if not _rate_ok(f"tutor_{_user_id()}", 0.1):  # 1 request per 10 seconds
+        content = """
+        <div class="container">
+          <div class="alert alert-warning">
+            Please wait a moment before asking another question.
+          </div>
+          <a href="/tutor" class="btn btn-primary">Back to Tutor</a>
+        </div>
+        """
+        return base_layout("Rate Limited", content)
+    
+    success, response = _openai_chat_completion(question)
+    _append_attempt(_user_id(), "tutor", question=question, answer=response)
+    
+    # Enhanced response formatting
+    formatted_response = response.replace('\n', '<br>').replace('**', '<strong>').replace('**', '</strong>')
+    
+    content = f"""
+    <div class="container">
+      <div class="tutor-chat p-4 mb-4">
+        <h1 class="h4 text-white mb-0">
+          <i class="bi bi-chat-dots me-2"></i>AI Tutor Response
+        </h1>
+      </div>
+      
+      <div class="row">
+        <div class="col-md-6 mb-4">
+          <div class="card shadow-sm">
+            <div class="card-header bg-primary text-white">
+              <i class="bi bi-person-fill me-2"></i>Your Question
+            </div>
+            <div class="card-body user-message">
+              {html.escape(question)}
+            </div>
+          </div>
+        </div>
+        
+        <div class="col-md-6 mb-4">
+          <div class="card shadow-sm">
+            <div class="card-header bg-success text-white">
+              <i class="bi bi-robot me-2"></i>Tutor Response
+            </div>
+            <div class="card-body tutor-message">
+              {formatted_response}
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="text-center">
+        <a href="/tutor" class="btn btn-primary btn-lg">
+          <i class="bi bi-plus-circle me-2"></i>Ask Another Question
+        </a>
+        <a href="/dashboard" class="btn btn-outline-secondary btn-lg ms-2">
+          <i class="bi bi-house me-2"></i>Back to Dashboard
+        </a>
+      </div>
+    </div>
+    """
+    return base_layout("AI Tutor", content)
+
+@app.route("/quiz", methods=["GET", "POST"])
+@login_required
+def quiz():
+    if request.method == "GET":
+        # Check if we're in the middle of a quiz
+        if "quiz_questions" in session:
+            current_q_idx = session.get("quiz_current", 0)
+            questions = session["quiz_questions"]
             
-            for q in domain_questions:
-                q["id"] = _new_id("q")
-                q["source"] = "generated"
-                q["created_at"] = now
-                questions.append(q)
+            if current_q_idx < len(questions):
+                return _render_quiz_question(questions, current_q_idx)
+            else:
+                # Quiz completed, show results
+                return _show_quiz_results()
         
-        return questions
+        # Show quiz setup
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center">
+            <div class="col-md-8">
+              <div class="card shadow-sm">
+                <div class="card-header bg-warning text-dark text-center">
+                  <h4 class="mb-0">
+                    <i class="bi bi-ui-checks-grid me-2"></i>Practice Quiz Setup
+                  </h4>
+                </div>
+                <div class="card-body">
+                  <form method="post">
+                    <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                    
+                    <div class="mb-4">
+                      <label class="form-label fw-bold">Number of Questions</label>
+                      <select name="count" class="form-select">
+                        <option value="5">5 Questions (Quick Practice)</option>
+                        <option value="10" selected>10 Questions (Standard)</option>
+                        <option value="15">15 Questions (Extended)</option>
+                      </select>
+                    </div>
+                    
+                    <div class="alert alert-info">
+                      <i class="bi bi-info-circle me-2"></i>
+                      <strong>Quiz Format:</strong> You'll answer one question at a time with immediate feedback. 
+                      Green indicates correct answers, red shows incorrect with explanations.
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                      <button type="submit" class="btn btn-warning btn-lg">
+                        <i class="bi bi-play-circle me-2"></i>Start Quiz
+                      </button>
+                      <a href="/dashboard" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Quiz Setup", content)
+    
+    # POST - start quiz
+    if not _csrf_ok():
+        abort(403)
+    
+    count = int(request.form.get("count", 10))
+    
+    questions = select_questions([], count, user_id=_user_id())
+    
+    if not questions:
+        content = """
+        <div class="container">
+          <div class="alert alert-warning">
+            No questions available. Please try again later.
+          </div>
+          <a href="/quiz" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Quiz", content)
+    
+    # Store quiz in session
+    session["quiz_questions"] = questions
+    session["quiz_current"] = 0
+    session["quiz_answers"] = []
+    
+    return _render_quiz_question(questions, 0)
 
-    @classmethod
-    def _generate_unique_domain_questions(cls, domain: str, domain_num: int) -> List[Dict[str, Any]]:
-        """Generate unique questions for each specific domain"""
-        base_questions = []
-        
-        if domain_num == 1:  # Security Principles & Practices
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "Which control type is MOST effective at deterring unauthorized access before it occurs?",
-                    "choices": ["Detective controls", "Preventive controls", "Corrective controls", "Compensating controls"],
-                    "answer": 1,
-                    "explanation": "Preventive controls are designed to stop incidents before they happen, making them most effective at deterring unauthorized access.",
-                    "module": "Security Controls Framework"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Risk can be completely eliminated through proper security controls.",
-                    "answer": False,
-                    "explanation": "Risk can be reduced, transferred, or accepted, but never completely eliminated. There is always residual risk.",
-                    "module": "Risk Management Fundamentals"
-                },
-                {
-                    "type": "scenario",
-                    "domain": domain,
-                    "stem": "Your organization experienced a data breach due to an unpatched server. Which combination provides the BEST layered defense?",
-                    "options": ["Automated patch management only", "Employee training and incident response plan", "Patch management, network segmentation, and intrusion detection", "Firewall configuration and antivirus software"],
-                    "answers": [2],
-                    "explanation": "Multiple layers provide defense in depth: patch management prevents vulnerabilities, segmentation limits scope, detection identifies threats.",
-                    "module": "Defense in Depth Strategy"
-                }
-            ]
-        elif domain_num == 2:  # Business Principles & Practices
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "When calculating Annual Loss Expectancy (ALE), which formula is correct?",
-                    "choices": ["ALE = Asset Value × Threat Frequency", "ALE = Single Loss Expectancy × Annual Rate of Occurrence", "ALE = Risk × Vulnerability × Asset Value", "ALE = Impact × Likelihood × Controls"],
-                    "answer": 1,
-                    "explanation": "ALE = SLE × ARO. Single Loss Expectancy represents the dollar loss from one incident, and Annual Rate of Occurrence is frequency per year.",
-                    "module": "Risk Quantification Methods"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Cost-benefit analysis should always recommend the security control with the lowest implementation cost.",
-                    "answer": False,
-                    "explanation": "Cost-benefit analysis should recommend controls where benefits exceed costs by the greatest margin, not necessarily the cheapest option.",
-                    "module": "Business Case Development"
-                }
-            ]
-        elif domain_num == 3:  # Investigations
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "During an investigation interview, what is the PRIMARY purpose of open-ended questions?",
-                    "choices": ["To get specific yes/no answers", "To challenge the subject's credibility", "To gather detailed information and encourage narrative", "To conclude the interview quickly"],
-                    "answer": 2,
-                    "explanation": "Open-ended questions encourage subjects to provide detailed information in their own words, revealing information that specific questions might miss.",
-                    "module": "Interview Techniques"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Chain of custody documentation must record every person who handles evidence.",
-                    "answer": True,
-                    "explanation": "Chain of custody requires documenting every transfer and handling of evidence to maintain its integrity and legal admissibility.",
-                    "module": "Evidence Management"
-                }
-            ]
-        elif domain_num == 4:  # Personnel Security
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "Which background check component is MOST important for positions with access to classified information?",
-                    "choices": ["Education verification", "Credit history review", "Security clearance investigation", "Employment history verification"],
-                    "answer": 2,
-                    "explanation": "Security clearance investigations are specifically designed for classified access positions and include comprehensive background checks.",
-                    "module": "Clearance Procedures"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Insider threat indicators are always obvious and easy to detect.",
-                    "answer": False,
-                    "explanation": "Insider threat indicators can be subtle and may resemble normal behavior variations. Effective programs use multiple indicators.",
-                    "module": "Insider Threat Detection"
-                }
-            ]
-        elif domain_num == 5:  # Physical Security
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "In CPTED principles, what does 'natural surveillance' refer to?",
-                    "choices": ["Security cameras placed throughout the facility", "Positioning windows and lighting to maximize visibility", "Having security guards patrol regularly", "Installing motion-detection sensors"],
-                    "answer": 1,
-                    "explanation": "Natural surveillance in CPTED refers to designing spaces so people can easily observe their surroundings through proper placement of windows and lighting.",
-                    "module": "CPTED Principles"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Physical security controls are most effective when they work independently of each other.",
-                    "answer": False,
-                    "explanation": "Physical security is most effective when controls work together in a layered defense approach, providing redundancy and mutual support.",
-                    "module": "Layered Physical Security"
-                }
-            ]
-        elif domain_num == 6:  # Information Security
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "What is the PRIMARY security benefit of implementing role-based access control (RBAC)?",
-                    "choices": ["Reduces password complexity requirements", "Simplifies user access management and enforces least privilege", "Eliminates the need for user authentication", "Increases system processing speed"],
-                    "answer": 1,
-                    "explanation": "RBAC groups permissions by job functions, making it easier to manage access while ensuring users only get permissions needed for their roles.",
-                    "module": "Access Control Models"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Encryption in transit protects data while it is being transmitted over networks.",
-                    "answer": True,
-                    "explanation": "Encryption in transit (like HTTPS, VPN) protects data as it moves between systems over networks, preventing interception.",
-                    "module": "Data Protection"
-                }
-            ]
-        elif domain_num == 7:  # Crisis Management
-            base_questions = [
-                {
-                    "type": "mc",
-                    "domain": domain,
-                    "stem": "In the Incident Command System (ICS), who has the authority to establish objectives and priorities?",
-                    "choices": ["Operations Chief", "Planning Chief", "Incident Commander", "Safety Officer"],
-                    "answer": 2,
-                    "explanation": "The Incident Commander has overall authority and responsibility for incident management, including establishing objectives and priorities.",
-                    "module": "ICS Structure"
-                },
-                {
-                    "type": "tf",
-                    "domain": domain,
-                    "stem": "Emergency response plans should be kept confidential and only shared with senior management.",
-                    "answer": False,
-                    "explanation": "Emergency response plans should be shared with all relevant personnel who need to implement them during an emergency.",
-                    "module": "Emergency Planning"
-                }
-            ]
-        
-        # Generate variations to reach target count for each domain
-        variations = []
-        for base_q in base_questions:
-            variations.append(base_q)
-            # Create variations by modifying stems and explanations
-            for i in range(15):  # Create 15 variations per base question
-                variant = dict(base_q)
-                variant["stem"] = cls._create_question_variant(base_q["stem"], i+1, domain_num)
-                if "choices" in variant:
-                    variant["choices"] = cls._shuffle_choices(variant["choices"], variant["answer"])
-                    variant["answer"] = cls._find_new_answer_index(variant["choices"], base_q["choices"][base_q["answer"]])
-                variations.append(variant)
-        
-        return variations
-
-    @classmethod
-    def _create_question_variant(cls, original_stem: str, variant_num: int, domain_num: int) -> str:
-        """Create a variation of the question stem"""
-        # Domain-specific question banks
-        domain_questions = {
-            1: [  # Security Principles
-                "What is the primary purpose of a security control framework?",
-                "Which principle requires that multiple people be involved in completing a critical task?",
-                "What does the term 'defense in depth' mean in security?",
-                "Which type of control is implemented after an incident occurs?",
-                "What is the difference between a vulnerability and a threat?"
-            ],
-            2: [  # Business Principles
-                "How do you calculate Return on Investment (ROI) for security measures?",
-                "What factors should be considered in a cost-benefit analysis?",
-                "When is it appropriate to accept risk rather than mitigate it?",
-                "What is the purpose of a business impact analysis?",
-                "How do you determine the value of an asset for risk assessment?"
-            ],
-            3: [  # Investigations
-                "What is the first step in conducting a workplace investigation?",
-                "When should law enforcement be contacted during an investigation?",
-                "What constitutes admissible evidence in most jurisdictions?",
-                "How should witnesses be interviewed during an investigation?",
-                "What is the importance of maintaining investigation confidentiality?"
-            ],
-            4: [  # Personnel Security
-                "What components make up a comprehensive background investigation?",
-                "When should periodic reinvestigations be conducted?",
-                "What are key indicators of potential insider threats?",
-                "How should access rights be managed when employees change roles?",
-                "What is the purpose of a security awareness program?"
-            ],
-            5: [  # Physical Security
-                "What are the four principles of Crime Prevention Through Environmental Design?",
-                "How do you determine the appropriate level of physical security?",
-                "What factors affect the placement of security cameras?",
-                "When should security guards be used instead of electronic systems?",
-                "What is the purpose of security zones in facility design?"
-            ],
-            6: [  # Information Security
-                "What is the difference between encryption at rest and in transit?",
-                "How do access controls support the principle of least privilege?",
-                "What is multi-factor authentication and when should it be used?",
-                "How do you classify information based on sensitivity levels?",
-                "What is the purpose of security incident response procedures?"
-            ],
-            7: [  # Crisis Management
-                "What are the phases of emergency management?",
-                "How do you develop an effective crisis communication plan?",
-                "What is the role of the Emergency Operations Center?",
-                "When should business continuity plans be activated?",
-                "How do you conduct effective crisis exercises and drills?"
-            ]
-        }
-        
-        questions = domain_questions.get(domain_num, [original_stem])
-        if variant_num < len(questions):
-            return questions[variant_num]
-        
-        # Fallback variations
-        variations = {
-            1: original_stem.replace("MOST", "BEST").replace("PRIMARY", "MAIN"),
-            2: original_stem.replace("Which", "What").replace("MOST effective", "BEST approach")
-        }
-        return variations.get(variant_num, original_stem)
-
-    @classmethod
-    def _shuffle_choices(cls, choices: List[str], correct_idx: int) -> List[str]:
-        """Shuffle choices while maintaining variety"""
-        shuffled = choices.copy()
-        random.shuffle(shuffled)
-        return shuffled
-
-    @classmethod
-    def _find_new_answer_index(cls, new_choices: List[str], correct_answer: str) -> int:
-        """Find the index of the correct answer in shuffled choices"""
+@app.route("/quiz/answer", methods=["POST"])
+@login_required
+def quiz_answer():
+    """Process quiz answer and show feedback"""
+    if not _csrf_ok():
+        abort(403)
+    
+    if "quiz_questions" not in session:
+        return redirect("/quiz")
+    
+    questions = session["quiz_questions"]
+    current_idx = session.get("quiz_current", 0)
+    
+    if current_idx >= len(questions):
+        return redirect("/quiz")
+    
+    q = questions[current_idx]
+    user_answer = request.form.get("answer", "")
+    
+    # Determine if answer is correct
+    is_correct = False
+    correct_answer = ""
+    
+    if q.get("type") == "mc":
         try:
-            return new_choices.index(correct_answer)
-        except ValueError:
-            return 0
-
-    @classmethod
-    def generate_sample_flashcards(cls) -> List[Dict[str, Any]]:
-        """Generate sample flashcards with unique content"""
-        flashcards = []
-        now = int(time.time())
-        
-        base_flashcards = [
-            {
-                "domain": "Domain 1",
-                "front": "What are the three primary categories of security controls?",
-                "back": "Administrative (policies, procedures, training), Physical (barriers, locks, surveillance), and Technical (access controls, encryption, firewalls)",
-                "tags": ["controls", "fundamentals"]
-            },
-            {
-                "domain": "Domain 1", 
-                "front": "Define Defense in Depth",
-                "back": "A layered security strategy using multiple controls at different points to protect assets. If one layer fails, others continue to provide protection.",
-                "tags": ["strategy", "layered-defense"]
-            },
-            {
-                "domain": "Domain 2",
-                "front": "What is ROI in security context?",
-                "back": "Return on Investment - measures the financial benefit of security investments relative to their cost. Calculated as (Benefit - Cost) / Cost × 100%",
-                "tags": ["business-case", "metrics"]
-            },
-            {
-                "domain": "Domain 3",
-                "front": "What is Chain of Custody?",
-                "back": "Documentation that tracks the seizure, custody, control, transfer, analysis, and disposition of evidence to ensure its integrity and admissibility.",
-                "tags": ["evidence", "legal"]
-            },
-            {
-                "domain": "Domain 4",
-                "front": "Define Insider Threat",
-                "back": "A security risk posed by individuals within an organization who have authorized access and may use it to harm the organization intentionally or unintentionally.",
-                "tags": ["insider-threat", "risk"]
-            },
-            {
-                "domain": "Domain 5",
-                "front": "What is CPTED?",
-                "back": "Crime Prevention Through Environmental Design - using architecture and urban planning to reduce crime opportunities through natural surveillance, access control, territorial reinforcement, and maintenance.",
-                "tags": ["CPTED", "design"]
-            },
-            {
-                "domain": "Domain 6",
-                "front": "What is the principle of Least Privilege?",
-                "back": "Users should be granted only the minimum access rights necessary to perform their job functions, reducing the risk of unauthorized access or misuse.",
-                "tags": ["access-control", "principles"]
-            },
-            {
-                "domain": "Domain 7",
-                "front": "What are the four phases of emergency management?",
-                "back": "Mitigation (reducing risks), Preparedness (planning and training), Response (immediate actions during crisis), Recovery (returning to normal operations)",
-                "tags": ["emergency-management", "phases"]
-            }
-        ]
-        
-        # Generate unique variations
-        for base_fc in base_flashcards:
-            for i in range(8):  # Create 8 variations per base flashcard
-                fc = dict(base_fc)
-                fc["id"] = _new_id("fc")
-                fc["source"] = "generated"
-                fc["created_at"] = now
-                if i > 0:  # Create variations for non-base cards
-                    fc["front"] = cls._create_flashcard_variant(base_fc["front"], i)
-                flashcards.append(fc)
-        
-        return flashcards
-
-    @classmethod
-    def _create_flashcard_variant(cls, original_front: str, variant_num: int) -> str:
-        """Create variations of flashcard fronts"""
-        variations = {
-            1: original_front.replace("What", "Define").replace("?", ""),
-            2: original_front.replace("Define", "Explain").replace("What is", "Describe"),
-            3: original_front.replace("What are", "List").replace("the ", ""),
-            4: original_front.replace("?", " and provide examples?"),
-            5: f"How would you explain {original_front.lower().replace('what is ', '').replace('?', '')} to a colleague?",
-            6: f"In practical terms, {original_front.lower().replace('what are ', 'what do ').replace('what is ', 'what does ')}",
-            7: f"Why is understanding {original_front.lower().replace('what is ', '').replace('what are ', '').replace('?', '')} important for security professionals?"
-        }
-        return variations.get(variant_num, f"{original_front} (Variant {variant_num})")
-
-def ensure_content_seeded():
-    """Ensure content bank has sufficient material"""
-    questions = get_all_questions()
-    flashcards = get_all_flashcards()
+            user_idx = int(user_answer)
+            correct_idx = q.get("answer", 0)
+            is_correct = (user_idx == correct_idx)
+            correct_answer = q.get("choices", [])[correct_idx] if correct_idx < len(q.get("choices", [])) else ""
+        except (ValueError, IndexError):
+            pass
+    elif q.get("type") == "tf":
+        correct_bool = q.get("answer", False)
+        user_bool = user_answer.lower() == "true"
+        is_correct = (user_bool == correct_bool)
+        correct_answer = str(correct_bool)
     
-    if len(questions) < 100:
-        logger.info("Generating question bank...")
-        new_questions = CPPContentGenerator.generate_sample_questions()
-        try:
-            added, skipped = ingest_questions(new_questions, source="seed")
-            logger.info(f"Seeded {added} questions, skipped {skipped} duplicates")
-        except Exception as e:
-            logger.error(f"Failed to seed questions: {e}")
-            # Fallback: write directly
-            _write_jsonl(_QUESTIONS_FILE, new_questions)
+    # Store answer
+    if "quiz_answers" not in session:
+        session["quiz_answers"] = []
     
-    if len(flashcards) < 50:
-        logger.info("Generating flashcard bank...")
-        new_flashcards = CPPContentGenerator.generate_sample_flashcards()
-        try:
-            added, skipped = ingest_flashcards(new_flashcards, source="seed")
-            logger.info(f"Seeded {added} flashcards, skipped {skipped} duplicates")
-        except Exception as e:
-            logger.error(f"Failed to seed flashcards: {e}")
-            # Fallback: write directly
-            _write_jsonl(_FLASHCARDS_FILE, new_flashcards)
-
-# ====================================================================================================
-# STRIPE BILLING INTEGRATION
-# ====================================================================================================
-
-def create_stripe_customer(email: str, name: str = "") -> str:
-    """Create Stripe customer and return customer ID"""
-    if not STRIPE_ENABLED:
-        return ""
+    session["quiz_answers"].append({
+        "question": q.get("stem", ""),
+        "user_answer": user_answer,
+        "is_correct": is_correct,
+        "explanation": q.get("explanation", ""),
+        "domain": q.get("domain", "")
+    })
     
-    try:
-        customer = stripe.Customer.create(
-            email=email,
-            name=name,
-            metadata={"source": "cpp_prep"}
-        )
-        return customer.id
-    except Exception as e:
-        logger.error("Failed to create Stripe customer: %s", e)
-        return ""
-
-def create_checkout_session(user_id: str, price_id: str, success_url: str, cancel_url: str) -> str:
-    """Create Stripe checkout session and return session URL"""
-    if not STRIPE_ENABLED:
-        return ""
+    # Log attempt
+    _append_attempt(_user_id(), "quiz", score=1 if is_correct else 0, total=1, 
+                   domain=q.get("domain"), question=q.get("stem"), answer=user_answer)
     
-    try:
-        user = _find_user_by_id(user_id)
-        if not user:
-            return ""
-        
-        # Create customer if needed
-        customer_id = user.get("stripe_customer_id")
-        if not customer_id:
-            customer_id = create_stripe_customer(user["email"])
-            if customer_id:
-                _update_user(user_id, {"stripe_customer_id": customer_id})
-        
-        session = stripe.checkout.Session.create(
-            customer=customer_id,
-            payment_method_types=['card'],
-            line_items=[{
-                'price': price_id,
-                'quantity': 1,
-            }],
-            mode='subscription' if price_id == STRIPE_MONTHLY_PRICE_ID else 'payment',
-            success_url=success_url,
-            cancel_url=cancel_url,
-            metadata={
-                "user_id": user_id,
-                "price_id": price_id
-            }
-        )
-        return session.url
-    except Exception as e:
-        logger.error("Failed to create checkout session: %s", e)
-        return ""
-
-def cancel_stripe_subscription(subscription_id: str) -> bool:
-    """Cancel Stripe subscription"""
-    if not STRIPE_ENABLED or not subscription_id:
-        return False
+    # Show feedback
+    feedback_class = "correct-answer" if is_correct else "incorrect-answer"
+    feedback_icon = "bi-check-circle-fill text-success" if is_correct else "bi-x-circle-fill text-danger"
+    feedback_title = "Correct!" if is_correct else "Incorrect"
     
-    try:
-        stripe.Subscription.delete(subscription_id)
-        return True
-    except Exception as e:
-        logger.error("Failed to cancel subscription: %s", e)
-        return False
-
-def handle_stripe_webhook(payload: str, sig_header: str) -> bool:
-    """Handle Stripe webhook events"""
-    if not STRIPE_ENABLED or not STRIPE_WEBHOOK_SECRET:
-        return False
+    explanation = q.get("explanation", "No explanation available.")
     
-    try:
-        event = stripe.Webhook.construct_event(
-            payload, sig_header, STRIPE_WEBHOOK_SECRET
-        )
-    except Exception as e:
-        logger.error("Webhook signature verification failed: %s", e)
-        return False
+    next_btn_text = "Next Question" if current_idx + 1 < len(questions) else "View Results"
+    next_url = f"/quiz/next" if current_idx + 1 < len(questions) else "/quiz/results"
     
-    # Handle the event
-    if event['type'] == 'checkout.session.completed':
-        session = event['data']['object']
-        user_id = session.get('metadata', {}).get('user_id')
-        price_id = session.get('metadata', {}).get('price_id')
-        
-        if user_id:
-            if price_id == STRIPE_MONTHLY_PRICE_ID:
-                _update_user(user_id, {
-                    "subscription_type": "monthly",
-                    "subscription_status": "active",
-                    "stripe_subscription_id": session.get('subscription', '')
-                })
-            elif price_id == STRIPE_SIXMONTH_PRICE_ID:
-                _update_user(user_id, {
-                    "subscription_type": "sixmonth",
-                    "subscription_status": "active",
-                    "subscription_expires_at": (datetime.utcnow() + timedelta(days=180)).isoformat()
-                })
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-10">
+          <div class="card shadow-sm {feedback_class}">
+            <div class="card-header text-center">
+              <h4 class="mb-0">
+                <i class="bi {feedback_icon} me-2"></i>
+                {feedback_title}
+              </h4>
+            </div>
+            <div class="card-body">
+              <h6 class="text-muted mb-3">Question:</h6>
+              <p class="mb-3">{html.escape(q.get('stem', ''))}</p>
+              
+              {f'<p><strong>Your Answer:</strong> {html.escape(user_answer)}</p>' if not is_correct else ''}
+              {f'<p><strong>Correct Answer:</strong> {html.escape(correct_answer)}</p>' if not is_correct and correct_answer else ''}
+              
+              <div class="alert alert-{'success' if is_correct else 'info'}">
+                <strong>Explanation:</strong> {html.escape(explanation)}
+              </div>
+              
+              <div class="text-center">
+                <a href="{next_url}" class="btn btn-primary btn-lg">
+                  {next_btn_text} <i class="bi bi-arrow-right ms-2"></i>
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Quiz Feedback", content)
+
+@app.route("/quiz/next")
+@login_required
+def quiz_next():
+    """Move to next question"""
+    if "quiz_questions" not in session:
+        return redirect("/quiz")
     
-    elif event['type'] == 'customer.subscription.deleted':
-        subscription = event['data']['object']
-        # Find user by subscription ID and update status
-        users = _users_all()
-        for user in users:
-            if user.get('stripe_subscription_id') == subscription['id']:
-                _update_user(user['id'], {"subscription_status": "canceled"})
-                break
+    current_idx = session.get("quiz_current", 0)
+    session["quiz_current"] = current_idx + 1
     
-    return True
+    questions = session["quiz_questions"]
+    if session["quiz_current"] >= len(questions):
+        return redirect("/quiz/results")
+    
+    return _render_quiz_question(questions, session["quiz_current"])
 
-# ====================================================================================================
-# ROUTES - REMAINING SECTIONS
-# ====================================================================================================
+@app.route("/quiz/results")
+@login_required
+def quiz_results():
+    """Show quiz results"""
+    return _show_quiz_results()
 
-# [All the route handlers from the previous sections continue here...]
-# [This includes all routes from landing_page through admin]
-
-# Ensure content is seeded on startup
-ensure_content_seeded()
+@app.route("/terms")
+def terms():
+    """Terms and conditions page"""
+    content = """
+    <div class="container" style="max-width: 800px;">
+      <h1 class="mb-4">Terms & Conditions</h1>
+      
+      <div class="card">
+        <div class="card-body">
+          <h5>1. Acceptance of Terms</h5>
+          <p>By using this CPP Exam Preparation service, you agree to these terms and conditions.</p>
+          
+          <h5>2. Service Description</h5>
+          <p>This service provides study materials and practice questions for the ASIS Certified Protection Professional (CPP) exam. This program is not affiliated with or approved by ASIS International.</p>
+          
+          <h5>3. Disclaimer</h5>
+          <p><strong>This program is not affiliated with or approved by ASIS International. It uses only open-source and publicly available study materials. No ASIS-protected content is included.</strong></p>
+          
+          <h5>4. Educational Use Only</h5>
+          <p>All content is for educational purposes only. No legal, safety, or professional advice is provided. Users should verify information with official sources.</p>
+          
+          <h5>5. No Guarantee</h5>
+          <p>We do not guarantee exam results or certification success. Individual results may vary.</p>
+          
+          <h5>6. Privacy</h5>
+          <p>We collect minimal personal information and do not share user data with third parties except as required for payment processing.</p>
+          
+          <p class="text-muted mt-4">
+            <small>Last updated: January 2024</small>
+          </p>
+        </div>
+      </div>
+      
+      <div class="text-center mt-4">
+        <a href="/" class="btn btn-primary">Back to Home</a>
+      </div>
+    </div>
+    """
+    return base_layout("Terms & Conditions", content, show_nav=False)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
