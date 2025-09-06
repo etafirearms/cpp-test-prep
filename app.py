@@ -1,27 +1,40 @@
-# STABILITY: Ensure source is parsed as UTF-8 everywhere (avoids invalid char errors on Render)
 # -*- coding: utf-8 -*-
+"""
+Complete CPP Test Prep Platform
+A comprehensive Flask application for ASIS CPP exam preparation
+"""
 
-# =========================
-# SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer, Home, Terms redirect)
-# =========================
-
-# STABILITY: keep imports largely the same; add ProxyFix and g for request logging & proxy headers.
-import os, re, json, time, uuid, hashlib, random, html, logging
+import os
+import re
+import json
+import time
+import uuid
+import hashlib
+import random
+import html
+import logging
+import math
+import io
+import difflib
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 from urllib.parse import quote as _urlquote
+import urllib.request as _urlreq
+import urllib.error as _urlerr
 
 from flask import (
     Flask, request, session, redirect, url_for, abort, jsonify, make_response, g
 )
 from flask import render_template_string
 from werkzeug.security import generate_password_hash, check_password_hash
-from werkzeug.middleware.proxy_fix import ProxyFix  # STABILITY: honor X-Forwarded-* on Render
+from werkzeug.middleware.proxy_fix import ProxyFix
 
-# ---- App & Logging ----
-APP_VERSION = "1.0.0"
+# ====================================================================================================
+# APPLICATION SETUP & CONFIGURATION
+# ====================================================================================================
 
-# STABILITY: env bool helper used throughout
+APP_VERSION = "2.0.0"
+
 def _env_bool(val: str | None, default: bool = False) -> bool:
     s = (val if val is not None else ("1" if default else "0")).strip().lower()
     return s in ("1", "true", "yes", "y", "on")
@@ -29,9 +42,9 @@ def _env_bool(val: str | None, default: bool = False) -> bool:
 IS_STAGING = _env_bool(os.environ.get("STAGING", "0"), default=False)
 DEBUG = _env_bool(os.environ.get("DEBUG", "0"), default=False)
 
-# STABILITY: compute SECRET_KEY & cookie security early and fail fast when unsafe
 SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-change-me")
 SESSION_COOKIE_SECURE_FLAG = _env_bool(os.environ.get("SESSION_COOKIE_SECURE", "1"), default=True)
+
 if (SESSION_COOKIE_SECURE_FLAG or not DEBUG) and SECRET_KEY == "dev-secret-change-me":
     raise RuntimeError(
         "SECURITY: SECRET_KEY must be set to a non-default value when running with "
@@ -41,16 +54,15 @@ if (SESSION_COOKIE_SECURE_FLAG or not DEBUG) and SECRET_KEY == "dev-secret-chang
 app = Flask(__name__)
 app.secret_key = SECRET_KEY
 
-# STABILITY: session & CSRF config hardening; CSRF time limit off for compatibility
 app.config.update(
     SESSION_COOKIE_SECURE=SESSION_COOKIE_SECURE_FLAG,
     SESSION_COOKIE_SAMESITE="Lax",
     WTF_CSRF_TIME_LIMIT=None,
 )
 
-# STABILITY: trust Render’s proxy headers so request.url_root is https://
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1, x_port=1)
 
+# Logging setup
 logger = logging.getLogger("cpp_prep")
 handler = logging.StreamHandler()
 fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
@@ -58,8 +70,7 @@ handler.setFormatter(fmt)
 logger.setLevel(logging.INFO)
 logger.addHandler(handler)
 
-# ---- Paths & Data ----
-# STABILITY: DATA_DIR reads env DATA_DIR or legacy Data_Dir, with fallback to ./data
+# Paths & Data
 DATA_DIR = (
     os.environ.get("DATA_DIR")
     or os.environ.get("Data_Dir")
@@ -67,20 +78,18 @@ DATA_DIR = (
 )
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# ---- Feature Flags / Keys (display-only in this section) ----
+BANK_DIR = os.path.join(DATA_DIR, "bank")
+os.makedirs(BANK_DIR, exist_ok=True)
+
+# OpenAI Configuration
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_API_BASE = os.environ.get("OPENAI_API_BASE", "https://api.openai.com/v1")
 OPENAI_CHAT_MODEL = os.environ.get("OPENAI_CHAT_MODEL", "gpt-4o-mini")
 
-STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
-STRIPE_MONTHLY_PRICE_ID = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
-STRIPE_SIXMONTH_PRICE_ID = os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
-STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-# NOTE: STRIPE_SECRET_KEY and stripe import/config live in Section 5 (Billing).
-
+# Admin Configuration
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
-# ---- CSRF (harmonized with Flask-WTF if available) ----
+# CSRF Protection
 try:
     from flask_wtf import CSRFProtect
     from flask_wtf.csrf import generate_csrf
@@ -93,7 +102,6 @@ except Exception:
         return ""
 
 def csrf_token() -> str:
-    """Return a form token that matches what CSRFProtect expects when enabled."""
     if HAS_CSRF:
         return generate_csrf()
     val = session.get("_csrf_token")
@@ -103,12 +111,11 @@ def csrf_token() -> str:
     return val
 
 def _csrf_ok() -> bool:
-    """When Flask-WTF is active it enforces CSRF; fallback here is a simple equality check."""
     if HAS_CSRF:
         return True
     return (request.form.get("csrf_token") == session.get("_csrf_token"))
 
-# ---- Simple Rate Limit (per IP/Path) ----
+# Rate limiting
 _RATE = {}
 def _rate_ok(key: str, per_sec: float = 1.0) -> bool:
     t = time.time()
@@ -118,8 +125,7 @@ def _rate_ok(key: str, per_sec: float = 1.0) -> bool:
     _RATE[key] = t
     return True
 
-# ---- Security Headers & CSP (this is the single CSP owner) ----
-# Other sections may add headers with resp.headers.setdefault(...), but should NOT override CSP.
+# Security Headers
 CSP = (
     "default-src 'self' https:; "
     "img-src 'self' data: https:; "
@@ -133,18 +139,16 @@ CSP = (
 )
 
 @app.after_request
-def sec1_after_request(resp):
+def security_headers(resp):
     resp.headers["X-Content-Type-Options"] = "nosniff"
     resp.headers["X-Frame-Options"] = "DENY"
     resp.headers["Referrer-Policy"] = "no-referrer-when-downgrade"
     resp.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()"
-    # HSTS is safe if you serve over HTTPS (Render does). Tune as desired.
     resp.headers.setdefault("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload")
-    # Single CSP owner — other sections must not overwrite this.
     resp.headers["Content-Security-Policy"] = CSP
     return resp
 
-# STABILITY: lightweight request logger (skip /static and /favicon.ico)
+# Request logging
 @app.before_request
 def _reqlog_start():
     g._req_t0 = time.time()
@@ -163,7 +167,10 @@ def _reqlog_end(resp):
         pass
     return resp
 
-# ---- JSON helpers ----
+# ====================================================================================================
+# DATA LAYER & UTILITIES
+# ====================================================================================================
+
 def _path(name: str) -> str:
     return os.path.join(DATA_DIR, name)
 
@@ -178,7 +185,6 @@ def _load_json(name: str, default):
         logger.warning("load_json %s failed: %s", name, e)
         return default
 
-# STABILITY: atomic JSON write (write .tmp, fsync, os.replace)
 def _save_json(name: str, data):
     p = _path(name)
     tmp = f"{p}.tmp"
@@ -197,7 +203,45 @@ def _save_json(name: str, data):
         except Exception:
             pass
 
-# ---- Users store helpers ----
+def _atomic_write_bytes(path: str, data: bytes) -> None:
+    d = os.path.dirname(path) or "."
+    os.makedirs(d, exist_ok=True)
+    tmp_path = path + ".tmp"
+    with open(tmp_path, "wb") as f:
+        f.write(data)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, path)
+
+def _atomic_write_text(path: str, text: str) -> None:
+    _atomic_write_bytes(path, text.encode("utf-8"))
+
+def _read_jsonl(path: str) -> List[Dict[str, Any]]:
+    if not os.path.exists(path):
+        return []
+    out: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                out.append(json.loads(line))
+            except Exception:
+                continue
+    return out
+
+def _write_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
+    buf = io.StringIO()
+    for r in rows:
+        buf.write(json.dumps(r, ensure_ascii=False))
+        buf.write("\n")
+    _atomic_write_text(path, buf.getvalue())
+
+# ====================================================================================================
+# USER MANAGEMENT
+# ====================================================================================================
+
 def _users_all() -> List[dict]:
     return _load_json("users.json", [])
 
@@ -240,25 +284,12 @@ def validate_password(pw: str) -> Tuple[bool, str]:
         return False, "Password must be at least 8 characters."
     return True, ""
 
-# ---- Sessions / Auth guards ----
-def _login_redirect_url(next_path: str | None = None) -> str:
-    """
-    Build a safe login URL:
-    - Prefer a real login endpoint if it exists (e.g., 'login' or 'sec1_login_page').
-    - Fall back to '/login?next=...'.
-    Never points to admin login.
-    """
-    next_val = next_path or request.path or "/"
-    try:
-        for ep in ("login", "login_page", "sec3_login_page", "sec1_login_page", "sec2_login_page"):
-            if ep in app.view_functions:
-                return url_for(ep, next=next_val)
-    except Exception:
-        pass
-    return f"/login?next={_urlquote(next_val)}"
-
 def _user_id() -> str:
     return session.get("uid", "")
+
+def _login_redirect_url(next_path: str | None = None) -> str:
+    next_val = next_path or request.path or "/"
+    return f"/login?next={_urlquote(next_val)}"
 
 def login_required(fn):
     from functools import wraps
@@ -272,1494 +303,64 @@ def login_required(fn):
 def is_admin() -> bool:
     return bool(session.get("admin_ok"))
 
-# ---- Events / Usage (minimal event logger) ----
-def _log_event(uid: str, name: str, data: dict | None = None):
-    evts = _load_json("events.json", [])
-    evts.append({
-        "ts": datetime.utcnow().isoformat() + "Z",
-        "user_id": uid,
-        "name": name,
-        "data": data or {}
-    })
-    _save_json("events.json", evts)
+# ====================================================================================================
+# CPP DOMAIN DEFINITIONS & WEIGHTINGS
+# ====================================================================================================
 
-# ---- Canonical Domains (UI slugs preserved; mapping handled later in selection engine)
-DOMAINS = {
-    "random": "Random",
-    "security-principles": "Security Principles & Practices",
-    "business-principles": "Business Principles & Practices",
-    "investigations": "Investigations",
-    "personnel-security": "Personnel Security",
-    "physical-security": "Physical Security",
-    "information-security": "Information Security",
-    "crisis-management": "Crisis Management",
+# CPP Exam Domains with official weightings
+CPP_DOMAINS = {
+    "domain1": {
+        "name": "Security Principles & Practices", 
+        "weight": 0.22,
+        "code": "D1"
+    },
+    "domain2": {
+        "name": "Business Principles & Practices", 
+        "weight": 0.15,
+        "code": "D2"
+    },
+    "domain3": {
+        "name": "Investigations", 
+        "weight": 0.09,
+        "code": "D3"
+    },
+    "domain4": {
+        "name": "Personnel Security", 
+        "weight": 0.11,
+        "code": "D4"
+    },
+    "domain5": {
+        "name": "Physical Security", 
+        "weight": 0.16,
+        "code": "D5"
+    },
+    "domain6": {
+        "name": "Information Security", 
+        "weight": 0.14,
+        "code": "D6"
+    },
+    "domain7": {
+        "name": "Crisis Management", 
+        "weight": 0.13,
+        "code": "D7"
+    }
 }
 
-# ---- Domain Buttons helper (shared across sections; do not remove)
-def domain_buttons_html(selected_key="random", field_name="domain"):
-    order = ["random","security-principles","business-principles","investigations",
-             "personnel-security","physical-security","information-security","crisis-management"]
-    b = []
-    for k in order:
-        lab = "Random (all)" if k == "random" else DOMAINS.get(k, k)
-        active = " active" if selected_key == k else ""
-        b.append(
-            f'<button type="button" class="btn btn-outline-success domain-btn{active}" '
-            f'data-value="{html.escape(k)}">{html.escape(lab)}</button>'
-        )
-    hidden = (
-        f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" '
-        f'value="{html.escape(selected_key)}"/>'
-    )
-    return f'<div class="d-flex flex-wrap gap-2">{"".join(b)}</div>{hidden}'
-
-# ---- Global Footer (single owner)
-def _footer_html():
-    # STABILITY: replace © with &copy; to avoid source-encoding issues in some environments.
-    return """
-    <footer class="mt-5 py-3 border-top text-center small text-muted">
-      <div>
-        Educational use only. Not affiliated with ASIS International. No legal, safety, or professional advice.
-        Use official sources to verify. No guarantee of results. &copy; CPP-Exam-Prep
-        &nbsp;•&nbsp;<a class="text-decoration-none" href="/terms">Terms &amp; Conditions</a>
-      </div>
-    </footer>
-    """
-
-# ---- Base Layout with Bootstrap & footer ----
-def base_layout(title: str, body_html: str) -> str:
-    # Render with Jinja (no Python f-string surrounding Jinja syntax)
-    tpl = """
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{{ title }} — CPP Exam Prep</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
-  <style>
-    .fc-card .front, .fc-card .back { min-height: 120px; padding: 1rem; border: 1px solid #ddd; border-radius: .5rem; }
-    .fc-card .front { background: #f8f9fa; }
-  </style>
-</head>
-<body>
-  <nav class="navbar navbar-expand-lg bg-light border-bottom">
-    <div class="container">
-      <a class="navbar-brand" href="/"><i class="bi bi-shield-lock"></i> CPP Prep</a>
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-      <div id="navContent" class="collapse navbar-collapse">
-        <div class="ms-auto d-flex align-items-center gap-3">
-          <a class="text-decoration-none" href="/flashcards">Flashcards</a>
-          <a class="text-decoration-none" href="/progress">Progress</a>
-          <a class="text-decoration-none" href="/usage">Usage</a>
-          <a class="text-decoration-none" href="/billing">Billing</a>
-          <a class="text-decoration-none" href="/tutor">Tutor</a>
-          <a class="text-decoration-none" href="/terms">Terms</a>
-          {% if session.get('uid') %}
-            <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
-          {% else %}
-            <a class="btn btn-outline-primary btn-sm" href="/login">Login</a>
-          {% endif %}
-        </div>
-      </div>
-    </div>
-  </nav>
-
-  <main class="py-4">
-    {{ body_html | safe }}
-  </main>
-
-  {{ footer | safe }}
-
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-</body>
-</html>
-    """
-    return render_template_string(tpl, title=(title or "CPP Exam Prep"), body_html=body_html, footer=_footer_html())
-
-# ---- Domain weights (for Content Balance; used later)
-DOMAIN_TARGETS = {
-    "security-principles": {"total": 198, "MCQ": 99, "TF": 50, "SC": 50},
-    "business-principles": {"total": 198, "MCQ": 99, "TF": 50, "SC": 50},
-    "investigations": {"total": 108, "MCQ": 54, "TF": 27, "SC": 27},
-    "personnel-security": {"total": 90,  "MCQ": 45, "TF": 22, "SC": 22},
-    "physical-security":  {"total": 180, "MCQ": 90, "TF": 45, "SC": 45},
-    "information-security":{"total": 54,  "MCQ": 27, "TF": 14, "SC": 14},
-    "crisis-management":  {"total": 72,  "MCQ": 36, "TF": 18, "SC": 18},
+# Question type distributions
+QUESTION_TYPE_MIX = {
+    "mc": 0.50,        # 50% Multiple Choice
+    "tf": 0.25,        # 25% True/False  
+    "scenario": 0.25,  # 25% Scenario
 }
 
-# ---- App init helpers used later ----
-def init_sample_data():
-    try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        for name, default in [
-            ("users.json", []),
-            ("questions.json", []),
-            ("flashcards.json", []),
-            ("attempts.json", []),
-            ("events.json", []),
-            # STABILITY: use _env_bool for TUTOR_WEB_AWARE flag
-            ("tutor_settings.json", {"web_aware": _env_bool(os.environ.get("TUTOR_WEB_AWARE", "0"), default=False)}),
-            ("bank/cpp_flashcards_v1.json", []),
-            ("bank/cpp_questions_v1.json", []),
-            ("bank/content_index.json", {}),
-        ]:
-            p = _path(name)
-            os.makedirs(os.path.dirname(p), exist_ok=True)
-            if not os.path.exists(p):
-                _save_json(name, default)
-    except Exception as e:
-        logger.warning("init_sample_data error: %s", e)
-
-# Ensure initial data files exist at startup
-init_sample_data()
-
-# ---- Public, unprotected routes owned by Section 1 ----
-# NOTE: "/" is NOT defined here to avoid conflicts with the Welcome gate (Section 8).
-# We expose /home for the dashboard tiles, and keep /legal/terms as a redirect to /terms.
-
-@app.get("/home", endpoint="sec1_home_page")
-def sec1_home_page():
-    body = """
-    <div class="container">
-      <div class="py-4">
-        <h1 class="h3 mb-3"><i class="bi bi-shield-lock"></i> CPP Prep</h1>
-        <p class="text-muted mb-4">
-          Self-study AI-assisted prep for the ASIS Certified Protection Professional (CPP) exam.
-          Educational use only; not affiliated with ASIS.
-        </p>
-
-        <div class="row g-3">
-          <div class="col-md-6">
-            <div class="p-3 border rounded-3 h-100">
-              <h2 class="h5 mb-2"><i class="bi bi-ui-checks-grid me-1"></i> Quiz</h2>
-              <p class="mb-2 small text-muted">Practice by domain or mix everything.</p>
-              <a class="btn btn-primary btn-sm" href="/quiz">Go to Quiz</a>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="p-3 border rounded-3 h-100">
-              <h2 class="h5 mb-2"><i class="bi bi-journal-check me-1"></i> Mock Exam</h2>
-              <p class="mb-2 small text-muted">Longer, exam-style sessions.</p>
-              <a class="btn btn-warning btn-sm" href="/mock">Start Mock</a>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="p-3 border rounded-3 h-100">
-              <h2 class="h5 mb-2"><i class="bi bi-layers me-1"></i> Flashcards</h2>
-              <p class="mb-2 small text-muted">Flip through key facts and terms.</p>
-              <a class="btn btn-success btn-sm" href="/flashcards">Open Flashcards</a>
-            </div>
-          </div>
-          <div class="col-md-6">
-            <div class="p-3 border rounded-3 h-100">
-              <h2 class="h5 mb-2"><i class="bi bi-chat-dots me-1"></i> Tutor</h2>
-              <p class="mb-2 small text-muted">Ask questions, get quick explanations.</p>
-              <a class="btn btn-secondary btn-sm" href="/tutor">Ask the Tutor</a>
-            </div>
-          </div>
-        </div>
-
-        <div class="mt-4">
-          <a class="btn btn-outline-secondary btn-sm" href="/progress"><i class="bi bi-graph-up me-1"></i> Progress</a>
-          <a class="btn btn-outline-secondary btn-sm" href="/usage"><i class="bi bi-speedometer2 me-1"></i> Usage</a>
-          <a class="btn btn-outline-secondary btn-sm" href="/billing"><i class="bi bi-credit-card me-1"></i> Billing</a>
-          <a class="btn btn-outline-secondary btn-sm" href="/terms"><i class="bi bi-file-earmark-text me-1"></i> Terms</a>
-        </div>
-      </div>
-    </div>
-    """
-    return base_layout("Home", body)
-
-# Backward-compat: keep /legal/terms but redirect to canonical /terms
-@app.get("/legal/terms", endpoint="sec1_legal_terms_redirect")
-def sec1_legal_terms_redirect():
-    return redirect("/terms", code=302)
-
-# =========================
-# SECTION 2/8: Ops hardening + single /healthz + Terms page + restore utility pages (if missing)
-# =========================
-
-# Ensure we have a boot timestamp for uptime calc
-app.config.setdefault("_BOOT_TS", time.time())
-
-# ---------- Health: single stable /healthz ----------
-def _writable_probe(base_dir: str) -> tuple[bool, str]:
-    """
-    Try to create, fsync, and delete a tiny probe file inside base_dir.
-    Keep it simple and robust (no rename-needed semantics to avoid FS quirks).
-    """
-    try:
-        os.makedirs(base_dir, exist_ok=True)
-        test_path = os.path.join(base_dir, ".health_probe.tmp")
-        with open(test_path, "w", encoding="utf-8") as f:
-            f.write(str(time.time()))
-            f.flush()
-            os.fsync(f.fileno())
-        # best-effort cleanup
-        try:
-            os.remove(test_path)
-        except FileNotFoundError:
-            pass
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
-@app.get("/healthz", endpoint="sec2_healthz")
-def sec2_healthz():
-    """
-    Simple, stable health endpoint.
-    - Verifies DATA_DIR exists and is writable (tolerant of FS quirks).
-    - Never does outbound calls.
-    """
-    exists = os.path.isdir(DATA_DIR)
-    ok, err = _writable_probe(DATA_DIR) if exists else (False, "DATA_DIR missing")
-    if not ok and err:
-        logger.warning("healthz: data_dir writable check failed: %s", err)
-    resp = {
-        "service": "cpp-exam-prep",
-        "version": APP_VERSION,
-        "debug": bool(DEBUG),
-        "staging": bool(IS_STAGING),
-        "started_at": datetime.utcfromtimestamp(app.config.get("_BOOT_TS", time.time())).isoformat() + "Z",
-        "uptime_seconds": int(time.time() - app.config.get("_BOOT_TS", time.time())),
-        "data_dir": DATA_DIR,
-        "data_dir_exists": exists,
-        "data_dir_writable": bool(ok),
-    }
-    return jsonify(resp), 200
-
-# ---------- Terms & Conditions (standalone) ----------
-TERMS_EFFECTIVE_DATE = os.getenv("TERMS_EFFECTIVE_DATE", "2025-09-04")
-
-def _route_exists(path: str) -> bool:
-    try:
-        for rule in app.url_map.iter_rules():
-            if str(rule.rule) == path:
-                return True
-    except Exception:
-        pass
-    return False
-
-@app.get("/terms", endpoint="legal_terms")
-def legal_terms():
-    # Resolve a safe "back" link (to Welcome if present, else Home)
-    try:
-        back_href = url_for("sec8_welcome")
-    except Exception:
-        back_href = "/home"
-
-    content_tpl = """
-    <div class="container" style="max-width:960px;">
-      <h1 class="mb-2">CPP_Test_Prep — Terms and Conditions</h1>
-      <div class="text-muted mb-4">Effective Date: {{ eff_date }}</div>
-
-      <ol class="lh-base" style="padding-left: 1.2rem;">
-        <li id="t1"><strong>Who we are</strong><br>
-          CPP_Test_Prep is a study platform owned and operated by Strategic Security Advisors, LLC (“SSA,” “we,” “us,” “our”).
-          Contact: <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a>.
-        </li>
-
-        <li id="t2" class="mt-3"><strong>What we do and what we do not do</strong><br>
-          CPP_Test_Prep provides study tools for candidates preparing for the ASIS Certified Protection Professional examination.
-          We are not affiliated with, endorsed by, or sponsored by ASIS International. We do not use or reproduce ASIS
-          International protected, proprietary, or member-only materials. The platform is for education and training. It does not
-          guarantee that you will pass any exam or achieve any certification.
-        </li>
-
-        <li id="t3" class="mt-3"><strong>Eligibility and accounts</strong><br>
-          You must be at least 18 and able to form a binding contract. Keep your login secure and notify us of any unauthorized use.
-          You are responsible for activity on your account.
-        </li>
-
-        <li id="t4" class="mt-3"><strong>Your license to use CPP_Test_Prep</strong><br>
-          We grant you a limited, personal, non-exclusive, non-transferable license to access and use the platform for your own study.
-          You may not resell, sublicense, share, copy at scale, scrape, or otherwise exploit the content or software.
-        </li>
-
-        <li id="t5" class="mt-3"><strong>Intellectual property</strong><br>
-          All platform content that we create or license, including questions, explanations, flashcards, text, code, and UI,
-          belongs to SSA or its licensors. All rights reserved. Any trademarks, service marks, and logos displayed are the
-          property of their respective owners. “ASIS,” “CPP,” and other marks are the property of ASIS International. Use of the
-          platform does not grant you any ownership in our IP.
-        </li>
-
-        <li id="t6" class="mt-3"><strong>Open sources and third-party content</strong><br>
-          We curate content from publicly available, lawful open sources that permit educational use. We attribute sources when
-          required. Third-party links and resources are provided for convenience. We do not control and are not responsible for
-          third-party content.
-        </li>
-
-        <li id="t7" class="mt-3"><strong>Prohibited conduct</strong><br>
-          You agree not to:
-          <ul>
-            <li>Upload, copy, or request content that infringes copyrights or violates law.</li>
-            <li>Attempt to obtain or use ASIS International proprietary or member-only materials on or through our platform.</li>
-            <li>Reverse engineer, decompile, interfere with, or bypass security.</li>
-            <li>Use automated means to access, download, or index content.</li>
-            <li>Share subscription access or post answer banks publicly.</li>
-          </ul>
-        </li>
-
-        <li id="t8" class="mt-3"><strong>Academic integrity</strong><br>
-          You must use the platform ethically. Do not represent our practice items as actual exam questions. Do not solicit or
-          upload real exam content.
-        </li>
-
-        <li id="t9" class="mt-3"><strong>User submissions</strong><br>
-          If you submit suggestions, corrections, or original study items, you grant SSA a perpetual, worldwide, royalty-free
-          license to use, modify, and publish them for the platform. Do not submit anything you lack the right to share.
-        </li>
-
-        <li id="t10" class="mt-3"><strong>Payments, renewals, and refunds</strong><br>
-          If your plan is paid, you authorize recurring charges until you cancel. Prices may change on notice. Unless we state
-          otherwise in writing, fees are nonrefundable once a billing period begins. You may cancel at any time, which stops
-          future renewals.
-        </li>
-
-        <li id="t11" class="mt-3"><strong>Availability and changes</strong><br>
-          We may update, suspend, or discontinue features or the platform. We are not liable for outages, data loss, or delays.
-          We may update these Terms by posting the revised version with a new Effective Date.
-        </li>
-
-        <li id="t12" class="mt-3"><strong>Privacy</strong><br>
-          Your use is subject to our Privacy Notice, which explains what data we collect and how we use it. Do not upload
-          sensitive personal data you do not want processed.
-        </li>
-
-        <li id="t13" class="mt-3"><strong>Copyright policy and takedown procedure</strong><br>
-          We respect intellectual property. If you believe content infringes your rights, email a notice to
-          <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a> with:
-          <ul>
-            <li>Your contact information.</li>
-            <li>A description and location of the alleged infringing content.</li>
-            <li>A statement that you have a good-faith belief the use is not authorized.</li>
-            <li>A statement under penalty of perjury that your notice is accurate and you are the rights holder or authorized agent.</li>
-            <li>Your physical or electronic signature.</li>
-          </ul>
-          We may remove content and, where appropriate, terminate repeat infringers.
-        </li>
-
-        <li id="t14" class="mt-3"><strong>No warranties</strong><br>
-          The platform and all content are provided “as is” and “as available.” We disclaim all warranties, including fitness
-          for a particular purpose, accuracy, and non-infringement. Study results vary by user. No advice or information creates
-          any warranty.
-        </li>
-
-        <li id="t15" class="mt-3"><strong>Limitation of liability</strong><br>
-          To the fullest extent permitted by law, SSA and its officers, employees, contractors, and affiliates are not liable for
-          indirect, incidental, special, consequential, exemplary, or punitive damages, or any loss of profits, revenues, data,
-          or goodwill. Our total liability for any claim related to the platform will not exceed the amount you paid to us in
-          the 3 months before the claim.
-        </li>
-
-        <li id="t16" class="mt-3"><strong>Indemnification</strong><br>
-          You agree to defend, indemnify, and hold SSA harmless from claims, losses, and costs arising from your use of the
-          platform, your submissions, or your violation of these Terms or applicable law.
-        </li>
-
-        <li id="t17" class="mt-3"><strong>Governing law and venue</strong><br>
-          These Terms are governed by the laws of the State of Arizona, without regard to conflicts rules. The exclusive venue
-          for disputes is the state or federal courts located in Maricopa County, Arizona, and you consent to personal
-          jurisdiction there.
-        </li>
-
-        <li id="t18" class="mt-3"><strong>Export and compliance</strong><br>
-          You may not use the platform where prohibited by law or in violation of export controls or sanctions.
-        </li>
-
-        <li id="t19" class="mt-3"><strong>Severability and waiver</strong><br>
-          If any provision is found unenforceable, the rest remains in effect. Our failure to enforce a provision is not a waiver.
-        </li>
-
-        <li id="t20" class="mt-3"><strong>Contact</strong><br>
-          Questions, notices, or legal requests: <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a>.
-        </li>
-      </ol>
-
-      <hr class="my-4">
-
-      <h2 class="mb-3">CPP_Test_Prep — Legal Disclaimer</h2>
-      <p><strong>Independent study resource.</strong> CPP_Test_Prep is not affiliated with ASIS International and is not an
-         ASIS-approved or ASIS-endorsed course. References to “CPP” and “ASIS” are for identification and descriptive
-         purposes only. All trademarks belong to their owners.</p>
-
-      <p><strong>No proprietary ASIS materials.</strong> We do not use, reproduce, or distribute ASIS International protected,
-         proprietary, or member-only materials. Our practice items and explanations are original or derived from lawful,
-         publicly available open sources that permit educational use.</p>
-
-      <p><strong>Educational use only.</strong> Content is for study and professional development. It is not legal, compliance,
-         or engineering advice. Use your professional judgment and consult primary standards and official guidance.</p>
-
-      <p><strong>No guarantee of results.</strong> Your use of CPP_Test_Prep does not guarantee any outcome on the CPP exam or
-         any certification.</p>
-
-      <p><strong>Copyright and fair use.</strong> We respect copyright. Limited quotations or references to third-party works
-         are used for purposes such as commentary, criticism, scholarship, or education, consistent with applicable law. If you
-         believe any material on the platform infringes your rights, contact
-         <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a> with a detailed notice and we will review promptly.</p>
-
-      <p><strong>User responsibilities.</strong> Do not upload, request, or share exam-confidential content, proprietary training
-         materials, or content you do not have a right to share. Do not represent our practice items as real exam questions.</p>
-
-      <p><strong>Open source and citations.</strong> When a source requires attribution, we provide it. Where license terms
-         restrict reuse, those terms control. Use external sources according to their licenses.</p>
-
-      <p><strong>Technology and availability.</strong> The platform may experience interruptions or errors. Content is provided
-         “as is” and may change.</p>
-
-      <div class="mt-4">
-        <a class="btn btn-primary" href="{{ back_href }}">Back</a>
-      </div>
-    </div>
-    """
-    html_out = render_template_string(
-        content_tpl,
-        eff_date=TERMS_EFFECTIVE_DATE,
-        back_href=back_href,
-    )
-    return base_layout("Terms & Conditions", html_out)
-
-# Simple alias for convenience (optional, avoids 404 if someone visits /legal)
-if not _route_exists("/legal"):
-    @app.get("/legal")
-    def legal_alias():
-        return redirect(url_for("legal_terms"), code=302)
-
-# ---------- Restore utility pages if missing ----------
-def _route_missing(path: str) -> bool:
-    try:
-        for r in app.url_map.iter_rules():
-            if r.rule == path:
-                return False
-    except Exception:
-        pass
-    return True
-
-# /progress (login required)
-if _route_missing("/progress"):
-    @app.get("/progress", endpoint="sec2_progress_page")
-    @login_required
-    def sec2_progress_page():
-        attempts = _load_json("attempts.json", [])
-        mine = [a for a in attempts if a.get("user_id") == _user_id()]
-        body = render_template_string("""
-        <div class="container">
-          <h1 class="h4 mb-3"><i class="bi bi-graph-up"></i> Your Progress</h1>
-          {% if not items %}
-            <div class="text-muted">No attempts yet. Try a quiz, mock, or the tutor to get started.</div>
-          {% else %}
-            <div class="table-responsive">
-              <table class="table table-sm align-middle">
-                <thead><tr><th>When (UTC)</th><th>Mode</th><th>Domain</th><th>Score / Notes</th></tr></thead>
-                <tbody>
-                  {% for a in items[-200:] %}
-                    <tr>
-                      <td class="small">{{ a.ts }}</td>
-                      <td class="small">{{ a.mode }}</td>
-                      <td class="small">{{ a.get('domain','-') }}</td>
-                      <td class="small">
-                        {% if a.mode in ('quiz','mock') %}
-                          {{ a.get('score','-') }} / {{ a.get('total','-') }}
-                        {% elif a.mode == 'tutor' %}
-                          Asked: {{ a.get('question','')[:80] }}{% if a.get('question','')|length>80 %}…{% endif %}
-                        {% else %}-{% endif %}
-                      </td>
-                    </tr>
-                  {% endfor %}
-                </tbody>
-              </table>
-            </div>
-          {% endif %}
-        </div>
-        """, items=mine)
-        return base_layout("Progress", body)
-
-# /usage (login required)
-if _route_missing("/usage"):
-    @app.get("/usage", endpoint="sec2_usage_page")
-    @login_required
-    def sec2_usage_page():
-        evts = _load_json("events.json", [])
-        mine = [e for e in evts if e.get("user_id") == _user_id()]
-        body = render_template_string("""
-        <div class="container">
-          <h1 class="h4 mb-3"><i class="bi bi-speedometer2"></i> Usage</h1>
-          <p class="text-muted small">Lightweight event log (last 200 entries).</p>
-          <ul class="list-group list-group-flush">
-            {% for e in items[-200:] %}
-              <li class="list-group-item small">
-                <span class="text-muted">{{ e.ts }}</span> — <strong>{{ e.name }}</strong>
-              </li>
-            {% else %}
-              <li class="list-group-item text-muted small">No usage yet.</li>
-            {% endfor %}
-          </ul>
-        </div>
-        """, items=mine)
-        return base_layout("Usage", body)
-
-# /billing (login required placeholder)
-if _route_missing("/billing"):
-    @app.get("/billing", endpoint="sec2_billing_page")
-    @login_required
-    def sec2_billing_page():
-        body = """
-        <div class="container">
-          <h1 class="h4 mb-3"><i class="bi bi-credit-card"></i> Billing</h1>
-          <p class="text-muted">Billing setup coming soon. If you already have access, continue studying.</p>
-          <div class="d-flex gap-2">
-            <a class="btn btn-outline-primary btn-sm" href="/quiz">Go to Quiz</a>
-            <a class="btn btn-outline-success btn-sm" href="/flashcards">Flashcards</a>
-            <a class="btn btn-outline-secondary btn-sm" href="/tutor">Tutor</a>
-          </div>
-        </div>
-        """
-        return base_layout("Billing", body)
-
-# =========================
-# SECTION 3/8: Tutor (UI + API, intro, rotating suggested questions, safe OpenAI call)
-# =========================
-import json as _json
-import urllib.request as _urlreq
-import urllib.error as _urlerr
-
-# ---- Tutor config / helpers ----
-
-# Curated pool of suggested questions; page shows 4 at a time and replaces any clicked one.
-_TUTOR_SUGGESTIONS = [
-    "Explain the three lines of defense in corporate risk governance.",
-    "How do you calculate risk using likelihood and impact? Give an example.",
-    "What are common CPTED principles and how do they reduce incidents?",
-    "Outline an incident response plan for a data breach at HQ.",
-    "What is the purpose of due diligence in vendor management?",
-    "Compare proprietary vs. contract security forces—pros and cons.",
-    "What is a vulnerability assessment vs. a threat assessment?",
-    "How should evidence be preserved during an internal investigation?",
-    "What are common access control models (DAC, MAC, RBAC)?",
-    "Define business continuity vs. disaster recovery with examples.",
-    "What KPIs would you use to measure a security program’s performance?",
-    "Explain executive protection advance work and site surveys.",
-    "How to apply the crime triangle to reduce theft incidents?",
-    "What are key elements of a workplace violence prevention program?",
-    "Describe a layered physical security approach for a data center.",
-]
-
-def _ai_enabled() -> bool:
-    return bool(OPENAI_API_KEY)
-
-def _openai_chat_completion(user_prompt: str) -> Tuple[bool, str]:
-    """
-    Calls OpenAI's /chat/completions API using stdlib (no external deps).
-    Returns (ok, text). If API key is missing or any error, returns (False, reason or fallback).
-    """
-    if not _ai_enabled():
-        return False, ("Tutor is currently in offline mode. "
-                       "No API key configured. You can still study with flashcards, quizzes, and mock exams.")
-    url = f"{OPENAI_API_BASE.rstrip('/')}/chat/completions"
-    sys_prompt = (
-        "You are an expert CPP (Certified Protection Professional) study tutor. "
-        "Explain clearly, cite general best practices, and avoid proprietary or member-only ASIS content. "
-        "Keep answers concise and actionable. When useful, give short bullet points or an example scenario. "
-        "Never claim this platform is ASIS-approved."
-    )
-    payload = {
-        "model": OPENAI_CHAT_MODEL,
-        "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "temperature": 0.2,
-        "max_tokens": 700,
-    }
-    data = _json.dumps(payload).encode("utf-8")
-    req = _urlreq.Request(
-        url,
-        data=data,
-        headers={
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-        },
-        method="POST",
-    )
-    try:
-        with _urlreq.urlopen(req, timeout=25) as resp:
-            raw = resp.read().decode("utf-8", "ignore")
-            obj = _json.loads(raw)
-            msg = (obj.get("choices") or [{}])[0].get("message", {}).get("content", "")
-            if not msg:
-                return False, "The Tutor did not return a response. Please try again."
-            return True, msg.strip()
-    except _urlerr.HTTPError as e:
-        try:
-            err_body = e.read().decode("utf-8", "ignore")
-        except Exception:
-            err_body = str(e)
-        logger.warning("Tutor HTTPError: %s %s", e, err_body)
-        return False, "Tutor request failed. Please try again."
-    except Exception as e:
-        logger.warning("Tutor error: %s", e)
-        return False, "Tutor is temporarily unavailable. Please try again."
-
-def _append_tutor_attempt(uid: str, question: str, answer: str, ok: bool):
-    rec = {
-        "ts": datetime.utcnow().isoformat() + "Z",
-        "user_id": uid,
-        "mode": "tutor",
-        "question": question,
-        "answer": answer,
-        "ok": bool(ok),
-    }
-    attempts = _load_json("attempts.json", [])
-    attempts.append(rec)
-    _save_json("attempts.json", attempts)
-
-# ---- Routes ----
-
-@app.get("/tutor", endpoint="sec3_tutor_page")
-@login_required
-def sec3_tutor_page():
-    """
-    Tutor landing with intro + 4 rotating suggestions.
-    Clicking a suggestion auto-submits and replaces it with a new one (client-side).
-    """
-    # Seed suggestions on each render (client JS randomizes and rotates)
-    suggestions_js = _json.dumps(_TUTOR_SUGGESTIONS, ensure_ascii=False)
-
-    # Display a soft banner if Tutor is offline (no key)
-    offline_note = ""
-    if not _ai_enabled():
-        offline_note = (
-            '<div class="alert alert-warning small mb-3">'
-            '<i class="bi bi-wifi-off me-1"></i>'
-            'Tutor is in offline mode (no API key configured). '
-            'You can still use Flashcards, Quiz, and Mock Exam.'
-            "</div>"
-        )
-
-    body = render_template_string("""
-    <div class="container">
-      <div class="mb-3">
-        <h1 class="h4 mb-1"><i class="bi bi-chat-dots"></i> AI Tutor</h1>
-        <p class="text-muted mb-0">
-          Ask concept questions, get explanations, and see short examples. 
-          You can also click a suggested question on the right — it will send automatically.
-        </p>
-      </div>
-
-      {{ offline_note|safe }}
-
-      <div class="row g-3">
-        <!-- Main chat area -->
-        <div class="col-lg-8">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <div id="chat-log" class="mb-3" style="min-height: 160px;">
-                <div class="text-muted small">No messages yet. Ask a question to get started.</div>
-              </div>
-              <form id="ask-form" method="post" action="/tutor/ask">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <div class="mb-2">
-                  <label for="q" class="form-label">Your question</label>
-                  <textarea id="q" name="q" class="form-control" rows="3" 
-                            placeholder="e.g., How should I structure a workplace violence prevention program?"></textarea>
-                </div>
-                <div class="d-flex gap-2 align-items-center">
-                  <button id="ask-btn" type="submit" class="btn btn-primary">
-                    <i class="bi bi-send"></i> Ask
-                  </button>
-                  <div id="ask-pending" class="text-muted small d-none">
-                    <span class="spinner-border spinner-border-sm"></span> Tutor is thinking...
-                  </div>
-                </div>
-              </form>
-            </div>
-          </div>
-        </div>
-
-        <!-- Suggestions -->
-        <div class="col-lg-4">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <h2 class="h6 mb-3"><i class="bi bi-lightbulb"></i> Suggested questions</h2>
-              <div id="sugg-container" class="d-grid gap-2"></div>
-              <div class="text-muted small mt-2">
-                Click any suggestion — it sends automatically and a new one appears.
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-
-<script>
-(function(){
-  const SUGG_POOL = {{ suggestions_js|safe }};
-  const shown = new Set();
-  const maxShown = 4;
-
-  function pickNewSuggestion() {
-    // pick an index not currently shown; allow repeats only if pool is tiny
-    const candidates = SUGG_POOL.filter(s => !shown.has(s));
-    const pool = candidates.length ? candidates : SUGG_POOL;
-    const s = pool[Math.floor(Math.random() * pool.length)];
-    shown.add(s);
-    return s;
-  }
-
-  function renderSuggestions() {
-    const cont = document.getElementById('sugg-container');
-    cont.innerHTML = '';
-    // ensure exactly 4 visible
-    while (shown.size < maxShown) pickNewSuggestion();
-    Array.from(shown).slice(0, maxShown).forEach(txt => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'btn btn-outline-secondary text-start';
-      btn.textContent = txt;
-      btn.addEventListener('click', function(){
-        autoAsk(txt);
-        // replace this suggestion with a fresh one
-        shown.delete(txt);
-        // ensure we keep 4 visible by re-rendering after sending
-        setTimeout(renderSuggestions, 100);
-      });
-      cont.appendChild(btn);
-    });
-  }
-
-  async function autoAsk(text){
-    const form = document.getElementById('ask-form');
-    const qEl = document.getElementById('q');
-    qEl.value = text;
-    await submitForm();
-  }
-
-  async function submitForm(){
-    const form = document.getElementById('ask-form');
-    const btn = document.getElementById('ask-btn');
-    const pending = document.getElementById('ask-pending');
-    const qEl = document.getElementById('q');
-    const chat = document.getElementById('chat-log');
-
-    const question = (qEl.value || '').trim();
-    if (!question) return;
-
-    btn.disabled = true; pending.classList.remove('d-none');
-
-    // optimistic render user message
-    const me = document.createElement('div');
-    me.className = 'mb-2';
-    me.innerHTML = '<div class="fw-semibold">You</div><div>' + escapeHtml(question) + '</div>';
-    chat.appendChild(me);
-
-    try {
-      const formData = new FormData(form);
-      const resp = await fetch('/tutor/ask', { method: 'POST', body: formData });
-      const data = await resp.json();
-      const ai = document.createElement('div');
-      ai.className = 'mb-3';
-      ai.innerHTML = '<div class="fw-semibold">Tutor</div><div>' + (data.answer_html || escapeHtml(data.answer || '')) + '</div>';
-      chat.appendChild(ai);
-      qEl.value = '';
-      chat.scrollTop = chat.scrollHeight;
-    } catch (e) {
-      const err = document.createElement('div');
-      err.className = 'text-danger small';
-      err.textContent = 'Error sending to Tutor. Please try again.';
-      chat.appendChild(err);
-    } finally {
-      btn.disabled = false; pending.classList.add('d-none');
-    }
-  }
-
-  function escapeHtml(s){
-    return s.replace(/[&<>"']/g, (c) => ({
-      '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'
-    }[c]));
-  }
-
-  document.getElementById('ask-form').addEventListener('submit', function(e){
-    e.preventDefault();
-    submitForm();
-  });
-
-  // initial paint
-  renderSuggestions();
-})();
-</script>
-    """, suggestions_js=suggestions_js, offline_note=offline_note, csrf_token=csrf_token)
-    return base_layout("Tutor", body)
-
-@app.post("/tutor/ask", endpoint="sec3_tutor_ask")
-@login_required
-def sec3_tutor_ask():
-    if not _csrf_ok():
-        abort(403)
-    q = (request.form.get("q") or "").strip()
-    if not q:
-        return jsonify({"ok": False, "error": "empty"}), 400
-
-    ok, ans = _openai_chat_completion(q)
-    # Minimal Markdown-ish to HTML (bold lists etc.) — keep very light to avoid XSS risks.
-    # We escape on the client unless we trust this transform.
-    safe_html = "<p>" + html.escape(ans).replace("\n\n", "</p><p>").replace("\n", "<br/>") + "</p>"
-
-    uid = _user_id()
-    try:
-        _append_tutor_attempt(uid, q, ans, ok)
-        _log_event(uid, "tutor.ask", {"ok": ok})
-    except Exception:
-        pass
-
-    return jsonify({"ok": ok, "answer": ans, "answer_html": safe_html})
-
-
-### START OF SECTION 4/8 — QUIZ & MOCK (BANK-POWERED, UI PRESERVED)
-
-# Notes:
-# - Keeps your existing flows (/quiz, /quiz/start, /mock, /mock/start).
-# - Leaves your domain buttons and count pickers intact.
-# - Uses select_questions(...) from Section 7/8 and bank from Section 6/8.
-# - No new dependencies. No template system change.
-# - Avoids f-strings to prevent { } collisions inside inline JS.
-
-from flask import request, abort, redirect, url_for
-import html
-import json
-
-# ---- Helpers ---------------------------------------------------------------
-
-def _html_escape(s):
-    try:
-        return html.escape(str(s), quote=True)
-    except Exception:
-        return str(s)
-
-def _req_int(name, default, lo=1, hi=500):
-    try:
-        v = int(request.form.get(name, request.args.get(name, default)))
-        return max(lo, min(hi, v))
-    except Exception:
-        return default
-
-def _selected_domains_from_request() -> list:
-    """
-    Accepts:
-      - 'domain_val' (single hidden input from your button group)
-      - 'domain' (single)
-      - 'domain[]' (multi)
-    Returns list[str]
-    """
-    vals = []
-    # multi-select support
-    multi = request.form.getlist("domain[]") or request.args.getlist("domain[]")
-    if multi:
-        vals.extend([v for v in multi if v])
-    # single hidden input
-    one = request.form.get("domain_val") or request.args.get("domain_val")
-    if one:
-        vals.append(one)
-    # single plain field
-    one2 = request.form.get("domain") or request.args.get("domain")
-    if one2:
-        vals.append(one2)
-
-    # normalize & unique, preserve order
-    seen = set()
-    out = []
-    for v in vals:
-        vv = str(v).strip()
-        if not vv:
-            continue
-        if vv not in seen:
-            out.append(vv)
-            seen.add(vv)
-    return out
-
-def _render_picker_page(title: str, post_action: str, default_count: int = 10) -> str:
-    """
-    Minimal picker UI; preserves your domain button behavior and count control.
-    """
-    content = """
-    <div class="container" style="max-width: 960px;">
-      <div class="card shadow-sm my-4">
-        <div class="card-header d-flex align-items-center">
-          <div>
-            <h4 class="mb-0">{title}</h4>
-            <div class="text-muted small">Choose your domain(s) and how many questions to practice.</div>
-          </div>
-        </div>
-        <div class="card-body">
-          <form method="post" action="{action}">
-            <input type="hidden" id="domain_val" name="domain_val" value="">
-            <div class="mb-3">
-              <label class="form-label">Domains</label>
-              <div class="d-flex flex-wrap gap-2">
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 1">Domain 1</button>
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 2">Domain 2</button>
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 3">Domain 3</button>
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 4">Domain 4</button>
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 5">Domain 5</button>
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 6">Domain 6</button>
-                <button type="button" class="btn btn-outline-primary domain-btn" data-value="Domain 7">Domain 7</button>
-              </div>
-              <div class="text-muted small mt-2">Tip: Leave blank for a mixed-domain set based on CPP blueprint weights.</div>
-            </div>
-
-            <div class="mb-3">
-              <label class="form-label">How many questions?</label>
-              <input type="number" class="form-control" name="count" min="1" max="200" value="{count}">
-            </div>
-
-            <div class="d-flex gap-2">
-              <button class="btn btn-primary" type="submit">Start</button>
-              <a class="btn btn-outline-secondary" href="/">Cancel</a>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
-
-    <script>
-      (function(){
-        var container = document.currentScript.closest('.card').querySelector('.card-body');
-        var hidden = container.querySelector('#domain_val');
-        container.querySelectorAll('.domain-btn').forEach(function(btn){
-          btn.addEventListener('click', function(){
-            container.querySelectorAll('.domain-btn').forEach(function(b){ b.classList.remove('active'); });
-            btn.classList.add('active');
-            if (hidden) hidden.value = btn.getAttribute('data-value');
-          });
-        });
-      })();
-    </script>
-    """.replace("{title}", _html_escape(title))\
-       .replace("{action}", _html_escape(post_action))\
-       .replace("{count}", _html_escape(default_count))
-    return base_layout(title, content)
-
-def _render_exam_page(title: str, questions: list) -> str:
-    """
-    Render a lightweight, keyboard-friendly practice page.
-    - One question per screen with Next/Prev
-    - 'Reveal Answer' per question (no auto-submission)
-    - Works for MC, TF, Scenario
-    """
-    # We JSON-embed only non-sensitive fields.
-    safe_qs = []
-    for q in questions:
-        t = str(q.get("type","")).lower()
-        safe = {
-            "id": q.get("id"),
-            "domain": q.get("domain"),
-            "type": t,
-            "stem": q.get("stem"),
-            "choices": q.get("choices", []) if t == "mc" else [],
-            "answer": q.get("answer", None) if t in ("mc","tf") else None,
-            "options": q.get("options", []) if t == "scenario" else [],
-            "answers": q.get("answers", []) if t == "scenario" else [],
-            "explanation": q.get("explanation","")
-        }
-        safe_qs.append(safe)
-
-    payload = _html_escape(json.dumps(safe_qs, ensure_ascii=False))
-
-    content = """
-    <div class="container" style="max-width: 960px;">
-      <div class="card shadow-sm my-4">
-        <div class="card-header d-flex align-items-center justify-content-between">
-          <div>
-            <h4 class="mb-0">{title}</h4>
-            <div class="text-muted small" id="prog"></div>
-          </div>
-          <div class="text-muted small">Use ← → keys to navigate</div>
-        </div>
-        <div class="card-body">
-          <div id="qroot"></div>
-          <div class="d-flex justify-content-between mt-3">
-            <button class="btn btn-outline-secondary" id="prevBtn">Prev</button>
-            <button class="btn btn-primary" id="nextBtn">Next</button>
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <script>
-      (function(){
-        var data = JSON.parse("{payload}");
-        var idx = 0;
-
-        var root = document.getElementById('qroot');
-        var prog = document.getElementById('prog');
-        var prevBtn = document.getElementById('prevBtn');
-        var nextBtn = document.getElementById('nextBtn');
-
-        function render() {
-          if (!data.length) {
-            root.innerHTML = '<div class="alert alert-warning">No questions available for this selection.</div>';
-            prog.textContent = '';
-            prevBtn.disabled = true; nextBtn.disabled = true;
-            return;
-          }
-          var q = data[idx];
-          prog.textContent = 'Question ' + (idx+1) + ' of ' + data.length + (q.domain ? (' — ' + q.domain) : '');
-
-          var html = '';
-          html += '<div class="mb-2"><strong>' + escapeHtml(q.stem || '') + '</strong></div>';
-
-          if (q.type === 'mc') {
-            html += '<ol type="A">';
-            (q.choices || []).forEach(function(c, i){
-              html += '<li>' + escapeHtml(String(c || "")) + '</li>';
-            });
-            html += '</ol>';
-            html += '<button class="btn btn-sm btn-outline-primary" id="revealBtn">Reveal Answer</button>';
-            html += '<div class="mt-2 d-none" id="ans"><span class="badge bg-success">Answer: ' + _letter(q.answer) + '</span>'
-                 +  (q.explanation ? ('<div class="mt-2 text-muted">'+ escapeHtml(q.explanation) +'</div>') : '')
-                 +  '</div>';
-          } else if (q.type === 'tf') {
-            html += '<div class="mb-2">True or False?</div>';
-            html += '<ul><li>True</li><li>False</li></ul>';
-            html += '<button class="btn btn-sm btn-outline-primary" id="revealBtn">Reveal Answer</button>';
-            html += '<div class="mt-2 d-none" id="ans"><span class="badge bg-success">Answer: ' + (q.answer ? 'True' : 'False') + '</span>'
-                 +  (q.explanation ? ('<div class="mt-2 text-muted">'+ escapeHtml(q.explanation) +'</div>') : '')
-                 +  '</div>';
-          } else {
-            // scenario: multi-answer
-            html += '<div class="mb-2">Select all that apply:</div>';
-            html += '<ol type="A">';
-            (q.options || []).forEach(function(c, i){
-              html += '<li>' + escapeHtml(String(c || "")) + '</li>';
-            });
-            html += '</ol>';
-            var letters = (q.answers || []).map(function(i){ return _letter(i); });
-            html += '<button class="btn btn-sm btn-outline-primary" id="revealBtn">Reveal Answer</button>';
-            html += '<div class="mt-2 d-none" id="ans"><span class="badge bg-success">Answer: ' + letters.join(', ') + '</span>'
-                 +  (q.explanation ? ('<div class="mt-2 text-muted">'+ escapeHtml(q.explanation) +'</div>') : '')
-                 +  '</div>';
-          }
-
-          root.innerHTML = html;
-          var rb = document.getElementById('revealBtn');
-          var ans = document.getElementById('ans');
-          if (rb && ans) rb.addEventListener('click', function(){
-            ans.classList.remove('d-none');
-          });
-
-          prevBtn.disabled = (idx === 0);
-          nextBtn.disabled = (idx === data.length - 1);
-        }
-
-        function _letter(i){
-          var A = 'A'.charCodeAt(0);
-          var n = parseInt(i, 10);
-          if (isNaN(n) || n < 0) return '?';
-          return String.fromCharCode(A + n);
-        }
-
-        function escapeHtml(s){
-          return String(s)
-            .replace(/&/g, '&amp;')
-            .replace(/</g, '&lt;')
-            .replace(/>/g, '&gt;')
-            .replace(/"/g, '&quot;')
-            .replace(/'/g, '&#039;');
-        }
-
-        prevBtn.addEventListener('click', function(){ if (idx>0){ idx--; render(); }});
-        nextBtn.addEventListener('click', function(){ if (idx < data.length-1){ idx++; render(); }});
-        window.addEventListener('keydown', function(e){
-          if (e.key === 'ArrowLeft'){ if (idx>0){ idx--; render(); } }
-          if (e.key === 'ArrowRight'){ if (idx < data.length-1){ idx++; render(); } }
-        });
-
-        render();
-      })();
-    </script>
-    """.replace("{title}", _html_escape(title))\
-       .replace("{payload}", payload)
-    return base_layout(title, content)
-
-def _log_safely(event_name: str, payload: dict):
-    try:
-        if "_log_event" in globals():
-            _log_event(_user_id(), event_name, payload)
-    except Exception:
-        pass
-
-# ---- Routes: QUIZ ----------------------------------------------------------
-
-@app.get("/quiz")
-@login_required
-def sec4_quiz_picker():
-    # lightweight event
-    _log_safely("quiz.picker.view", {})
-    # Render picker; form posts to /quiz/start
-    return _render_picker_page("Quiz", "/quiz/start", default_count=10)
-
-@app.post("/quiz/start")
-@login_required
-def sec4_quiz_start():
-    if not _csrf_ok():
-        abort(403)
-
-    # selected domains (or empty → use weights)
-    domains = _selected_domains_from_request()
-    # how many questions (keep your user's freedom)
-    count = _req_int("count", default=10, lo=1, hi=200)
-
-    # use selection engine (Section 7/8)
-    try:
-        qs = select_questions(domains=domains, count=count, mix=None, user_id=_user_id())
-    except Exception as e:
-        _log_safely("quiz.start.error", {"error": str(e)})
-        return base_layout("Quiz", '<div class="alert alert-danger">Could not build quiz set. Please try again.</div>')
-
-    _log_safely("quiz.start", {"domains": domains, "count": count, "actual": len(qs)})
-    return _render_exam_page("Quiz", qs)
-
-# ---- Routes: MOCK EXAM -----------------------------------------------------
-
-@app.get("/mock")
-@login_required
-def sec4_mock_picker():
-    _log_safely("mock.picker.view", {})
-    return _render_picker_page("Mock Exam", "/mock/start", default_count=50)
-
-@app.post("/mock/start")
-@login_required
-def sec4_mock_start():
-    if not _csrf_ok():
-        abort(403)
-
-    domains = _selected_domains_from_request()
-    count = _req_int("count", default=50, lo=10, hi=500)
-
-    try:
-        qs = select_questions(domains=domains, count=count, mix=None, user_id=_user_id())
-    except Exception as e:
-        _log_safely("mock.start.error", {"error": str(e)})
-        return base_layout("Mock Exam", '<div class="alert alert-danger">Could not build mock exam. Please try again.</div>')
-
-    _log_safely("mock.start", {"domains": domains, "count": count, "actual": len(qs)})
-    return _render_exam_page("Mock Exam", qs)
-
-### END OF SECTION 4/8 — QUIZ & MOCK (BANK-POWERED, UI PRESERVED)
-
-
-# ===== SECTION 5/8 — TUTOR ROUTE (RESTORE & STABLE) — START =====
-# STABILITY: This section restores a working /tutor endpoint to fix 404s
-# without redesigning the UI. It is safe to paste wholesale.
-#
-# Placement:
-#   - Replace your entire existing “SECTION 5/8 …” with this block.
-#   - If you no longer have a Section 5/8, insert this whole block
-#     *after* Section 4/8 and *before* Section 6/8.
-#
-# Notes:
-#   - Keeps route name /tutor unchanged (prevents 404).
-#   - Gracefully degrades if OpenAI isn’t configured: shows a clear banner.
-#   - No external deps added; no template files required.
-#   - Uses base_layout() provided earlier in your app.
-#   - If you already have a /tutor route elsewhere, we won’t re-register it.
-
-import os
-import html
-
-try:
-    from flask import request, abort, redirect
-    from flask import url_for  # used in links if needed
-except Exception:  # pragma: no cover
-    pass
-
-# Try to import Flask-Login decorators if they exist in your app.
-try:
-    from flask_login import login_required, current_user
-except Exception:  # pragma: no cover
-    def login_required(fn):  # no-op if flask_login isn’t present
-        return fn
-    current_user = None  # sentinel
-
-
-def _sx5_route_exists(path: str) -> bool:
-    """Return True if a rule with the given path is already registered."""
-    try:
-        for rule in app.url_map.iter_rules():  # 'app' defined earlier
-            if str(rule.rule) == path:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _sx5_tutor_ready() -> bool:
-    """Minimal readiness check for Tutor (OpenAI)."""
-    # We don’t import any SDK here; we only check for a key to avoid UI lies.
-    key = os.environ.get("OPENAI_API_KEY", "").strip()
-    return bool(key)
-
-
-# Only register the route if it doesn’t already exist (prevents overwrite).
-if not _sx5_route_exists("/tutor"):
-
-    @app.get("/tutor")
-    @login_required
-    def sec5_tutor_page():
-        """
-        A minimal, stable Tutor page that prevents 404s and degrades gracefully
-        when OpenAI isn’t configured. This keeps paths stable for navigation.
-        """
-        ready = _sx5_tutor_ready()
-        # Keep HTML simple and compatible (no f-string braces in JS).
-        # We avoid inline JS with curly braces to prevent accidental f-string issues.
-        banner = ""
-        if not ready:
-            banner = (
-                '<div class="alert alert-warning mb-3">'
-                "Tutor is currently offline (AI key not configured). "
-                "Your study modes remain available."
-                "</div>"
-            )
-
-        # We do not change your existing global page shell. This content
-        # will be wrapped by base_layout().
-        content = (
-            '<div class="container py-3">'
-            '  <div class="row">'
-            '    <div class="col-12 col-lg-8">'
-            '      <div class="card shadow-sm mb-3">'
-            '        <div class="card-header">AI Tutor</div>'
-            '        <div class="card-body">'
-            f'          {banner}'
-            '          <p class="text-muted">'
-            '            Ask concept questions about CPP domains, exam strategy, or definitions.'
-            '          </p>'
-            '          <form method="post" action="/tutor/ask">'
-            '            <div class="mb-3">'
-            '              <textarea name="q" class="form-control" rows="4" '
-            '                placeholder="Type your question about any CPP domain..."></textarea>'
-            '            </div>'
-            '            <button class="btn btn-primary" type="submit"'
-            '              title="Send question to Tutor">Ask Tutor</button>'
-            '          </form>'
-            '        </div>'
-            '      </div>'
-            '    </div>'
-            '    <div class="col-12 col-lg-4">'
-            '      <div class="card shadow-sm mb-3">'
-            '        <div class="card-header">Tips</div>'
-            '        <div class="card-body small text-muted">'
-            '          <ul class="mb-0">'
-            '            <li>Mention your target domain for focused help.</li>'
-            '            <li>Ask for definitions, comparisons, or step-by-steps.</li>'
-            '            <li>Use follow-ups like “give me a scenario”.</li>'
-            '          </ul>'
-            '        </div>'
-            '      </div>'
-            '    </div>'
-            '  </div>'
-            '</div>'
-        )
-        try:
-            return base_layout("Tutor", content)
-        except Exception:
-            # If base_layout isn’t available for some reason, fall back.
-            return content
-
-    # Optional: very small handler that simply echoes the question when Tutor isn’t ready.
-    # This avoids a 404 on form POST while keeping behavior harmless until AI is wired.
-    @app.post("/tutor/ask")
-    @login_required
-    def sec5_tutor_ask():
-        q = (request.form.get("q") or "").strip()
-        if not q:
-            # No question — just bounce back to GET page.
-            return redirect("/tutor")
-        if not _sx5_tutor_ready():
-            # Tutor offline: show a simple, non-breaking page with the echoed question.
-            safe_q = html.escape(q)
-            content = (
-                '<div class="container py-3">'
-                '  <div class="alert alert-warning">'
-                '    Tutor offline (no AI key configured). Showing your question only.'
-                '  </div>'
-                '  <div class="card shadow-sm">'
-                '    <div class="card-header">Your question</div>'
-                f'    <div class="card-body"><pre class="mb-0">{safe_q}</pre></div>'
-                '  </div>'
-                '  <div class="mt-3">'
-                '    <a class="btn btn-secondary" href="/tutor">Back to Tutor</a>'
-                '  </div>'
-                '</div>'
-            )
-            try:
-                return base_layout("Tutor", content)
-            except Exception:
-                return content, 200
-
-        # If Tutor is ready, we hand-off to your existing AI workflow if present.
-        # Many codebases already have a helper like _tutor_answer(); we call it
-        # only if it exists. Otherwise, we show a polite placeholder.
-        try:
-            _tutor_answer  # type: ignore  # noqa: F401
-        except NameError:
-            # No internal tutor function provided; placeholder response.
-            safe_q = html.escape(q)
-            content = (
-                '<div class="container py-3">'
-                '  <div class="alert alert-info">'
-                '    Tutor is configured, but no answer function is wired yet.'
-                '  </div>'
-                '  <div class="card shadow-sm mb-3">'
-                '    <div class="card-header">Your question</div>'
-                f'    <div class="card-body"><pre class="mb-0">{safe_q}</pre></div>'
-                '  </div>'
-                '  <div>'
-                '    <a class="btn btn-secondary" href="/tutor">Back to Tutor</a>'
-                '  </div>'
-                '</div>'
-            )
-            try:
-                return base_layout("Tutor", content)
-            except Exception:
-                return content, 200
-
-        # If your project defines _tutor_answer(q, user_id) we’ll use it.
-        try:
-            uid = _user_id() if " _user_id" in globals() else None  # safe best-effort
-        except Exception:
-            uid = None
-        try:
-            answer_html = _tutor_answer(q, uid)  # expected to return sanitized HTML
-        except Exception as ex:
-            # Do not crash the page if the model call fails.
-            safe_err = html.escape(str(ex))
-            answer_html = (
-                '<div class="alert alert-danger">'
-                'Tutor error. Please try again later.<br>'
-                f'<small>{safe_err}</small>'
-                '</div>'
-            )
-
-        # Render the Q/A result
-        safe_q = html.escape(q)
-        content = (
-            '<div class="container py-3">'
-            '  <div class="card shadow-sm mb-3">'
-            '    <div class="card-header">Your question</div>'
-            f'    <div class="card-body"><pre class="mb-0">{safe_q}</pre></div>'
-            '  </div>'
-            '  <div class="card shadow-sm mb-3">'
-            '    <div class="card-header">Tutor</div>'
-            f'    <div class="card-body">{answer_html}</div>'
-            '  </div>'
-            '  <div>'
-            '    <a class="btn btn-secondary" href="/tutor">Ask another</a>'
-            '  </div>'
-            '</div>'
-        )
-        try:
-            return base_layout("Tutor", content)
-        except Exception:
-            return content, 200
-
-# ===== SECTION 5/8 — TUTOR ROUTE (RESTORE & STABLE) — END =====
-
-### START OF SECTION 6/8 — CONTENT BANK & DATA MODEL (NEW)
-
-# STABILITY: stdlib-only imports (no new deps)
-import os, json, time, uuid, random, hashlib, tempfile, io, difflib
-from typing import List, Dict, Any, Optional, Tuple
-
-# STABILITY: reuse existing DATA_DIR if defined; else fall back to cwd/data
-if "DATA_DIR" not in globals():
-    DATA_DIR = os.path.join(os.getcwd(), "data")
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# STABILITY: establish bank/ tree under DATA_DIR; no rename of existing data files elsewhere
-BANK_DIR = os.path.join(DATA_DIR, "bank")
-os.makedirs(BANK_DIR, exist_ok=True)
-
-# STABILITY: file paths for the shared content bank
-_QUESTIONS_FILE = os.path.join(BANK_DIR, "questions.jsonl")   # one JSON object per line
-_FLASHCARDS_FILE = os.path.join(BANK_DIR, "flashcards.jsonl") # one JSON object per line
-_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")        # {"Domain 1": 0.15, ...}
-
-# -------------------------------------------------------------------------------------------------
-# Atomic I/O helpers
-# -------------------------------------------------------------------------------------------------
-
-def _atomic_write_bytes(path: str, data: bytes) -> None:
-    """Write bytes to a temp file then atomic replace to avoid partial writes."""
-    d = os.path.dirname(path) or "."
-    os.makedirs(d, exist_ok=True)
-    tmp_path = path + ".tmp"
-    with open(tmp_path, "wb") as f:
-        f.write(data)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp_path, path)
-
-def _atomic_write_text(path: str, text: str) -> None:
-    _atomic_write_bytes(path, text.encode("utf-8"))
-
-def _atomic_write_json(path: str, obj: Any) -> None:
-    _atomic_write_text(path, json.dumps(obj, ensure_ascii=False, indent=2))
-
-# STABILITY: keep shape and call-sites if an old _save_json exists; otherwise define it now.
-if "_save_json" not in globals():
-    def _save_json(path: str, obj: Any) -> None:
-        # STABILITY: atomic write as required; preserves signature
-        _atomic_write_json(path, obj)
-
-# STABILITY: existing _load_json stays untouched if already defined; otherwise provide it.
-if "_load_json" not in globals():
-    def _load_json(path: str, default: Any) -> Any:
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except FileNotFoundError:
-            return default
-        except Exception as e:
-            # Keep existing warnings style (if any) minimal
-            try:
-                app.logger.warning("Failed to load JSON %s: %s", path, e)
-            except Exception:
-                pass
-            return default
-
-# JSONL convenience
-def _read_jsonl(path: str) -> List[Dict[str, Any]]:
-    if not os.path.exists(path):
-        return []
-    out: List[Dict[str, Any]] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                out.append(json.loads(line))
-            except Exception:
-                # skip corrupted lines (do not break)
-                continue
-    return out
-
-def _write_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
-    # atomic write: construct full text then replace
-    buf = io.StringIO()
-    for r in rows:
-        buf.write(json.dumps(r, ensure_ascii=False))
-        buf.write("\n")
-    _atomic_write_text(path, buf.getvalue())
-
-# -------------------------------------------------------------------------------------------------
-# Normalization, IDs, and de-dup
-# -------------------------------------------------------------------------------------------------
+# File paths for content bank
+_QUESTIONS_FILE = os.path.join(BANK_DIR, "questions.jsonl")
+_FLASHCARDS_FILE = os.path.join(BANK_DIR, "flashcards.jsonl")
+_WEIGHTS_FILE = os.path.join(BANK_DIR, "weights.json")
+
+# ====================================================================================================
+# CONTENT BANK MANAGEMENT
+# ====================================================================================================
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
@@ -1768,12 +369,7 @@ def _norm_text(s: str) -> str:
     return " ".join(str(s).strip().lower().split())
 
 def _q_signature(q: Dict[str, Any]) -> str:
-    """
-    A stable signature for de-dup across types.
-    MC  : stem + sorted choices
-    TF  : stem + 'true/false'
-    SCN : stem + sorted options (if present)
-    """
+    """Generate signature for question deduplication"""
     t = q.get("type", "").lower()
     stem = _norm_text(q.get("stem", ""))
     if t == "mc":
@@ -1782,43 +378,26 @@ def _q_signature(q: Dict[str, Any]) -> str:
         base = stem + "||" + "|".join(choices)
     elif t in ("tf", "truefalse", "true_false"):
         base = stem + "||tf"
-    else:  # scenario or custom
+    else:  # scenario
         opts = [_norm_text(c) for c in q.get("options", [])]
         opts.sort()
         base = stem + "||" + "|".join(opts)
     return hashlib.sha256(base.encode("utf-8")).hexdigest()
 
 def _looks_like_dup(a: str, b: str, threshold: float = 0.92) -> bool:
-    """Fuzzy near-duplicate check on normalized stems."""
+    """Fuzzy duplicate detection"""
     ra = _norm_text(a); rb = _norm_text(b)
     if not ra or not rb:
         return False
     return difflib.SequenceMatcher(a=ra, b=rb).ratio() >= threshold
 
-# -------------------------------------------------------------------------------------------------
-# Public read API
-# -------------------------------------------------------------------------------------------------
-
 def get_domain_weights() -> Dict[str, float]:
-    """
-    Returns a dict mapping domain -> weight (sums ≈ 1).
-    If file absent, return a sane default CPP blueprint and write it.
-    """
-    default = {
-        # STABILITY: safe defaults; admin can edit weights.json
-        "Domain 1": 0.15,
-        "Domain 2": 0.10,
-        "Domain 3": 0.20,
-        "Domain 4": 0.15,
-        "Domain 5": 0.12,
-        "Domain 6": 0.13,
-        "Domain 7": 0.15,
-    }
+    """Get domain weights, create defaults if missing"""
+    default = {f"Domain {i+1}": info["weight"] for i, info in enumerate(CPP_DOMAINS.values())}
     data = _load_json(_WEIGHTS_FILE, None)
     if not data:
         _save_json(_WEIGHTS_FILE, default)
         return default
-    # normalize
     try:
         total = float(sum(float(v) for v in data.values())) or 1.0
         return {k: float(v)/total for k, v in data.items()}
@@ -1843,39 +422,23 @@ def get_all_flashcards(domains: Optional[List[str]] = None) -> List[Dict[str, An
         rows = [r for r in rows if str(r.get("domain","")).lower() in dset]
     return rows
 
-# -------------------------------------------------------------------------------------------------
-# Ingestion (admin or background)
-# -------------------------------------------------------------------------------------------------
-
 def ingest_questions(new_items: List[Dict[str, Any]], source: str = "upload") -> Tuple[int,int]:
-    """
-    Ingest question dicts. Each item should include:
-      - type: "mc" | "tf" | "scenario"
-      - domain: string (e.g., "Domain 3")
-      - stem: question text
-      - choices (mc): list[str]
-      - answer (mc): int index in choices
-      - answer (tf): bool
-      - options/answers (scenario): options: list[str], answers: list[int] or list[str]
-      - explanation (optional)
-      - tags (optional list[str])
-    Returns: (added_count, skipped_as_dupe)
-    """
+    """Ingest questions with deduplication"""
     existing = _read_jsonl(_QUESTIONS_FILE)
     seen_sigs = { _q_signature(q) for q in existing }
     existing_stems = [ _norm_text(q.get("stem","")) for q in existing ]
 
     added, skipped = 0, 0
     out = list(existing)
-
     now = int(time.time())
+    
     for raw in new_items:
-        q = dict(raw)  # shallow copy
+        q = dict(raw)
         q.setdefault("id", _new_id("q"))
         q.setdefault("source", source)
         q.setdefault("created_at", now)
 
-        # normalize type aliases
+        # Normalize type
         t = str(q.get("type","")).lower().strip()
         if t in ("truefalse", "true_false"):
             t = "tf"
@@ -1885,7 +448,7 @@ def ingest_questions(new_items: List[Dict[str, Any]], source: str = "upload") ->
             t = "scenario"
         q["type"] = t
 
-        # minimal schema guard
+        # Validate
         if not q.get("stem") or not q.get("domain") or t not in ("mc","tf","scenario"):
             skipped += 1
             continue
@@ -1896,7 +459,6 @@ def ingest_questions(new_items: List[Dict[str, Any]], source: str = "upload") ->
         if sig in seen_sigs:
             skipped += 1
             continue
-        # fuzzy stem near-dup against existing stems
         if any(_looks_like_dup(stem_norm, s) for s in existing_stems):
             skipped += 1
             continue
@@ -1907,22 +469,13 @@ def ingest_questions(new_items: List[Dict[str, Any]], source: str = "upload") ->
         added += 1
 
     _write_jsonl(_QUESTIONS_FILE, out)
-    try:
-        app.logger.info("Bank ingest: questions added=%s skipped=%s total=%s", added, skipped, len(out))
-    except Exception:
-        pass
+    logger.info("Bank ingest: questions added=%s skipped=%s total=%s", added, skipped, len(out))
     return added, skipped
 
 def ingest_flashcards(new_items: List[Dict[str, Any]], source: str = "upload") -> Tuple[int,int]:
-    """
-    Flashcard item fields:
-      - domain: string
-      - front: str
-      - back: str
-      - tags (optional)
-    """
+    """Ingest flashcards with deduplication"""
     existing = _read_jsonl(_FLASHCARDS_FILE)
-    # simple hash on front/back
+    
     def f_sig(fc: Dict[str, Any]) -> str:
         base = _norm_text(fc.get("front","")) + "||" + _norm_text(fc.get("back",""))
         return hashlib.sha256(base.encode("utf-8")).hexdigest()
@@ -1955,90 +508,12 @@ def ingest_flashcards(new_items: List[Dict[str, Any]], source: str = "upload") -
         added += 1
 
     _write_jsonl(_FLASHCARDS_FILE, out)
-    try:
-        app.logger.info("Bank ingest: flashcards added=%s skipped=%s total=%s", added, skipped, len(out))
-    except Exception:
-        pass
+    logger.info("Bank ingest: flashcards added=%s skipped=%s total=%s", added, skipped, len(out))
     return added, skipped
 
-# -------------------------------------------------------------------------------------------------
-# Seed minimal content (safe no-op if files already exist)
-# -------------------------------------------------------------------------------------------------
-
-def ensure_bank_seeded() -> None:
-    """Create default weights and a handful of sample items if bank is empty."""
-    # weights
-    if not os.path.exists(_WEIGHTS_FILE):
-        _save_json(_WEIGHTS_FILE, get_domain_weights())  # writes defaults
-
-    # questions
-    if not os.path.exists(_QUESTIONS_FILE) or not _read_jsonl(_QUESTIONS_FILE):
-        sample_qs = [
-            {
-                "type": "mc",
-                "domain": "Domain 1",
-                "stem": "Which control primarily reduces likelihood rather than impact?",
-                "choices": ["Deterrent", "Corrective", "Compensating", "Recovery"],
-                "answer": 0,
-                "explanation": "Deterrent controls aim to discourage an action.",
-                "tags": ["controls", "risk"]
-            },
-            {
-                "type": "tf",
-                "domain": "Domain 3",
-                "stem": "Chain of custody must document every transfer of evidence.",
-                "answer": True,
-                "explanation": "Accuracy and integrity rely on continuous documentation.",
-                "tags": ["investigations"]
-            },
-            {
-                "type": "scenario",
-                "domain": "Domain 6",
-                "stem": "You inherit a legacy access control system with shared admin logins. Pick all best-first remediation steps.",
-                "options": [
-                    "Enforce unique accounts with MFA",
-                    "Rotate all shared credentials",
-                    "Disable audit logging to reduce storage",
-                    "Implement least privilege for admins"
-                ],
-                "answers": [0,1,3],
-                "explanation": "Unique identities, rotation, and least privilege are foundational."
-            }
-        ]
-        ingest_questions(sample_qs, source="seed")
-
-    # flashcards
-    if not os.path.exists(_FLASHCARDS_FILE) or not _read_jsonl(_FLASHCARDS_FILE):
-        sample_fc = [
-            {"domain": "Domain 2", "front": "Risk = ?", "back": "Threat × Vulnerability × Impact"},
-            {"domain": "Domain 4", "front": "Business Impact Analysis (BIA)", "back": "Assesses critical processes and impacts of disruption."},
-        ]
-        ingest_flashcards(sample_fc, source="seed")
-
-# Ensure seed once at import
-try:
-    ensure_bank_seeded()
-except Exception as _e:
-    try:
-        app.logger.warning("ensure_bank_seeded warning: %s", _e)
-    except Exception:
-        pass
-
-### END OF SECTION 6/8 — CONTENT BANK & DATA MODEL (NEW)
-
-### START OF SECTION 7/8 — SELECTION ENGINE FOR QUIZ/MOCK (NEW)
-
-import math
-from typing import List, Dict, Any, Optional, Tuple
-
-# Domain weights (CPP blueprint) come from Section 6/8
-# Questions loaded via get_all_questions()
-
-_DEFAULT_TYPE_MIX = {
-    "mc": 0.50,        # ~50% Multiple Choice
-    "tf": 0.25,        # ~25% True/False
-    "scenario": 0.25,  # ~25% Scenario
-}
+# ====================================================================================================
+# SELECTION ENGINE
+# ====================================================================================================
 
 def _canonical_type(t: str) -> str:
     t = (t or "").lower().strip()
@@ -2048,10 +523,7 @@ def _canonical_type(t: str) -> str:
     return t
 
 def _rng_for_user_context(user_id: Optional[str]) -> random.Random:
-    """
-    Deterministic-ish RNG per user/day to give varied but stable sets.
-    Falls back to time if user id not available.
-    """
+    """Deterministic RNG per user/day for stable question sets"""
     try:
         day = int(time.time() // 86400)
         seed_str = f"{user_id or 'anon'}::{day}"
@@ -2061,47 +533,45 @@ def _rng_for_user_context(user_id: Optional[str]) -> random.Random:
         return random.Random()
 
 def _weighted_domain_allocation(domains: List[str], weights: Dict[str, float], total: int) -> Dict[str, int]:
-    """
-    Allocate total questions across selected domains according to weights.
-    Rounds fairly then fixes rounding drift.
-    """
+    """Allocate questions across domains by weight"""
     if not domains:
         return {}
-    # normalize a local weight map restricted to selected domains
+    
+    # Normalize weights for selected domains
     local = {d: float(weights.get(d, 0.0)) for d in domains}
     if sum(local.values()) <= 0:
-        # equal split if no weights known
+        # Equal split if no weights
         eq = max(1, total // max(1, len(domains)))
         alloc = {d: eq for d in domains}
-        # fix remainder
         rem = total - sum(alloc.values())
         for d in domains[:rem]:
             alloc[d] += 1
         return alloc
-    # proportional, then round
-    raw = {d: (weights.get(d, 0.0)) for d in domains}
+    
+    # Proportional allocation
+    raw = {d: weights.get(d, 0.0) for d in domains}
     s = sum(raw.values()) or 1.0
     target = {d: (raw[d]/s)*total for d in domains}
     alloc = {d: int(math.floor(target[d])) for d in domains}
     rem = total - sum(alloc.values())
-    # give remainder to largest fractional parts
+    
+    # Distribute remainder by largest fractional parts
     fr = sorted(domains, key=lambda d: target[d]-alloc[d], reverse=True)
     for d in fr[:rem]:
         alloc[d] += 1
     return alloc
 
 def _split_type_mix(n: int, mix: Dict[str, float]) -> Dict[str, int]:
+    """Split questions by type according to mix percentages"""
     mix = { _canonical_type(k): float(v) for k, v in mix.items() }
-    # initial floor
     alloc = {k: int(math.floor(n * mix.get(k, 0.0))) for k in mix}
     rem = n - sum(alloc.values())
-    # top up by largest residuals
+    
     residuals = sorted(mix.keys(), key=lambda k: (n*mix[k]) - alloc[k], reverse=True)
     for k in residuals[:rem]:
         alloc[k] += 1
-    # ensure only known keys
+    
     out = {"mc": alloc.get("mc",0), "tf": alloc.get("tf",0), "scenario": alloc.get("scenario",0)}
-    # fix drift if any
     delta = n - sum(out.values())
     for k in ("mc","tf","scenario"):
         if delta == 0: break
@@ -2117,23 +587,13 @@ def select_questions(domains: List[str],
                      count: int,
                      mix: Optional[Dict[str, float]] = None,
                      user_id: Optional[str] = None) -> List[Dict[str, Any]]:
-    """
-    Core selector used by Quiz/Mock.
-    - domains: selected domain labels (must match what's in bank/weights)
-    - count  : total questions to return (your UI picker still controls this)
-    - mix    : optional override of type mix; defaults to 50/25/25 (MC/TF/Scenario)
-    - user_id: optional for stable randomness day-to-day per user
-
-    Returns a list of question dicts from the bank.
-    """
-    mix = mix or dict(_DEFAULT_TYPE_MIX)
+    """Core question selection engine"""
+    mix = mix or dict(QUESTION_TYPE_MIX)
     weights = get_domain_weights()
     rng = _rng_for_user_context(user_id)
 
-    # domain allocation
     domains = list(domains or [])
     if not domains:
-        # if nothing chosen, include all from weights file (keeps historical behavior)
         domains = list(weights.keys())
 
     per_domain = _weighted_domain_allocation(domains, weights, count)
@@ -2147,7 +607,7 @@ def select_questions(domains: List[str],
         pool = inventory_by_domain.get(d, [])
         if not pool:
             continue
-        # type split inside this domain
+        
         t_alloc = _split_type_mix(n_d, mix)
 
         for t, need in t_alloc.items():
@@ -2155,21 +615,18 @@ def select_questions(domains: List[str],
                 continue
             sub = _filter_by_type(pool, t)
             if len(sub) <= need:
-                # take all if not enough; we’ll backfill later if needed
                 selected.extend(sub)
             else:
                 selected.extend(rng.sample(sub, need))
 
-    # Backfill if we fell short due to inventory constraints (keep domain pref then any)
+    # Backfill if short
     short = count - len(selected)
     if short > 0:
-        # prefer remaining in selected domains first
         remaining = [q for d in domains for q in inventory_by_domain.get(d, []) if q not in selected]
         if len(remaining) >= short:
             selected.extend(rng.sample(remaining, short))
         else:
             selected.extend(remaining)
-            # as a last resort, pull any domain
             all_pool = get_all_questions()
             extra = [q for q in all_pool if q not in selected]
             extra_need = count - len(selected)
@@ -2177,180 +634,2204 @@ def select_questions(domains: List[str],
                 take = min(extra_need, len(extra))
                 selected.extend(rng.sample(extra, take))
 
-    # Truncate if we somehow exceeded (shouldn’t), but guard anyway.
     if len(selected) > count:
         selected = selected[:count]
 
     return selected
 
-# Optional helper to adapt bank questions into a generic UI-friendly shape
-def to_ui_question(q: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Non-destructive adapter. Use only if you need a consistent shape:
-      {
-        "id": ..., "domain": ..., "type": "mc|tf|scenario",
-        "stem": "...",
-        "choices": [...],          # for "mc"
-        "answer": 0,               # index for "mc"; bool for "tf"; list[int] for "scenario"
-        "options": [...],          # for "scenario" only
-        "explanation": "..."
-      }
-    """
-    t = _canonical_type(q.get("type",""))
-    out = {
-        "id": q.get("id"),
-        "domain": q.get("domain"),
-        "type": t,
-        "stem": q.get("stem"),
-        "explanation": q.get("explanation"),
+# ====================================================================================================
+# AI TUTOR SYSTEM
+# ====================================================================================================
+
+def _ai_enabled() -> bool:
+    return bool(OPENAI_API_KEY)
+
+def _openai_chat_completion(user_prompt: str) -> Tuple[bool, str]:
+    """Call OpenAI API for tutor responses"""
+    if not _ai_enabled():
+        return False, ("Tutor is currently in offline mode. "
+                       "No API key configured. You can still study with flashcards, quizzes, and mock exams.")
+    
+    url = f"{OPENAI_API_BASE.rstrip('/')}/chat/completions"
+    sys_prompt = (
+        "You are an expert CPP (Certified Protection Professional) study tutor. "
+        "Explain clearly, cite general best practices, and avoid proprietary or member-only ASIS content. "
+        "Keep answers concise and actionable. When useful, give short bullet points or an example scenario. "
+        "Never claim this platform is ASIS-approved. "
+        "Always include this disclaimer: 'This program is not affiliated with or approved by ASIS International.'"
+    )
+    
+    payload = {
+        "model": OPENAI_CHAT_MODEL,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        "temperature": 0.2,
+        "max_tokens": 700,
     }
-    if t == "mc":
-        out["choices"] = q.get("choices", [])
-        out["answer"]  = q.get("answer", 0)
-    elif t == "tf":
-        out["answer"]  = bool(q.get("answer"))
-    else:  # scenario
-        out["options"] = q.get("options", [])
-        out["answers"] = q.get("answers", [])
-    return out
-
-### END OF SECTION 7/8 — SELECTION ENGINE FOR QUIZ/MOCK (NEW)
-
-### START OF SECTION 8/8 — WELCOME GATE (FIXED WITH FOOTER FALLBACK + CSRF)
-
-from urllib.parse import urlparse, urljoin
-
-# ---------- Safe fallback for footer helper ----------
-# If Section 2/8 (which defines _with_footer) isn’t loaded yet for any reason,
-# define a harmless no-op so routes never 500.
-if "_with_footer" not in globals():
-    def _with_footer(inner_html: str) -> str:
-        return inner_html
-
-# ---------- Safe-next guard ----------
-if "_safe_next" not in globals():
-    def _safe_next(nxt: str, fallback: str = "/") -> str:
-        try:
-            if not nxt:
-                return fallback
-            host_url = request.host_url
-            test_url = urljoin(host_url, nxt)
-            host = urlparse(host_url).netloc
-            test = urlparse(test_url).netloc
-            return nxt if host == test else fallback
-        except Exception:
-            return fallback
-
-# ---------- Agreement state ----------
-def _has_agreed() -> bool:
+    
+    data = json.dumps(payload).encode("utf-8")
+    req = _urlreq.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        },
+        method="POST",
+    )
+    
     try:
-        return bool(session.get("agreed_terms"))
-    except Exception:
-        return False
+        with _urlreq.urlopen(req, timeout=25) as resp:
+            raw = resp.read().decode("utf-8", "ignore")
+            obj = json.loads(raw)
+            msg = (obj.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            if not msg:
+                return False, "The Tutor did not return a response. Please try again."
+            return True, msg.strip()
+    except _urlerr.HTTPError as e:
+        try:
+            err_body = e.read().decode("utf-8", "ignore")
+        except Exception:
+            err_body = str(e)
+        logger.warning("Tutor HTTPError: %s %s", e, err_body)
+        return False, "Tutor request failed. Please try again."
+    except Exception as e:
+        logger.warning("Tutor error: %s", e)
+        return False, "Tutor is temporarily unavailable. Please try again."
 
-# ---------- Routes ----------
-@app.get("/welcome", endpoint="sec8_welcome")
-def sec8_welcome():
-    nxt = _safe_next(request.args.get("next") or "/tutor")
-    body = render_template_string("""
-    <div class="container" style="max-width: 960px;">
-      <div class="row my-4">
-        <div class="col-12 col-lg-8">
-          <div class="card shadow-sm mb-3">
+# ====================================================================================================
+# EVENT LOGGING
+# ====================================================================================================
+
+def _log_event(uid: str, name: str, data: dict | None = None):
+    evts = _load_json("events.json", [])
+    evts.append({
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "user_id": uid,
+        "name": name,
+        "data": data or {}
+    })
+    _save_json("events.json", evts)
+
+def _append_attempt(uid: str, mode: str, score: int = None, total: int = None, 
+                   domain: str = None, question: str = None, answer: str = None):
+    rec = {
+        "ts": datetime.utcnow().isoformat() + "Z",
+        "user_id": uid,
+        "mode": mode,
+        "score": score,
+        "total": total,
+        "domain": domain,
+        "question": question,
+        "answer": answer
+    }
+    attempts = _load_json("attempts.json", [])
+    attempts.append(rec)
+    _save_json("attempts.json", attempts)
+
+# ====================================================================================================
+# UI HELPERS & BASE LAYOUT
+# ====================================================================================================
+
+def _footer_html():
+    return """
+    <footer class="mt-5 py-3 border-top text-center small text-muted">
+      <div>
+        Educational use only. Not affiliated with ASIS International. No legal, safety, or professional advice.
+        Use official sources to verify. No guarantee of results. &copy; CPP-Exam-Prep
+        &nbsp;•&nbsp;<a class="text-decoration-none" href="/terms">Terms &amp; Conditions</a>
+      </div>
+    </footer>
+    """
+
+def base_layout(title: str, body_html: str) -> str:
+    tpl = """
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ title }} — CPP Exam Prep</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.1/font/bootstrap-icons.css" rel="stylesheet">
+  <style>
+    .fc-card .front, .fc-card .back { min-height: 120px; padding: 1rem; border: 1px solid #ddd; border-radius: .5rem; }
+    .fc-card .front { background: #f8f9fa; }
+  </style>
+</head>
+<body>
+  <nav class="navbar navbar-expand-lg bg-light border-bottom">
+    <div class="container">
+      <a class="navbar-brand" href="/"><i class="bi bi-shield-lock"></i> CPP Prep</a>
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div id="navContent" class="collapse navbar-collapse">
+        <div class="ms-auto d-flex align-items-center gap-3">
+          <a class="text-decoration-none" href="/flashcards">Flashcards</a>
+          <a class="text-decoration-none" href="/quiz">Quiz</a>
+          <a class="text-decoration-none" href="/mock">Mock Exam</a>
+          <a class="text-decoration-none" href="/tutor">Tutor</a>
+          <a class="text-decoration-none" href="/progress">Progress</a>
+          {% if session.get('uid') %}
+            <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
+          {% else %}
+            <a class="btn btn-outline-primary btn-sm" href="/login">Login</a>
+          {% endif %}
+        </div>
+      </div>
+    </div>
+  </nav>
+
+  <main class="py-4">
+    {{ body_html | safe }}
+  </main>
+
+  {{ footer | safe }}
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
+    """
+    return render_template_string(tpl, title=(title or "CPP Exam Prep"), body_html=body_html, footer=_footer_html())
+
+def domain_buttons_html(selected_key="all", field_name="domain"):
+    """Generate domain selection buttons"""
+    buttons = []
+    domains = ["all"] + [f"domain{i+1}" for i in range(7)]
+    labels = {
+        "all": "All Domains",
+        "domain1": "D1: Security Principles",
+        "domain2": "D2: Business Principles", 
+        "domain3": "D3: Investigations",
+        "domain4": "D4: Personnel Security",
+        "domain5": "D5: Physical Security",
+        "domain6": "D6: Information Security",
+        "domain7": "D7: Crisis Management"
+    }
+    
+    for domain in domains:
+        active = " active" if selected_key == domain else ""
+        label = labels.get(domain, domain)
+        buttons.append(
+            f'<button type="button" class="btn btn-outline-success domain-btn{active}" '
+            f'data-value="{html.escape(domain)}">{html.escape(label)}</button>'
+        )
+    
+    hidden = f'<input type="hidden" id="domain_val" name="{html.escape(field_name)}" value="{html.escape(selected_key)}"/>'
+    return f'<div class="d-flex flex-wrap gap-2">{"".join(buttons)}</div>{hidden}'
+
+# ====================================================================================================
+# CONTENT GENERATION SYSTEM
+# ====================================================================================================
+
+class CPPContentGenerator:
+    """Generate comprehensive CPP study content"""
+    
+    DOMAIN_CONTENT = {
+        "Domain 1": {
+            "name": "Security Principles & Practices",
+            "topics": [
+                "Risk Management", "Security Controls", "Physical Security Concepts",
+                "Security Program Management", "Legal and Regulatory Compliance",
+                "Professional Ethics", "Security Awareness", "Threat Assessment"
+            ]
+        },
+        "Domain 2": {
+            "name": "Business Principles & Practices", 
+            "topics": [
+                "Business Continuity", "Financial Management", "Procurement",
+                "Contract Management", "Strategic Planning", "Performance Metrics",
+                "Quality Assurance", "Vendor Management"
+            ]
+        },
+        "Domain 3": {
+            "name": "Investigations",
+            "topics": [
+                "Investigation Planning", "Evidence Collection", "Interview Techniques",
+                "Report Writing", "Legal Considerations", "Surveillance",
+                "Digital Forensics", "Case Management"
+            ]
+        },
+        "Domain 4": {
+            "name": "Personnel Security",
+            "topics": [
+                "Background Investigations", "Security Clearances", "Insider Threats",
+                "Personnel Screening", "Access Controls", "Training Programs",
+                "Behavioral Indicators", "Termination Procedures"
+            ]
+        },
+        "Domain 5": {
+            "name": "Physical Security",
+            "topics": [
+                "Perimeter Security", "Access Control Systems", "CCTV Systems",
+                "Intrusion Detection", "Security Lighting", "Barriers",
+                "Lock and Key Control", "Visitor Management"
+            ]
+        },
+        "Domain 6": {
+            "name": "Information Security",
+            "topics": [
+                "Data Classification", "Access Controls", "Encryption",
+                "Network Security", "Incident Response", "Vulnerability Management",
+                "Security Policies", "Awareness Training"
+            ]
+        },
+        "Domain 7": {
+            "name": "Crisis Management",
+            "topics": [
+                "Emergency Planning", "Incident Command", "Business Continuity",
+                "Disaster Recovery", "Communications", "Evacuation Procedures",
+                "Risk Assessment", "Recovery Operations"
+            ]
+        }
+    }
+
+    @classmethod
+    def generate_flashcards(cls, target_count: int = 300) -> List[Dict[str, Any]]:
+        """Generate comprehensive flashcard set"""
+        flashcards = []
+        
+        # Calculate per-domain allocation
+        total_weight = sum(CPP_DOMAINS[k]["weight"] for k in CPP_DOMAINS)
+        allocations = {}
+        for domain_key, domain_info in CPP_DOMAINS.items():
+            allocations[f"Domain {int(domain_key[-1])}"] = int(target_count * domain_info["weight"] / total_weight)
+        
+        # Generate flashcards by domain
+        for domain_name, count in allocations.items():
+            domain_flashcards = cls._generate_domain_flashcards(domain_name, count)
+            flashcards.extend(domain_flashcards)
+        
+        return flashcards
+
+    @classmethod
+    def _generate_domain_flashcards(cls, domain: str, count: int) -> List[Dict[str, Any]]:
+        """Generate flashcards for specific domain"""
+        flashcards = []
+        domain_info = cls.DOMAIN_CONTENT.get(domain, {})
+        topics = domain_info.get("topics", [])
+        
+        # Sample flashcard content by domain
+        templates = cls._get_flashcard_templates(domain)
+        
+        for i in range(count):
+            template = templates[i % len(templates)]
+            flashcard = {
+                "id": _new_id("fc"),
+                "domain": domain,
+                "front": template["front"],
+                "back": template["back"], 
+                "tags": template.get("tags", []),
+                "source": "generated",
+                "created_at": int(time.time())
+            }
+            flashcards.append(flashcard)
+        
+        return flashcards
+
+    @classmethod
+    def _get_flashcard_templates(cls, domain: str) -> List[Dict[str, Any]]:
+        """Get flashcard templates by domain"""
+        templates = {
+            "Domain 1": [
+                {"front": "What are the three primary categories of security controls?", 
+                 "back": "Administrative (policies, procedures, training), Physical (barriers, locks, surveillance), and Technical (access controls, encryption, firewalls)", 
+                 "tags": ["controls", "fundamentals"]},
+                {"front": "Define Defense in Depth", 
+                 "back": "A layered security strategy using multiple controls at different points to protect assets. If one layer fails, others continue to provide protection.", 
+                 "tags": ["strategy", "layered-defense"]},
+                {"front": "What is the CIA Triad?", 
+                 "back": "Confidentiality (preventing unauthorized disclosure), Integrity (preventing unauthorized modification), Availability (ensuring authorized access when needed)", 
+                 "tags": ["fundamentals", "CIA"]},
+                {"front": "What is risk appetite?", 
+                 "back": "The amount and type of risk an organization is willing to accept in pursuit of its objectives", 
+                 "tags": ["risk-management"]},
+                {"front": "Define residual risk", 
+                 "back": "The risk that remains after controls have been implemented to reduce the inherent risk", 
+                 "tags": ["risk-management"]},
+            ],
+            "Domain 2": [
+                {"front": "What is ROI in security context?", 
+                 "back": "Return on Investment - measures the financial benefit of security investments relative to their cost. Calculated as (Benefit - Cost) / Cost × 100%", 
+                 "tags": ["business-case", "metrics"]},
+                {"front": "Define Business Impact Analysis (BIA)", 
+                 "back": "A process to identify critical business functions and assess the impact of their disruption over time, used to prioritize continuity planning efforts.", 
+                 "tags": ["continuity", "analysis"]},
+                {"front": "What is Maximum Tolerable Downtime (MTD)?", 
+                 "back": "The longest period a business function can be unavailable before the organization suffers unacceptable consequences", 
+                 "tags": ["continuity", "metrics"]},
+                {"front": "Define Total Cost of Ownership (TCO)", 
+                 "back": "The complete cost of a security solution including acquisition, implementation, operation, maintenance, and disposal costs", 
+                 "tags": ["financial", "procurement"]},
+            ],
+            "Domain 3": [
+                {"front": "What is Chain of Custody?", 
+                 "back": "Documentation that tracks the seizure, custody, control, transfer, analysis, and disposition of evidence to ensure its integrity and admissibility.", 
+                 "tags": ["evidence", "legal"]},
+                {"front": "Name the four types of interview questions", 
+                 "back": "Open-ended (broad, exploratory), Closed-ended (specific facts), Leading (suggests answer), and Hypothetical (what-if scenarios)", 
+                 "tags": ["interviews", "techniques"]},
+                {"front": "What is the Miranda Warning?", 
+                 "back": "A legal requirement to inform suspects of their rights before custodial interrogation, including the right to remain silent and right to an attorney", 
+                 "tags": ["legal", "interviews"]},
+                {"front": "Define circumstantial evidence", 
+                 "back": "Evidence that relies on inference to connect it to a conclusion of fact, as opposed to direct evidence which directly proves a fact", 
+                 "tags": ["evidence", "legal"]},
+            ],
+            "Domain 4": [
+                {"front": "What are the three phases of employment screening?", 
+                 "back": "Pre-employment (background checks, reference verification), During employment (ongoing monitoring, performance reviews), Post-employment (exit procedures, access revocation)", 
+                 "tags": ["screening", "lifecycle"]},
+                {"front": "Define Insider Threat", 
+                 "back": "A security risk posed by individuals within an organization who have authorized access and may use it to harm the organization intentionally or unintentionally.", 
+                 "tags": ["insider-threat", "risk"]},
+                {"front": "What is the purpose of a security clearance?", 
+                 "back": "To ensure individuals with access to classified information are trustworthy and reliable based on background investigation", 
+                 "tags": ["clearance", "screening"]},
+                {"front": "List common insider threat indicators", 
+                 "back": "Sudden financial difficulties, disgruntlement, unusual work hours, accessing unnecessary information, copying files, policy violations", 
+                 "tags": ["insider-threat", "indicators"]},
+            ],
+            "Domain 5": [
+                {"front": "What is CPTED?", 
+                 "back": "Crime Prevention Through Environmental Design - using architecture and urban planning to reduce crime opportunities through natural surveillance, access control, territorial reinforcement, and maintenance.", 
+                 "tags": ["CPTED", "design"]},
+                {"front": "List the four protection rings in concentric security", 
+                 "back": "1) Perimeter (outer boundary), 2) Building envelope (walls, doors, windows), 3) Interior spaces (rooms, areas), 4) Asset protection (safes, vaults)", 
+                 "tags": ["layered-defense", "perimeter"]},
+                {"front": "What are the three types of lighting for security?", 
+                 "back": "Continuous (constant illumination), Standby (activated when needed), and Emergency (backup power systems)", 
+                 "tags": ["lighting", "systems"]},
+                {"front": "Define mantrap", 
+                 "back": "A small space with two interlocking doors where only one can be open at a time, used to control access and prevent tailgating", 
+                 "tags": ["access-control", "design"]},
+            ],
+            "Domain 6": [
+                {"front": "What is the principle of Least Privilege?", 
+                 "back": "Users should be granted only the minimum access rights necessary to perform their job functions, reducing the risk of unauthorized access or misuse.", 
+                 "tags": ["access-control", "principles"]},
+                {"front": "Define Multi-Factor Authentication (MFA)", 
+                 "back": "A security method requiring two or more verification factors: something you know (password), something you have (token), something you are (biometric).", 
+                 "tags": ["authentication", "access-control"]},
+                {"front": "What are the three states of data?", 
+                 "back": "Data at Rest (stored), Data in Transit (being transmitted), and Data in Use (being processed)", 
+                 "tags": ["data-protection", "encryption"]},
+                {"front": "Define data classification", 
+                 "back": "The process of organizing data by relevant categories so it may be used and protected more efficiently according to its value and sensitivity", 
+                 "tags": ["data-protection", "classification"]},
+            ],
+            "Domain 7": [
+                {"front": "What are the four phases of emergency management?", 
+                 "back": "Mitigation (reducing risks), Preparedness (planning and training), Response (immediate actions during crisis), Recovery (returning to normal operations)", 
+                 "tags": ["emergency-management", "phases"]},
+                {"front": "Define Incident Command System (ICS)", 
+                 "back": "A standardized management framework for coordinating emergency response across multiple agencies, with clear command structure and unified objectives.", 
+                 "tags": ["ICS", "coordination"]},
+                {"front": "What is the difference between crisis and emergency?", 
+                 "back": "Emergency is an unexpected event requiring immediate action; Crisis is a situation that threatens the organization's survival or reputation", 
+                 "tags": ["definitions", "planning"]},
+                {"front": "List the five ICS functional areas", 
+                 "back": "Command, Operations, Planning, Logistics, Finance/Administration", 
+                 "tags": ["ICS", "structure"]},
+            ]
+        }
+        
+        return templates.get(domain, [])
+
+    @classmethod  
+    def generate_questions(cls, target_count: int = 900) -> List[Dict[str, Any]]:
+        """Generate comprehensive question bank"""
+        questions = []
+        
+        # Calculate per-domain allocation based on CPP weights
+        total_weight = sum(CPP_DOMAINS[k]["weight"] for k in CPP_DOMAINS)
+        allocations = {}
+        for domain_key, domain_info in CPP_DOMAINS.items():
+            domain_name = f"Domain {int(domain_key[-1])}"
+            allocations[domain_name] = int(target_count * domain_info["weight"] / total_weight)
+        
+        # Generate questions by domain
+        for domain_name, count in allocations.items():
+            domain_questions = cls._generate_domain_questions(domain_name, count)
+            questions.extend(domain_questions)
+        
+        return questions
+
+    @classmethod
+    def _generate_domain_questions(cls, domain: str, count: int) -> List[Dict[str, Any]]:
+        """Generate questions for specific domain"""
+        questions = []
+        
+        # Type distribution: 50% MC, 25% TF, 25% Scenario
+        mc_count = int(count * 0.50)
+        tf_count = int(count * 0.25) 
+        scenario_count = count - mc_count - tf_count
+        
+        # Generate each type
+        questions.extend(cls._generate_mc_questions(domain, mc_count))
+        questions.extend(cls._generate_tf_questions(domain, tf_count))
+        questions.extend(cls._generate_scenario_questions(domain, scenario_count))
+        
+        return questions
+
+    @classmethod
+    def _generate_mc_questions(cls, domain: str, count: int) -> List[Dict[str, Any]]:
+        """Generate multiple choice questions"""
+        templates = cls._get_mc_templates(domain)
+        questions = []
+        
+        for i in range(count):
+            template = templates[i % len(templates)]
+            question = {
+                "id": _new_id("q"),
+                "type": "mc",
+                "domain": domain,
+                "stem": template["stem"],
+                "choices": template["choices"],
+                "answer": template["answer"],
+                "explanation": template["explanation"],
+                "tags": template.get("tags", []),
+                "source": "generated",
+                "created_at": int(time.time())
+            }
+            questions.append(question)
+        
+        return questions
+
+    @classmethod
+    def _generate_tf_questions(cls, domain: str, count: int) -> List[Dict[str, Any]]:
+        """Generate true/false questions"""
+        templates = cls._get_tf_templates(domain)
+        questions = []
+        
+        for i in range(count):
+            template = templates[i % len(templates)]
+            question = {
+                "id": _new_id("q"),
+                "type": "tf", 
+                "domain": domain,
+                "stem": template["stem"],
+                "answer": template["answer"],
+                "explanation": template["explanation"],
+                "tags": template.get("tags", []),
+                "source": "generated",
+                "created_at": int(time.time())
+            }
+            questions.append(question)
+        
+        return questions
+
+    @classmethod
+    def _generate_scenario_questions(cls, domain: str, count: int) -> List[Dict[str, Any]]:
+        """Generate scenario-based questions"""
+        templates = cls._get_scenario_templates(domain)
+        questions = []
+        
+        for i in range(count):
+            template = templates[i % len(templates)]
+            question = {
+                "id": _new_id("q"),
+                "type": "scenario",
+                "domain": domain,
+                "stem": template["stem"],
+                "options": template["options"],
+                "answers": template["answers"],
+                "explanation": template["explanation"],
+                "tags": template.get("tags", []),
+                "source": "generated",
+                "created_at": int(time.time())
+            }
+            questions.append(question)
+        
+        return questions
+
+    @classmethod
+    def _get_mc_templates(cls, domain: str) -> List[Dict[str, Any]]:
+        """Get MC question templates by domain"""
+        # Sample templates - would be much larger in production
+        templates = {
+            "Domain 1": [
+                {
+                    "stem": "Which control type is MOST effective at deterring unauthorized access before it occurs?",
+                    "choices": ["Detective controls", "Preventive controls", "Corrective controls", "Compensating controls"],
+                    "answer": 1,
+                    "explanation": "Preventive controls are designed to stop incidents before they happen, making them most effective at deterring unauthorized access.",
+                    "tags": ["controls", "prevention"]
+                },
+                {
+                    "stem": "What is the PRIMARY purpose of a vulnerability assessment?",
+                    "choices": ["To identify threats", "To identify weaknesses", "To calculate risk", "To implement controls"],
+                    "answer": 1,
+                    "explanation": "Vulnerability assessments identify weaknesses that could be exploited by threats.",
+                    "tags": ["vulnerability", "assessment"]
+                }
+            ],
+            "Domain 2": [
+                {
+                    "stem": "When calculating Annual Loss Expectancy (ALE), which formula is correct?",
+                    "choices": ["ALE = Asset Value × Threat Frequency", "ALE = Single Loss Expectancy × Annual Rate of Occurrence", "ALE = Risk × Vulnerability × Asset Value", "ALE = Impact × Likelihood × Controls"],
+                    "answer": 1,
+                    "explanation": "ALE = SLE × ARO. Single Loss Expectancy represents the dollar loss from one incident, and Annual Rate of Occurrence is how often it happens per year.",
+                    "tags": ["risk-calculation", "metrics"]
+                }
+            ],
+            "Domain 3": [
+                {
+                    "stem": "During an investigation interview, what is the PRIMARY purpose of open-ended questions?",
+                    "choices": ["To get specific yes/no answers", "To challenge the subject's credibility", "To gather detailed information and encourage narrative", "To conclude the interview quickly"],
+                    "answer": 2,
+                    "explanation": "Open-ended questions encourage subjects to provide detailed information and tell their story in their own words.",
+                    "tags": ["interview-techniques", "information-gathering"]
+                }
+            ],
+            "Domain 4": [
+                {
+                    "stem": "Which background check component is MOST important for positions with access to classified information?",
+                    "choices": ["Education verification", "Credit history review", "Security clearance investigation", "Employment history verification"],
+                    "answer": 2,
+                    "explanation": "Security clearance investigations are specifically designed for classified access positions.",
+                    "tags": ["clearance", "screening"]
+                }
+            ],
+            "Domain 5": [
+                {
+                    "stem": "In CPTED principles, what does 'natural surveillance' refer to?",
+                    "choices": ["Security cameras placed throughout the facility", "Positioning windows and lighting to maximize visibility", "Having security guards patrol regularly", "Installing motion-detection sensors"],
+                    "answer": 1,
+                    "explanation": "Natural surveillance in CPTED refers to designing spaces so people can easily observe their surroundings through proper placement of windows, lighting, and landscaping.",
+                    "tags": ["CPTED", "design-principles"]
+                }
+            ],
+            "Domain 6": [
+                {
+                    "stem": "What is the PRIMARY security benefit of implementing role-based access control (RBAC)?",
+                    "choices": ["Reduces password complexity requirements", "Simplifies user access management and enforces least privilege", "Eliminates the need for user authentication", "Increases system processing speed"],
+                    "answer": 1,
+                    "explanation": "RBAC groups permissions by job functions, making it easier to manage access while ensuring users only get permissions needed for their roles.",
+                    "tags": ["access-control", "RBAC"]
+                }
+            ],
+            "Domain 7": [
+                {
+                    "stem": "In the Incident Command System (ICS), who has the authority to establish objectives and priorities?",
+                    "choices": ["Operations Chief", "Planning Chief", "Incident Commander", "Safety Officer"],
+                    "answer": 2,
+                    "explanation": "The Incident Commander has overall authority and responsibility for incident management, including establishing objectives, priorities, and strategy.",
+                    "tags": ["ICS", "command-structure"]
+                }
+            ]
+        }
+        
+        # Return templates, cycling if needed
+        domain_templates = templates.get(domain, templates["Domain 1"])
+        return domain_templates * 20  # Repeat to ensure enough content
+
+    @classmethod
+    def _get_tf_templates(cls, domain: str) -> List[Dict[str, Any]]:
+        """Get True/False question templates by domain"""
+        templates = {
+            "Domain 1": [
+                {
+                    "stem": "Risk can be completely eliminated through proper security controls.",
+                    "answer": False,
+                    "explanation": "Risk can be reduced, transferred, or accepted, but never completely eliminated. There is always residual risk remaining after implementing security controls.",
+                    "tags": ["risk-management", "fundamentals"]
+                }
+            ],
+            "Domain 2": [
+                {
+                    "stem": "A cost-benefit analysis should always recommend the security control with the lowest implementation cost.",
+                    "answer": False,
+                    "explanation": "Cost-benefit analysis should recommend controls where benefits exceed costs by the greatest margin, not necessarily the cheapest option.",
+                    "tags": ["cost-benefit", "decision-making"]
+                }
+            ],
+            "Domain 3": [
+                {
+                    "stem": "Chain of custody documentation must record every person who handles evidence.",
+                    "answer": True,
+                    "explanation": "Chain of custody requires documenting every transfer and handling of evidence to maintain its integrity and legal admissibility.",
+                    "tags": ["evidence", "legal"]
+                }
+            ],
+            "Domain 4": [
+                {
+                    "stem": "Insider threat indicators are always obvious and easy to detect.",
+                    "answer": False,
+                    "explanation": "Insider threat indicators can be subtle and may resemble normal behavior variations. Effective programs use multiple indicators.",
+                    "tags": ["insider-threat", "detection"]
+                }
+            ],
+            "Domain 5": [
+                {
+                    "stem": "Physical security controls are only effective if they work independently of each other.",
+                    "answer": False,
+                    "explanation": "Physical security is most effective when controls work together in a layered defense approach, providing redundancy and mutual support.",
+                    "tags": ["layered-defense", "integration"]
+                }
+            ],
+            "Domain 6": [
+                {
+                    "stem": "Encryption in transit protects data while it is being transmitted over networks.",
+                    "answer": True,
+                    "explanation": "Encryption in transit (like HTTPS, VPN) protects data as it moves between systems over networks, preventing interception and eavesdropping.",
+                    "tags": ["encryption", "data-protection"]
+                }
+            ],
+            "Domain 7": [
+                {
+                    "stem": "Emergency response plans should be kept confidential and only shared with senior management.",
+                    "answer": False,
+                    "explanation": "Emergency response plans should be shared with all relevant personnel who need to implement them during an emergency.",
+                    "tags": ["emergency-planning", "communication"]
+                }
+            ]
+        }
+        
+        domain_templates = templates.get(domain, templates["Domain 1"])
+        return domain_templates * 15  # Repeat to ensure enough content
+
+    @classmethod
+    def _get_scenario_templates(cls, domain: str) -> List[Dict[str, Any]]:
+        """Get scenario question templates by domain"""
+        templates = {
+            "Domain 1": [
+                {
+                    "stem": "Your organization experienced a data breach due to an unpatched server. Management wants to prevent similar incidents. Which combination of controls would provide the BEST layered defense?",
+                    "options": ["Automated patch management only", "Employee training and incident response plan", "Patch management, network segmentation, and intrusion detection", "Firewall configuration and antivirus software"],
+                    "answers": [2],
+                    "explanation": "Option C provides multiple layers of protection: patch management prevents vulnerabilities, network segmentation limits breach scope, and intrusion detection identifies threats.",
+                    "tags": ["layered-defense", "incident-prevention"]
+                }
+            ],
+            "Domain 2": [
+                {
+                    "stem": "A security program needs justification for budget increases. Which metrics would BEST demonstrate program value to executives?",
+                    "options": ["Number of security incidents detected", "Cost savings from incident prevention", "Security awareness training completion rates", "Number of security policies updated"],
+                    "answers": [1],
+                    "explanation": "Cost savings from incident prevention directly translates to business value that executives can understand and appreciate.",
+                    "tags": ["metrics", "business-case"]
+                }
+            ],
+            "Domain 3": [
+                {
+                    "stem": "You discover potential evidence of employee theft on a company computer. The employee is currently at lunch. What should be your FIRST action?",
+                    "options": ["Immediately question the employee when they return", "Make copies of all files for evidence", "Secure the computer and document the scene", "Contact law enforcement"],
+                    "answers": [2],
+                    "explanation": "Securing the scene and documenting it preserves evidence integrity and maintains chain of custody. Taking action before proper securing could compromise evidence.",
+                    "tags": ["evidence-preservation", "investigation-procedures"]
+                }
+            ],
+            "Domain 4": [
+                {
+                    "stem": "An employee shows signs of financial stress and begins accessing files outside their normal job duties. What actions should be taken?",
+                    "options": ["Immediately terminate the employee", "Increase monitoring and document behaviors", "Transfer employee to different department", "Ignore unless criminal activity is confirmed"],
+                    "answers": [1],
+                    "explanation": "Increased monitoring and documentation allows for evidence gathering while maintaining legal protections for both employee and organization.",
+                    "tags": ["insider-threat", "monitoring"]
+                }
+            ],
+            "Domain 5": [
+                {
+                    "stem": "A facility has experienced several vehicle break-ins in the parking lot. Which CPTED principle would MOST effectively address this problem?",
+                    "options": ["Install more security cameras", "Hire additional security guards", "Improve lighting and remove visual obstructions", "Add more parking spaces"],
+                    "answers": [2],
+                    "explanation": "Improving lighting and removing visual obstructions applies CPTED's natural surveillance principle, making criminal activity more visible and likely to be observed.",
+                    "tags": ["CPTED", "parking-security"]
+                }
+            ],
+            "Domain 6": [
+                {
+                    "stem": "A company discovers that sensitive customer data was accessed by unauthorized personnel. What should be the IMMEDIATE priorities?",
+                    "options": ["Contain the breach and preserve evidence", "Notify customers immediately", "Conduct internal investigation", "Implement new access controls"],
+                    "answers": [0],
+                    "explanation": "Immediate containment prevents further damage, and evidence preservation is critical for investigation and potential legal proceedings.",
+                    "tags": ["incident-response", "data-breach"]
+                }
+            ],
+            "Domain 7": [
+                {
+                    "stem": "During a facility evacuation, employees are gathering in the parking lot but emergency responders need that space for equipment. What should the Emergency Coordinator do?",
+                    "options": ["Tell employees to go home immediately", "Move employees to the designated alternate assembly area", "Have employees wait in their vehicles", "Keep employees in the parking lot until authorities arrive"],
+                    "answers": [1],
+                    "explanation": "Emergency plans should include alternate assembly areas for situations where the primary area becomes unavailable.",
+                    "tags": ["evacuation", "emergency-procedures"]
+                }
+            ]
+        }
+        
+        domain_templates = templates.get(domain, templates["Domain 1"])
+        return domain_templates * 10  # Repeat to ensure enough content
+
+def ensure_content_seeded():
+    """Ensure content bank has sufficient material"""
+    # Check current content levels
+    questions = get_all_questions()
+    flashcards = get_all_flashcards()
+    
+    # Generate content if below thresholds
+    if len(questions) < 100:
+        logger.info("Generating question bank...")
+        new_questions = CPPContentGenerator.generate_questions(900)
+        ingest_questions(new_questions, source="seed")
+    
+    if len(flashcards) < 50:
+        logger.info("Generating flashcard bank...")
+        new_flashcards = CPPContentGenerator.generate_flashcards(300)
+        ingest_flashcards(new_flashcards, source="seed")
+
+# ====================================================================================================
+# ROUTES - AUTHENTICATION
+# ====================================================================================================
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    if request.method == "GET":
+        next_url = request.args.get("next", "/")
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="card shadow-sm my-4">
+            <div class="card-header">
+              <h4 class="mb-0">Sign In</h4>
+            </div>
             <div class="card-body">
-              <h3 class="mb-2">Welcome to CPP_Test_Prep</h3>
-              <p class="text-muted mb-3">
-                This independent study platform helps you prepare for the ASIS CPP exam with an AI Tutor, Flashcards, Quizzes, and Mock Exams.
-                <strong>CPP_Test_Prep is not affiliated with ASIS International.</strong>
-              </p>
-              <ol class="mb-3">
-                <li>Read our <a href="/terms" target="_self">Terms &amp; Conditions</a> and Legal Disclaimer.</li>
-                <li>Create an account or sign in.</li>
-                <li>Check the box below to accept the Terms &amp; Conditions.</li>
-                <li>Start learning — Tutor is front and center; Flashcards, Quiz, and Mock Exam are a click away.</li>
-              </ol>
-
-              <form method="post" action="/welcome/accept" class="mt-3">
-                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
-                <input type="hidden" name="next" value="{{ nxt }}"/>
-                <div class="form-check mb-3">
-                  <input class="form-check-input" type="checkbox" value="on" id="agree" name="agree" required>
-                  <label class="form-check-label" for="agree">
-                    I have read and agree to the <a href="/terms" target="_self">Terms &amp; Conditions</a>.
-                  </label>
+              <form method="post">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <input type="hidden" name="next" value="{html.escape(next_url)}"/>
+                <div class="mb-3">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" required/>
                 </div>
-
+                <div class="mb-3">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" required/>
+                </div>
                 <div class="d-flex gap-2">
-                  <a class="btn btn-outline-primary" href="/login?next={{ nxt }}">Sign in</a>
-                  <a class="btn btn-primary" href="/register?next={{ nxt }}">Create account</a>
-                  <button type="submit" class="btn btn-success">Continue</button>
+                  <button type="submit" class="btn btn-primary">Sign In</button>
+                  <a href="/register" class="btn btn-outline-secondary">Create Account</a>
                 </div>
               </form>
             </div>
           </div>
+        </div>
+        """
+        return base_layout("Sign In", content)
+    
+    # POST - process login
+    if not _csrf_ok():
+        abort(403)
+    
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    next_url = request.form.get("next") or "/"
+    
+    user = _find_user(email)
+    if not user or not check_password_hash(user.get("password_hash", ""), password):
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">Invalid email or password.</div>
+          <a href="/login" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Sign In Failed", content)
+    
+    # Success
+    session["uid"] = user["id"]
+    session["email"] = user["email"]
+    _log_event(user["id"], "login.success")
+    
+    return redirect(next_url)
 
-          <div class="alert alert-warning mb-4">
-            <strong>Important:</strong> We do not use proprietary or member-only ASIS materials. Our content is original or based on lawful open sources for educational use only.
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "GET":
+        next_url = request.args.get("next", "/")
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="card shadow-sm my-4">
+            <div class="card-header">
+              <h4 class="mb-0">Create Account</h4>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <input type="hidden" name="next" value="{html.escape(next_url)}"/>
+                <div class="mb-3">
+                  <label class="form-label">Email</label>
+                  <input type="email" name="email" class="form-control" required/>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Password</label>
+                  <input type="password" name="password" class="form-control" required minlength="8"/>
+                  <div class="form-text">Minimum 8 characters</div>
+                </div>
+                <div class="mb-3">
+                  <label class="form-label">Confirm Password</label>
+                  <input type="password" name="confirm_password" class="form-control" required/>
+                </div>
+                <div class="d-flex gap-2">
+                  <button type="submit" class="btn btn-primary">Create Account</button>
+                  <a href="/login" class="btn btn-outline-secondary">Sign In Instead</a>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Create Account", content)
+    
+    # POST - process registration
+    if not _csrf_ok():
+        abort(403)
+    
+    email = (request.form.get("email") or "").strip().lower()
+    password = request.form.get("password") or ""
+    confirm_password = request.form.get("confirm_password") or ""
+    next_url = request.form.get("next") or "/"
+    
+    # Validation
+    if password != confirm_password:
+        content = """
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">Passwords do not match.</div>
+          <a href="/register" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content)
+    
+    valid, msg = validate_password(password)
+    if not valid:
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">{html.escape(msg)}</div>
+          <a href="/register" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content)
+    
+    success, result = _create_user(email, password)
+    if not success:
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="alert alert-danger">{html.escape(result)}</div>
+          <a href="/register" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Registration Failed", content)
+    
+    # Success - auto login
+    session["uid"] = result
+    session["email"] = email
+    _log_event(result, "register.success")
+    
+    return redirect(next_url)
+
+@app.route("/logout")
+def logout():
+    uid = _user_id()
+    if uid:
+        _log_event(uid, "logout")
+    session.clear()
+    return redirect("/")
+
+# ====================================================================================================
+# ROUTES - MAIN APPLICATION
+# ====================================================================================================
+
+@app.route("/")
+def home():
+    """Main dashboard"""
+    content = """
+    <div class="container">
+      <div class="py-4">
+        <div class="row align-items-center mb-4">
+          <div class="col">
+            <h1 class="h3 mb-2"><i class="bi bi-shield-lock"></i> CPP Exam Prep</h1>
+            <p class="text-muted mb-0">
+              Comprehensive study platform for the ASIS Certified Protection Professional exam.
+            </p>
+          </div>
+        </div>
+        
+        <div class="alert alert-info mb-4">
+          <strong>Disclaimer:</strong> This program is not affiliated with or approved by ASIS International. 
+          It uses only open-source and publicly available study materials. No ASIS-protected content is included.
+        </div>
+
+        <div class="row g-4">
+          <div class="col-md-6">
+            <div class="card h-100 shadow-sm">
+              <div class="card-body">
+                <h2 class="h5 mb-3"><i class="bi bi-layers me-2"></i>Flashcards</h2>
+                <p class="text-muted mb-3">Study key concepts and definitions across all CPP domains.</p>
+                <a class="btn btn-success" href="/flashcards">Start Flashcards</a>
+              </div>
+            </div>
+          </div>
+          
+          <div class="col-md-6">
+            <div class="card h-100 shadow-sm">
+              <div class="card-body">
+                <h2 class="h5 mb-3"><i class="bi bi-ui-checks-grid me-2"></i>Practice Quiz</h2>
+                <p class="text-muted mb-3">Quick practice sessions with immediate feedback.</p>
+                <a class="btn btn-primary" href="/quiz">Take Quiz</a>
+              </div>
+            </div>
+          </div>
+          
+          <div class="col-md-6">
+            <div class="card h-100 shadow-sm">
+              <div class="card-body">
+                <h2 class="h5 mb-3"><i class="bi bi-journal-check me-2"></i>Mock Exam</h2>
+                <p class="text-muted mb-3">Full-length practice exams with CPP domain weighting.</p>
+                <a class="btn btn-warning" href="/mock">Start Mock Exam</a>
+              </div>
+            </div>
+          </div>
+          
+          <div class="col-md-6">
+            <div class="card h-100 shadow-sm">
+              <div class="card-body">
+                <h2 class="h5 mb-3"><i class="bi bi-chat-dots me-2"></i>AI Tutor</h2>
+                <p class="text-muted mb-3">Get explanations and guidance on complex topics.</p>
+                <a class="btn btn-secondary" href="/tutor">Ask Tutor</a>
+              </div>
+            </div>
           </div>
         </div>
 
-        <div class="col-12 col-lg-4">
-          <div class="card shadow-sm">
-            <div class="card-body">
-              <h5 class="mb-2">Quick tips</h5>
-              <ul class="mb-0">
-                <li>Use Tutor to ask “why” and “how” questions.</li>
-                <li>Filter Flashcards/Quiz/Mock by domain using the buttons.</li>
-                <li>Choose any number of questions; your preference is preserved.</li>
-                <li>Progress updates save automatically.</li>
-              </ul>
+        <div class="mt-4 pt-4 border-top">
+          <div class="row">
+            <div class="col-md-8">
+              <h3 class="h6 mb-2">CPP Exam Domains</h3>
+              <div class="row g-2 small">
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 1:</strong> Security Principles & Practices (22%)
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 2:</strong> Business Principles & Practices (15%)
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 3:</strong> Investigations (9%)
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 4:</strong> Personnel Security (11%)
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 5:</strong> Physical Security (16%)
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 6:</strong> Information Security (14%)
+                  </div>
+                </div>
+                <div class="col-sm-6">
+                  <div class="border rounded p-2">
+                    <strong>Domain 7:</strong> Crisis Management (13%)
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div class="col-md-4">
+              <h3 class="h6 mb-2">Quick Links</h3>
+              <div class="d-flex flex-column gap-1">
+                <a href="/progress" class="btn btn-outline-secondary btn-sm">View Progress</a>
+                <a href="/terms" class="btn btn-outline-secondary btn-sm">Terms & Conditions</a>
+              </div>
             </div>
           </div>
         </div>
       </div>
     </div>
-    """, nxt=nxt, csrf_token=csrf_token)
-    return base_layout("Welcome", _with_footer(body))
+    """
+    return base_layout("CPP Exam Prep", content)
 
-@app.post("/welcome/accept", endpoint="sec8_welcome_accept")
-def sec8_welcome_accept():
+# ====================================================================================================
+# ROUTES - FLASHCARDS
+# ====================================================================================================
+
+@app.route("/flashcards")
+@login_required
+def flashcards():
+    """Flashcard study interface"""
+    domain_filter = request.args.get("domain", "all")
+    
+    # Get flashcards
+    if domain_filter == "all":
+        cards = get_all_flashcards()
+    else:
+        domain_name = f"Domain {domain_filter[-1]}" if domain_filter.startswith("domain") else domain_filter
+        cards = get_all_flashcards(domains=[domain_name])
+    
+    if not cards:
+        content = f"""
+        <div class="container">
+          <h1 class="h4 mb-3">Flashcards</h1>
+          <div class="alert alert-warning">
+            No flashcards available for the selected domain. 
+            <a href="/admin/generate" class="alert-link">Generate content</a> or select a different domain.
+          </div>
+          {domain_buttons_html(domain_filter)}
+        </div>
+        """
+        return base_layout("Flashcards", content)
+    
+    # Prepare cards for JavaScript
+    cards_json = json.dumps([{
+        "id": c.get("id"),
+        "front": c.get("front"),
+        "back": c.get("back"),
+        "domain": c.get("domain")
+    } for c in cards], ensure_ascii=False)
+    
+    content = f"""
+    <div class="container">
+      <div class="d-flex justify-content-between align-items-center mb-3">
+        <h1 class="h4 mb-0">Flashcards</h1>
+        <div class="text-muted small">
+          <span id="card-counter">0 / 0</span>
+        </div>
+      </div>
+      
+      <div class="mb-3">
+        {domain_buttons_html(domain_filter)}
+      </div>
+      
+      <div class="row justify-content-center">
+        <div class="col-lg-8">
+          <div id="flashcard-container" class="fc-card mb-3" style="min-height: 300px;">
+            <div id="card-front" class="front d-flex align-items-center justify-content-center text-center">
+              <div>
+                <h5 class="mb-0">Loading...</h5>
+              </div>
+            </div>
+            <div id="card-back" class="back d-none d-flex align-items-center justify-content-center text-center">
+              <div>
+                <p class="mb-0">Answer will appear here</p>
+              </div>
+            </div>
+          </div>
+          
+          <div class="d-flex justify-content-center gap-2 mb-3">
+            <button id="prev-btn" class="btn btn-outline-secondary" disabled>
+              <i class="bi bi-arrow-left"></i> Previous
+            </button>
+            <button id="flip-btn" class="btn btn-primary">
+              <i class="bi bi-arrow-repeat"></i> Flip
+            </button>
+            <button id="next-btn" class="btn btn-outline-secondary">
+              Next <i class="bi bi-arrow-right"></i>
+            </button>
+          </div>
+          
+          <div class="text-center">
+            <button id="shuffle-btn" class="btn btn-outline-success btn-sm">
+              <i class="bi bi-shuffle"></i> Shuffle
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <script>
+    (function() {{
+      const cards = {cards_json};
+      let currentIndex = 0;
+      let isFlipped = false;
+      
+      const frontEl = document.getElementById('card-front');
+      const backEl = document.getElementById('card-back');
+      const counterEl = document.getElementById('card-counter');
+      const prevBtn = document.getElementById('prev-btn');
+      const nextBtn = document.getElementById('next-btn');
+      const flipBtn = document.getElementById('flip-btn');
+      const shuffleBtn = document.getElementById('shuffle-btn');
+      
+      function updateCard() {{
+        if (cards.length === 0) {{
+          frontEl.innerHTML = '<div><h5 class="text-muted">No cards available</h5></div>';
+          return;
+        }}
+        
+        const card = cards[currentIndex];
+        frontEl.innerHTML = `<div><h5 class="mb-2">${{escapeHtml(card.front)}}</h5><div class="text-muted small">${{escapeHtml(card.domain)}}</div></div>`;
+        backEl.innerHTML = `<div><p class="mb-2">${{escapeHtml(card.back)}}</p><div class="text-muted small">${{escapeHtml(card.domain)}}</div></div>`;
+        
+        counterEl.textContent = `${{currentIndex + 1}} / ${{cards.length}}`;
+        
+        prevBtn.disabled = currentIndex === 0;
+        nextBtn.disabled = currentIndex === cards.length - 1;
+        
+        // Reset to front
+        frontEl.classList.remove('d-none');
+        backEl.classList.add('d-none');
+        isFlipped = false;
+        flipBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Flip';
+      }}
+      
+      function flip() {{
+        if (isFlipped) {{
+          frontEl.classList.remove('d-none');
+          backEl.classList.add('d-none');
+          flipBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Flip';
+        }} else {{
+          frontEl.classList.add('d-none');
+          backEl.classList.remove('d-none');
+          flipBtn.innerHTML = '<i class="bi bi-arrow-repeat"></i> Back';
+        }}
+        isFlipped = !isFlipped;
+      }}
+      
+      function shuffle() {{
+        for (let i = cards.length - 1; i > 0; i--) {{
+          const j = Math.floor(Math.random() * (i + 1));
+          [cards[i], cards[j]] = [cards[j], cards[i]];
+        }}
+        currentIndex = 0;
+        updateCard();
+      }}
+      
+      function escapeHtml(text) {{
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+      }}
+      
+      // Event listeners
+      prevBtn.addEventListener('click', () => {{
+        if (currentIndex > 0) {{
+          currentIndex--;
+          updateCard();
+        }}
+      }});
+      
+      nextBtn.addEventListener('click', () => {{
+        if (currentIndex < cards.length - 1) {{
+          currentIndex++;
+          updateCard();
+        }}
+      }});
+      
+      flipBtn.addEventListener('click', flip);
+      shuffleBtn.addEventListener('click', shuffle);
+      
+      // Keyboard support
+      document.addEventListener('keydown', (e) => {{
+        if (e.code === 'Space') {{
+          e.preventDefault();
+          flip();
+        }} else if (e.code === 'ArrowLeft' && currentIndex > 0) {{
+          currentIndex--;
+          updateCard();
+        }} else if (e.code === 'ArrowRight' && currentIndex < cards.length - 1) {{
+          currentIndex++;
+          updateCard();
+        }}
+      }});
+      
+      // Domain buttons
+      document.querySelectorAll('.domain-btn').forEach(btn => {{
+        btn.addEventListener('click', function() {{
+          document.querySelectorAll('.domain-btn').forEach(b => b.classList.remove('active'));
+          this.classList.add('active');
+          const domain = this.dataset.value;
+          window.location.href = `/flashcards?domain=${{encodeURIComponent(domain)}}`;
+        }});
+      }});
+      
+      // Initialize
+      updateCard();
+    }})();
+    </script>
+    """
+    
+    _log_event(_user_id(), "flashcards.view", {"domain": domain_filter, "count": len(cards)})
+    return base_layout("Flashcards", content)
+
+# ====================================================================================================
+# ROUTES - QUIZ & MOCK EXAMS
+# ====================================================================================================
+
+def _render_question_picker(title: str, action_url: str, default_count: int = 20):
+    """Render question picker interface"""
+    content = f"""
+    <div class="container" style="max-width: 960px;">
+      <div class="card shadow-sm my-4">
+        <div class="card-header">
+          <h4 class="mb-0">{html.escape(title)}</h4>
+          <div class="text-muted small">Select domains and number of questions for your practice session.</div>
+        </div>
+        <div class="card-body">
+          <form method="post" action="{html.escape(action_url)}">
+            <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+            
+            <div class="mb-4">
+              <label class="form-label">Domain Selection</label>
+              {domain_buttons_html("all", "domain")}
+              <div class="form-text">Select a specific domain or choose "All Domains" for mixed practice following CPP exam weightings.</div>
+            </div>
+
+            <div class="mb-4">
+              <label class="form-label">Number of Questions</label>
+              <input type="number" class="form-control" name="count" min="5" max="500" value="{default_count}" style="max-width: 200px;">
+              <div class="form-text">Choose between 5-500 questions for your session.</div>
+            </div>
+
+            <div class="d-flex gap-2">
+              <button type="submit" class="btn btn-primary">Start {html.escape(title)}</button>
+              <a href="/" class="btn btn-outline-secondary">Cancel</a>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+    
+    <script>
+      document.querySelectorAll('.domain-btn').forEach(btn => {{
+        btn.addEventListener('click', function() {{
+          document.querySelectorAll('.domain-btn').forEach(b => b.classList.remove('active'));
+          this.classList.add('active');
+          document.getElementById('domain_val').value = this.dataset.value;
+        }});
+      }});
+    </script>
+    """
+    return base_layout(title, content)
+
+def _render_question_session(title: str, questions: List[Dict[str, Any]]):
+    """Render question practice session"""
+    if not questions:
+        content = """
+        <div class="container">
+          <div class="alert alert-warning">
+            No questions available for the selected criteria. Please try different settings or 
+            <a href="/admin/generate" class="alert-link">generate more content</a>.
+          </div>
+          <a href="/" class="btn btn-primary">Back to Home</a>
+        </div>
+        """
+        return base_layout(title, content)
+    
+    questions_json = json.dumps([{
+        "id": q.get("id"),
+        "type": q.get("type"),
+        "domain": q.get("domain"),
+        "stem": q.get("stem"),
+        "choices": q.get("choices", []),
+        "options": q.get("options", []),
+        "answer": q.get("answer"),
+        "answers": q.get("answers", []),
+        "explanation": q.get("explanation", "")
+    } for q in questions], ensure_ascii=False)
+    
+    content = f"""
+    <div class="container" style="max-width: 960px;">
+      <div class="card shadow-sm my-4">
+        <div class="card-header d-flex justify-content-between align-items-center">
+          <div>
+            <h4 class="mb-0">{html.escape(title)}</h4>
+            <div class="text-muted small" id="progress-text">Question 1 of {len(questions)}</div>
+          </div>
+          <div class="text-muted small">Use ← → keys to navigate</div>
+        </div>
+        <div class="card-body">
+          <div id="question-container" style="min-height: 300px;">
+            <!-- Question content will be inserted here -->
+          </div>
+          
+          <div class="d-flex justify-content-between align-items-center mt-4">
+            <button id="prev-btn" class="btn btn-outline-secondary" disabled>
+              <i class="bi bi-arrow-left"></i> Previous
+            </button>
+            
+            <div class="d-flex gap-2">
+              <button id="reveal-btn" class="btn btn-success">Show Answer</button>
+              <button id="next-btn" class="btn btn-primary">
+                Next <i class="bi bi-arrow-right"></i>
+              </button>
+            </div>
+          </div>
+          
+          <div id="answer-section" class="mt-3 d-none">
+            <div class="border-top pt-3">
+              <div id="answer-content"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    
+    <script>
+    (function() {{
+      const questions = {questions_json};
+      let currentIndex = 0;
+      let answerRevealed = false;
+      
+      const questionContainer = document.getElementById('question-container');
+      const progressText = document.getElementById('progress-text');
+      const prevBtn = document.getElementById('prev-btn');
+      const nextBtn = document.getElementById('next-btn');
+      const revealBtn = document.getElementById('reveal-btn');
+      const answerSection = document.getElementById('answer-section');
+      const answerContent = document.getElementById('answer-content');
+      
+      function renderQuestion() {{
+        const q = questions[currentIndex];
+        let html = '';
+        
+        // Question stem
+        html += `<div class="mb-4"><h5>${{escapeHtml(q.stem)}}</h5>`;
+        html += `<div class="text-muted small">${{escapeHtml(q.domain)}} • ${{q.type.toUpperCase()}}</div></div>`;
+        
+        // Answer choices based on type
+        if (q.type === 'mc') {{
+          html += '<div class="mb-3">';
+          q.choices.forEach((choice, i) => {{
+            const letter = String.fromCharCode(65 + i);
+            html += `<div class="mb-2"><strong>${{letter}}.</strong> ${{escapeHtml(choice)}}</div>`;
+          }});
+          html += '</div>';
+        }} else if (q.type === 'tf') {{
+          html += '<div class="mb-3">';
+          html += '<div class="mb-2"><strong>A.</strong> True</div>';
+          html += '<div class="mb-2"><strong>B.</strong> False</div>';
+          html += '</div>';
+        }} else if (q.type === 'scenario') {{
+          html += '<div class="mb-3"><em>Select all that apply:</em></div>';
+          html += '<div class="mb-3">';
+          q.options.forEach((option, i) => {{
+            const letter = String.fromCharCode(65 + i);
+            html += `<div class="mb-2"><strong>${{letter}}.</strong> ${{escapeHtml(option)}}</div>`;
+          }});
+          html += '</div>';
+        }}
+        
+        questionContainer.innerHTML = html;
+        progressText.textContent = `Question ${{currentIndex + 1}} of ${{questions.length}}`;
+        
+        // Update buttons
+        prevBtn.disabled = currentIndex === 0;
+        nextBtn.disabled = currentIndex === questions.length - 1;
+        
+        // Reset answer state
+        answerRevealed = false;
+        answerSection.classList.add('d-none');
+        revealBtn.textContent = 'Show Answer';
+        revealBtn.classList.remove('btn-outline-success');
+        revealBtn.classList.add('btn-success');
+      }}
+      
+      function revealAnswer() {{
+        const q = questions[currentIndex];
+        let answerHtml = '';
+        
+        if (q.type === 'mc') {{
+          const correctLetter = String.fromCharCode(65 + q.answer);
+          answerHtml = `<div class="alert alert-success"><strong>Correct Answer: ${{correctLetter}}</strong></div>`;
+        }} else if (q.type === 'tf') {{
+          const correct = q.answer ? 'True' : 'False';
+          answerHtml = `<div class="alert alert-success"><strong>Correct Answer: ${{correct}}</strong></div>`;
+        }} else if (q.type === 'scenario') {{
+          const correctLetters = q.answers.map(i => String.fromCharCode(65 + i)).join(', ');
+          answerHtml = `<div class="alert alert-success"><strong>Correct Answers: ${{correctLetters}}</strong></div>`;
+        }}
+        
+        if (q.explanation) {{
+          answerHtml += `<div class="mt-2"><strong>Explanation:</strong> ${{escapeHtml(q.explanation)}}</div>`;
+        }}
+        
+        answerContent.innerHTML = answerHtml;
+        answerSection.classList.remove('d-none');
+        answerRevealed = true;
+        
+        revealBtn.textContent = 'Answer Shown';
+        revealBtn.classList.remove('btn-success');
+        revealBtn.classList.add('btn-outline-success');
+      }}
+      
+      function escapeHtml(text) {{
+        const div = document.createElement('div');
+        div.textContent = text || '';
+        return div.innerHTML;
+      }}
+      
+      // Event listeners
+      prevBtn.addEventListener('click', () => {{
+        if (currentIndex > 0) {{
+          currentIndex--;
+          renderQuestion();
+        }}
+      }});
+      
+      nextBtn.addEventListener('click', () => {{
+        if (currentIndex < questions.length - 1) {{
+          currentIndex++;
+          renderQuestion();
+        }}
+      }});
+      
+      revealBtn.addEventListener('click', () => {{
+        if (!answerRevealed) {{
+          revealAnswer();
+        }}
+      }});
+      
+      // Keyboard navigation
+      document.addEventListener('keydown', (e) => {{
+        if (e.code === 'ArrowLeft' && currentIndex > 0) {{
+          currentIndex--;
+          renderQuestion();
+        }} else if (e.code === 'ArrowRight' && currentIndex < questions.length - 1) {{
+          currentIndex++;
+          renderQuestion();
+        }} else if (e.code === 'Space' && !answerRevealed) {{
+          e.preventDefault();
+          revealAnswer();
+        }}
+      }});
+      
+      // Initialize
+      renderQuestion();
+    }})();
+    </script>
+    """
+    
+    return base_layout(title, content)
+
+@app.route("/quiz", methods=["GET"])
+@login_required
+def quiz_picker():
+    """Quiz setup page"""
+    return _render_question_picker("Practice Quiz", "/quiz/start", 20)
+
+@app.route("/quiz/start", methods=["POST"])
+@login_required
+def quiz_start():
+    """Start quiz session"""
     if not _csrf_ok():
         abort(403)
-    nxt = _safe_next(request.form.get("next") or "/tutor")
-    agreed = (request.form.get("agree") == "on")
-    if not agreed:
-        return redirect(url_for("sec8_welcome", next=nxt), code=302)
+    
+    domain = request.form.get("domain", "all")
+    count = int(request.form.get("count", 20))
+    count = max(5, min(500, count))  # Clamp to reasonable range
+    
+    # Select questions
+    domains = [] if domain == "all" else [f"Domain {domain[-1]}"] if domain.startswith("domain") else [domain]
+    questions = select_questions(domains=domains, count=count, user_id=_user_id())
+    
+    # Log attempt
+    _log_event(_user_id(), "quiz.start", {
+        "domain": domain,
+        "count": count,
+        "actual_count": len(questions)
+    })
+    
+    return _render_question_session("Practice Quiz", questions)
 
-    # Persist acceptance in session and (optionally) user store
-    session["agreed_terms"] = True
+@app.route("/mock", methods=["GET"])
+@login_required
+def mock_picker():
+    """Mock exam setup page"""
+    return _render_question_picker("Mock Exam", "/mock/start", 225)
+
+@app.route("/mock/start", methods=["POST"])
+@login_required
+def mock_start():
+    """Start mock exam session"""
+    if not _csrf_ok():
+        abort(403)
+    
+    domain = request.form.get("domain", "all")
+    count = int(request.form.get("count", 225))
+    count = max(10, min(500, count))  # Clamp to reasonable range
+    
+    # Select questions
+    domains = [] if domain == "all" else [f"Domain {domain[-1]}"] if domain.startswith("domain") else [domain]
+    questions = select_questions(domains=domains, count=count, user_id=_user_id())
+    
+    # Log attempt
+    _log_event(_user_id(), "mock.start", {
+        "domain": domain,
+        "count": count,
+        "actual_count": len(questions)
+    })
+    
+    return _render_question_session("Mock Exam", questions)
+
+# ====================================================================================================
+# ROUTES - AI TUTOR
+# ====================================================================================================
+
+@app.route("/tutor", methods=["GET"])
+@login_required
+def tutor():
+    """AI Tutor interface"""
+    offline_note = ""
+    if not _ai_enabled():
+        offline_note = """
+        <div class="alert alert-warning mb-3">
+          <i class="bi bi-wifi-off me-1"></i>
+          Tutor is in offline mode (no API key configured). 
+          You can still use Flashcards, Quiz, and Mock Exam.
+        </div>
+        """
+    
+    # Suggested questions for quick access
+    suggestions = [
+        "Explain the three lines of defense in corporate risk governance.",
+        "How do you calculate risk using likelihood and impact? Give an example.",
+        "What are common CPTED principles and how do they reduce incidents?",
+        "Outline an incident response plan for a data breach at HQ.",
+        "What is the purpose of due diligence in vendor management?",
+        "Compare proprietary vs. contract security forces—pros and cons.",
+        "What is a vulnerability assessment vs. a threat assessment?",
+        "How should evidence be preserved during an internal investigation?",
+        "What are common access control models (DAC, MAC, RBAC)?",
+        "Define business continuity vs. disaster recovery with examples."
+    ]
+    
+    suggestions_html = ""
+    for i, suggestion in enumerate(suggestions[:6]):  # Show first 6
+        suggestions_html += f"""
+        <button type="button" class="btn btn-outline-secondary btn-sm mb-2 suggestion-btn" 
+                style="text-align: left; white-space: normal;" 
+                data-question="{html.escape(suggestion)}">
+          {html.escape(suggestion)}
+        </button>
+        """
+    
+    content = f"""
+    <div class="container">
+      <div class="mb-3">
+        <h1 class="h4 mb-1"><i class="bi bi-chat-dots"></i> AI Tutor</h1>
+        <p class="text-muted mb-0">
+          Get explanations and guidance on CPP exam topics. Click a suggested question or ask your own.
+        </p>
+      </div>
+
+      {offline_note}
+
+      <div class="row g-3">
+        <div class="col-lg-8">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <div id="chat-log" class="mb-3" style="min-height: 200px; max-height: 600px; overflow-y: auto;">
+                <div class="text-muted small">Ask a question to get started, or click a suggestion on the right.</div>
+              </div>
+              
+              <form id="tutor-form" method="post" action="/tutor/ask">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <div class="mb-2">
+                  <label for="question" class="form-label">Your Question</label>
+                  <textarea id="question" name="question" class="form-control" rows="3" 
+                            placeholder="e.g., How should I structure a workplace violence prevention program?"></textarea>
+                </div>
+                <div class="d-flex gap-2 align-items-center">
+                  <button id="ask-btn" type="submit" class="btn btn-primary">
+                    <i class="bi bi-send"></i> Ask Tutor
+                  </button>
+                  <div id="loading" class="text-muted small d-none">
+                    <span class="spinner-border spinner-border-sm me-1"></span> Thinking...
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+
+        <div class="col-lg-4">
+          <div class="card shadow-sm">
+            <div class="card-body">
+              <h2 class="h6 mb-3"><i class="bi bi-lightbulb"></i> Suggested Questions</h2>
+              <div class="d-grid gap-1">
+                {suggestions_html}
+              </div>
+              <div class="text-muted small mt-2">
+                Click any suggestion to ask automatically.
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {{
+        const form = document.getElementById('tutor-form');
+        const questionInput = document.getElementById('question');
+        const askBtn = document.getElementById('ask-btn');
+        const loading = document.getElementById('loading');
+        const chatLog = document.getElementById('chat-log');
+        
+        // Handle suggestion clicks
+        document.querySelectorAll('.suggestion-btn').forEach(btn => {{
+          btn.addEventListener('click', function() {{
+            const question = this.dataset.question;
+            questionInput.value = question;
+            submitQuestion();
+          }});
+        }});
+        
+        // Handle form submission
+        form.addEventListener('submit', function(e) {{
+          e.preventDefault();
+          submitQuestion();
+        }});
+        
+        async function submitQuestion() {{
+          const question = questionInput.value.trim();
+          if (!question) return;
+          
+          // Show loading state
+          askBtn.disabled = true;
+          loading.classList.remove('d-none');
+          
+          // Add user message to chat
+          addMessage('You', question, 'user');
+          
+          try {{
+            const formData = new FormData(form);
+            const response = await fetch('/tutor/ask', {{
+              method: 'POST',
+              body: formData
+            }});
+            
+            const data = await response.json();
+            
+            if (data.ok) {{
+              addMessage('Tutor', data.answer, 'assistant');
+            }} else {{
+              addMessage('System', data.error || 'An error occurred. Please try again.', 'error');
+            }}
+            
+            questionInput.value = '';
+          }} catch (error) {{
+            addMessage('System', 'Failed to get response. Please check your connection and try again.', 'error');
+          }} finally {{
+            askBtn.disabled = false;
+            loading.classList.add('d-none');
+          }}
+        }}
+        
+        function addMessage(sender, content, type) {{
+          const messageDiv = document.createElement('div');
+          messageDiv.className = 'mb-3 p-3 border rounded';
+          
+          if (type === 'user') {{
+            messageDiv.classList.add('bg-light');
+          }} else if (type === 'error') {{
+            messageDiv.classList.add('bg-danger', 'bg-opacity-10', 'border-danger');
+          }}
+          
+          messageDiv.innerHTML = `
+            <div class="fw-bold mb-1">${{escapeHtml(sender)}}</div>
+            <div>${{formatContent(content)}}</div>
+          `;
+          
+          chatLog.appendChild(messageDiv);
+          chatLog.scrollTop = chatLog.scrollHeight;
+        }}
+        
+        function formatContent(content) {{
+          // Simple formatting - convert newlines to breaks
+          return escapeHtml(content).replace(/\\n/g, '<br>');
+        }}
+        
+        function escapeHtml(text) {{
+          const div = document.createElement('div');
+          div.textContent = text;
+          return div.innerHTML;
+        }}
+      }});
+    </script>
+    """
+    
+    _log_event(_user_id(), "tutor.view")
+    return base_layout("AI Tutor", content)
+
+@app.route("/tutor/ask", methods=["POST"])
+@login_required
+def tutor_ask():
+    """Process tutor question"""
+    if not _csrf_ok():
+        return jsonify({"ok": False, "error": "Invalid request"}), 403
+    
+    question = (request.form.get("question") or "").strip()
+    if not question:
+        return jsonify({"ok": False, "error": "Please provide a question"}), 400
+    
+    # Rate limiting
+    rate_key = f"tutor:{_user_id()}"
+    if not _rate_ok(rate_key, per_sec=0.1):  # Max 1 request per 10 seconds
+        return jsonify({"ok": False, "error": "Please wait before asking another question"}), 429
+    
+    # Get AI response
+    ok, answer = _openai_chat_completion(question)
+    
+    # Log the interaction
+    _log_event(_user_id(), "tutor.ask", {
+        "question_length": len(question),
+        "success": ok
+    })
+    
+    _append_attempt(_user_id(), "tutor", question=question, answer=answer if ok else None)
+    
+    return jsonify({
+        "ok": ok,
+        "answer": answer,
+        "question": question
+    })
+
+# ====================================================================================================
+# ROUTES - PROGRESS & ADMIN
+# ====================================================================================================
+
+@app.route("/progress")
+@login_required
+def progress():
+    """User progress dashboard"""
+    attempts = _load_json("attempts.json", [])
+    user_attempts = [a for a in attempts if a.get("user_id") == _user_id()]
+    
+    # Group by mode
+    by_mode = {}
+    for attempt in user_attempts[-50:]:  # Last 50 attempts
+        mode = attempt.get("mode", "unknown")
+        if mode not in by_mode:
+            by_mode[mode] = []
+        by_mode[mode].append(attempt)
+    
+    content = f"""
+    <div class="container">
+      <h1 class="h4 mb-3"><i class="bi bi-graph-up"></i> Your Progress</h1>
+      
+      <div class="row g-3 mb-4">
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(user_attempts)}</h5>
+              <p class="card-text text-muted">Total Sessions</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(by_mode.get('quiz', []))}</h5>
+              <p class="card-text text-muted">Quiz Sessions</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(by_mode.get('mock', []))}</h5>
+              <p class="card-text text-muted">Mock Exams</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(by_mode.get('tutor', []))}</h5>
+              <p class="card-text text-muted">Tutor Questions</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="card">
+        <div class="card-header">
+          <h5 class="mb-0">Recent Activity</h5>
+        </div>
+        <div class="card-body">
+          {"<div class='text-muted'>No activity yet. Start studying to track your progress!</div>" if not user_attempts else ""}
+          {"".join([f'''
+          <div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+            <div>
+              <strong>{attempt.get("mode", "").title()}</strong>
+              {f" - {attempt.get('domain', '')}" if attempt.get('domain') else ""}
+              {f" - {attempt.get('question', '')[:60]}..." if attempt.get('question') and len(attempt.get('question', '')) > 60 else f" - {attempt.get('question', '')}" if attempt.get('question') else ""}
+            </div>
+            <div class="text-muted small">
+              {attempt.get("ts", "").split("T")[0] if attempt.get("ts") else ""}
+            </div>
+          </div>
+          ''' for attempt in user_attempts[-10:]])}
+        </div>
+      </div>
+    </div>
+    """
+    
+    return base_layout("Progress", content)
+
+@app.route("/admin", methods=["GET", "POST"])
+def admin():
+    """Admin panel for content management"""
+    if request.method == "POST":
+        # Admin login
+        password = request.form.get("password", "")
+        if ADMIN_PASSWORD and password == ADMIN_PASSWORD:
+            session["admin_ok"] = True
+            return redirect("/admin")
+        else:
+            content = """
+            <div class="container" style="max-width: 480px;">
+              <div class="alert alert-danger">Invalid admin password.</div>
+              <a href="/admin" class="btn btn-primary">Try Again</a>
+            </div>
+            """
+            return base_layout("Admin Access Denied", content)
+    
+    # Check admin access
+    if not is_admin():
+        if not ADMIN_PASSWORD:
+            content = """
+            <div class="container" style="max-width: 480px;">
+              <div class="alert alert-warning">
+                Admin access is not configured. Set ADMIN_PASSWORD environment variable.
+              </div>
+              <a href="/" class="btn btn-primary">Back to Home</a>
+            </div>
+            """
+            return base_layout("Admin Not Available", content)
+        
+        # Show login form
+        content = f"""
+        <div class="container" style="max-width: 480px;">
+          <div class="card shadow-sm">
+            <div class="card-header">
+              <h4 class="mb-0">Admin Access</h4>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <div class="mb-3">
+                  <label class="form-label">Admin Password</label>
+                  <input type="password" name="password" class="form-control" required/>
+                </div>
+                <button type="submit" class="btn btn-primary">Access Admin Panel</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Admin Login", content)
+    
+    # Admin dashboard
+    questions = get_all_questions()
+    flashcards = get_all_flashcards()
+    users = _users_all()
+    
+    content = f"""
+    <div class="container">
+      <h1 class="h4 mb-3"><i class="bi bi-gear"></i> Admin Panel</h1>
+      
+      <div class="row g-3 mb-4">
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(questions)}</h5>
+              <p class="card-text text-muted">Questions in Bank</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(flashcards)}</h5>
+              <p class="card-text text-muted">Flashcards in Bank</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">{len(users)}</h5>
+              <p class="card-text text-muted">Registered Users</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-3">
+          <div class="card text-center">
+            <div class="card-body">
+              <h5 class="card-title">v{APP_VERSION}</h5>
+              <p class="card-text text-muted">App Version</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header">
+              <h5 class="mb-0">Content Management</h5>
+            </div>
+            <div class="card-body">
+              <div class="d-grid gap-2">
+                <a href="/admin/generate" class="btn btn-primary">Generate Content</a>
+                <a href="/admin/export" class="btn btn-outline-secondary">Export Data</a>
+                <a href="/admin/stats" class="btn btn-outline-info">View Statistics</a>
+              </div>
+            </div>
+          </div>
+        </div>
+        
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header">
+              <h5 class="mb-0">System Health</h5>
+            </div>
+            <div class="card-body">
+              <div class="mb-2">
+                <span class="badge bg-{'success' if _ai_enabled() else 'warning'}">
+                  AI Tutor: {'Online' if _ai_enabled() else 'Offline'}
+                </span>
+              </div>
+              <div class="mb-2">
+                <span class="badge bg-success">Data Directory: OK</span>
+              </div>
+              <div class="mb-2">
+                <span class="badge bg-{'success' if len(questions) > 50 else 'warning'}">
+                  Content Bank: {'Sufficient' if len(questions) > 50 else 'Low'}
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="mt-3">
+        <a href="/admin/logout" class="btn btn-outline-danger">Logout Admin</a>
+        <a href="/" class="btn btn-outline-secondary">Back to Home</a>
+      </div>
+    </div>
+    """
+    
+    return base_layout("Admin Panel", content)
+
+@app.route("/admin/generate", methods=["GET", "POST"])
+def admin_generate():
+    """Generate content"""
+    if not is_admin():
+        return redirect("/admin")
+    
+    if request.method == "POST":
+        action = request.form.get("action")
+        
+        if action == "questions":
+            count = int(request.form.get("count", 100))
+            new_questions = CPPContentGenerator.generate_questions(count)
+            added, skipped = ingest_questions(new_questions, source="admin_generated")
+            
+            content = f"""
+            <div class="container">
+              <div class="alert alert-success">
+                Generated {added} new questions ({skipped} skipped as duplicates)
+              </div>
+              <a href="/admin/generate" class="btn btn-primary">Generate More</a>
+              <a href="/admin" class="btn btn-outline-secondary">Back to Admin</a>
+            </div>
+            """
+            return base_layout("Content Generated", content)
+        
+        elif action == "flashcards":
+            count = int(request.form.get("count", 50))
+            new_flashcards = CPPContentGenerator.generate_flashcards(count)
+            added, skipped = ingest_flashcards(new_flashcards, source="admin_generated")
+            
+            content = f"""
+            <div class="container">
+              <div class="alert alert-success">
+                Generated {added} new flashcards ({skipped} skipped as duplicates)
+              </div>
+              <a href="/admin/generate" class="btn btn-primary">Generate More</a>
+              <a href="/admin" class="btn btn-outline-secondary">Back to Admin</a>
+            </div>
+            """
+            return base_layout("Content Generated", content)
+    
+    # Show generation form
+    content = f"""
+    <div class="container">
+      <h1 class="h4 mb-3">Generate Content</h1>
+      
+      <div class="row g-3">
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header">
+              <h5 class="mb-0">Generate Questions</h5>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="action" value="questions"/>
+                <div class="mb-3">
+                  <label class="form-label">Number of Questions</label>
+                  <input type="number" name="count" class="form-control" value="100" min="10" max="1000"/>
+                  <div class="form-text">Questions will be distributed across CPP domains according to exam weightings.</div>
+                </div>
+                <button type="submit" class="btn btn-primary">Generate Questions</button>
+              </form>
+            </div>
+          </div>
+        </div>
+        
+        <div class="col-md-6">
+          <div class="card">
+            <div class="card-header">
+              <h5 class="mb-0">Generate Flashcards</h5>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="action" value="flashcards"/>
+                <div class="mb-3">
+                  <label class="form-label">Number of Flashcards</label>
+                  <input type="number" name="count" class="form-control" value="50" min="10" max="500"/>
+                  <div class="form-text">Flashcards will be distributed across CPP domains according to exam weightings.</div>
+                </div>
+                <button type="submit" class="btn btn-primary">Generate Flashcards</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="mt-3">
+        <a href="/admin" class="btn btn-outline-secondary">Back to Admin</a>
+      </div>
+    </div>
+    """
+    
+    return base_layout("Generate Content", content)
+
+@app.route("/admin/logout")
+def admin_logout():
+    """Admin logout"""
+    session.pop("admin_ok", None)
+    return redirect("/admin")
+
+# ====================================================================================================
+# ROUTES - TERMS & MISC
+# ====================================================================================================
+
+@app.route("/terms")
+def terms():
+    """Terms and conditions page"""
+    content = """
+    <div class="container" style="max-width:960px;">
+      <h1 class="mb-2">CPP_Test_Prep — Terms and Conditions</h1>
+      <div class="text-muted mb-4">Effective Date: 2025-09-04</div>
+
+      <div class="alert alert-warning mb-4">
+        <strong>Important Disclaimer:</strong> This program is not affiliated with or approved by ASIS International. 
+        It uses only open-source and publicly available study materials. No ASIS-protected content is included.
+      </div>
+
+      <ol class="lh-base" style="padding-left: 1.2rem;">
+        <li id="t1"><strong>Who we are</strong><br>
+          CPP_Test_Prep is a study platform owned and operated by Strategic Security Advisors, LLC ("SSA," "we," "us," "our").
+          Contact: <a href="mailto:cpptestprep@gmail.com">cpptestprep@gmail.com</a>.
+        </li>
+
+        <li id="t2" class="mt-3"><strong>What we do and what we do not do</strong><br>
+          CPP_Test_Prep provides study tools for candidates preparing for the ASIS Certified Protection Professional examination.
+          We are not affiliated with, endorsed by, or sponsored by ASIS International. We do not use or reproduce ASIS
+          International protected, proprietary, or member-only materials. The platform is for education and training. It does not
+          guarantee that you will pass any exam or achieve any certification.
+        </li>
+
+        <li id="t3" class="mt-3"><strong>Eligibility and accounts</strong><br>
+          You must be at least 18 and able to form a binding contract. Keep your login secure and notify us of any unauthorized use.
+          You are responsible for activity on your account.
+        </li>
+
+        <li id="t4" class="mt-3"><strong>Your license to use CPP_Test_Prep</strong><br>
+          We grant you a limited, personal, non-exclusive, non-transferable license to access and use the platform for your own study.
+          You may not resell, sublicense, share, copy at scale, scrape, or otherwise exploit the content or software.
+        </li>
+
+        <li id="t5" class="mt-3"><strong>Intellectual property</strong><br>
+          All platform content that we create or license, including questions, explanations, flashcards, text, code, and UI,
+          belongs to SSA or its licensors. All rights reserved. Any trademarks, service marks, and logos displayed are the
+          property of their respective owners. "ASIS," "CPP," and other marks are the property of ASIS International. Use of the
+          platform does not grant you any ownership in our IP.
+        </li>
+      </ol>
+
+      <div class="mt-4">
+        <a class="btn btn-primary" href="/">Back to Home</a>
+      </div>
+    </div>
+    """
+    return base_layout("Terms & Conditions", content)
+
+@app.route("/healthz")
+def health_check():
+    """Health check endpoint"""
+    return jsonify({
+        "service": "cpp-exam-prep",
+        "version": APP_VERSION,
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat() + "Z"
+    })
+
+# ====================================================================================================
+# APPLICATION INITIALIZATION
+# ====================================================================================================
+
+def initialize_app():
+    """Initialize application with sample data"""
     try:
-        if "_user_id" in globals() and _user_id():
-            # Optional: record acceptance metadata on the user
-            _update_user(_user_id(), {
-                "terms_accept_version": os.getenv("TERMS_EFFECTIVE_DATE", "unset"),
-                "terms_accept_ts": datetime.utcnow().isoformat() + "Z"
-            })
-    except Exception:
-        pass
+        # Ensure data directories exist
+        for path in [DATA_DIR, BANK_DIR]:
+            os.makedirs(path, exist_ok=True)
+        
+        # Initialize data files
+        for name, default in [
+            ("users.json", []),
+            ("events.json", []),
+            ("attempts.json", []),
+        ]:
+            if not os.path.exists(_path(name)):
+                _save_json(name, default)
+        
+        # Ensure weights file exists
+        if not os.path.exists(_WEIGHTS_FILE):
+            get_domain_weights()  # This will create the file
+        
+        # Seed content if needed
+        ensure_content_seeded()
+        
+        logger.info("Application initialized successfully")
+        
+    except Exception as e:
+        logger.error("Failed to initialize application: %s", e)
+        raise
 
-    # Send the user onward
-    return redirect(nxt, code=302)
+# Initialize on import
+initialize_app()
 
-# Root redirect: gate new visitors through /welcome until they’ve agreed.
-# NOTE: You also have a Section 1 "/" route. This one will take precedence if defined later.
-@app.get("/", endpoint="sec8_root_redirect")
-def root_redirect():
-    nxt = _safe_next(request.args.get("next") or "/tutor")
-    if _has_agreed():
-        return redirect(nxt, code=302)
-    return redirect(url_for("sec8_welcome", next=nxt), code=302)
+# ====================================================================================================
+# MAIN ENTRY POINT
+# ====================================================================================================
 
-### END OF SECTION 8/8 — WELCOME GATE (FIXED WITH FOOTER FALLBACK + CSRF)
-
-
-
-
-
-
-
-
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=DEBUG
+    )
