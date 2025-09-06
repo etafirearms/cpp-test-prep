@@ -2219,16 +2219,18 @@ def to_ui_question(q: Dict[str, Any]) -> Dict[str, Any]:
 
 ### END OF SECTION 7/8 — SELECTION ENGINE FOR QUIZ/MOCK (NEW)
 
-### START OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
-
-# Replace your current Section 8/8 completely with this block.
-# It keeps the same behavior (redirect gating, login/agree flow),
-# and now links to /terms and uses the footer helper.
+### START OF SECTION 8/8 — WELCOME GATE (FIXED WITH FOOTER FALLBACK + CSRF)
 
 from urllib.parse import urlparse, urljoin
-from flask import request, session, redirect, abort
 
-# Safe-next guard (define if missing)
+# ---------- Safe fallback for footer helper ----------
+# If Section 2/8 (which defines _with_footer) isn’t loaded yet for any reason,
+# define a harmless no-op so routes never 500.
+if "_with_footer" not in globals():
+    def _with_footer(inner_html: str) -> str:
+        return inner_html
+
+# ---------- Safe-next guard ----------
 if "_safe_next" not in globals():
     def _safe_next(nxt: str, fallback: str = "/") -> str:
         try:
@@ -2242,19 +2244,18 @@ if "_safe_next" not in globals():
         except Exception:
             return fallback
 
-# Helper: has agreed?
+# ---------- Agreement state ----------
 def _has_agreed() -> bool:
     try:
         return bool(session.get("agreed_terms"))
     except Exception:
         return False
 
-# GET /welcome — shown to everyone arriving unauthenticated or not-yet-agreed
-@app.get("/welcome")
+# ---------- Routes ----------
+@app.get("/welcome", endpoint="sec8_welcome")
 def sec8_welcome():
-    nxt = _safe_next(request.args.get("next") or "/")
-    # Build page
-    content = """
+    nxt = _safe_next(request.args.get("next") or "/tutor")
+    body = render_template_string("""
     <div class="container" style="max-width: 960px;">
       <div class="row my-4">
         <div class="col-12 col-lg-8">
@@ -2273,7 +2274,8 @@ def sec8_welcome():
               </ol>
 
               <form method="post" action="/welcome/accept" class="mt-3">
-                <input type="hidden" name="next" value="{nxt}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}"/>
+                <input type="hidden" name="next" value="{{ nxt }}"/>
                 <div class="form-check mb-3">
                   <input class="form-check-input" type="checkbox" value="on" id="agree" name="agree" required>
                   <label class="form-check-label" for="agree">
@@ -2282,8 +2284,8 @@ def sec8_welcome():
                 </div>
 
                 <div class="d-flex gap-2">
-                  <a class="btn btn-outline-primary" href="/login?next={nxt}">Sign in</a>
-                  <a class="btn btn-primary" href="/register?next={nxt}">Create account</a>
+                  <a class="btn btn-outline-primary" href="/login?next={{ nxt }}">Sign in</a>
+                  <a class="btn btn-primary" href="/register?next={{ nxt }}">Create account</a>
                   <button type="submit" class="btn btn-success">Continue</button>
                 </div>
               </form>
@@ -2310,63 +2312,43 @@ def sec8_welcome():
         </div>
       </div>
     </div>
-    """.replace("{nxt}", html.escape(nxt, quote=True))
+    """, nxt=nxt, csrf_token=csrf_token)
+    return base_layout("Welcome", _with_footer(body))
 
-    return base_layout("Welcome", _with_footer(content))
-
-# POST /welcome/accept — records acceptance and sends user onward
-@app.post("/welcome/accept")
+@app.post("/welcome/accept", endpoint="sec8_welcome_accept")
 def sec8_welcome_accept():
     if not _csrf_ok():
         abort(403)
-    nxt = _safe_next(request.form.get("next") or "/")
-    agreed = request.form.get("agree") == "on"
+    nxt = _safe_next(request.form.get("next") or "/tutor")
+    agreed = (request.form.get("agree") == "on")
     if not agreed:
-        # Must check the box
         return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
-    # Persist acceptance in session and (optionally) in users.json
+    # Persist acceptance in session and (optionally) user store
     session["agreed_terms"] = True
     try:
         if "_user_id" in globals() and _user_id():
-            # optional: write the acceptance to users.json if your user store exists
-            if "users_store_set_agreed" in globals():
-                users_store_set_agreed(_user_id(), True)
+            # Optional: record acceptance metadata on the user
+            _update_user(_user_id(), {
+                "terms_accept_version": os.getenv("TERMS_EFFECTIVE_DATE", "unset"),
+                "terms_accept_ts": datetime.utcnow().isoformat() + "Z"
+            })
     except Exception:
         pass
 
-    # If not logged in, keep them on Welcome with the sign-in prompt
-    try:
-        if "current_user" in globals() and current_user and getattr(current_user, "is_authenticated", False):
-            return redirect(nxt, code=302)
-    except Exception:
-        # If you don't use flask-login's current_user, just continue
-        pass
+    # Send the user onward
+    return redirect(nxt, code=302)
 
-    return redirect(url_for("sec8_welcome", next=nxt), code=302)
-
-# Root redirect: always gate new visitors through /welcome until both
-#   (a) logged in (if your app requires auth), AND
-#   (b) agreed to the Terms.
-@app.get("/")
+# Root redirect: gate new visitors through /welcome until they’ve agreed.
+# NOTE: You also have a Section 1 "/" route. This one will take precedence if defined later.
+@app.get("/", endpoint="sec8_root_redirect")
 def root_redirect():
-    # If you have public pages, adjust this logic; default is to gate to /welcome.
     nxt = _safe_next(request.args.get("next") or "/tutor")
-    # If already agreed (and optionally logged in), send to Tutor (or intended)
     if _has_agreed():
         return redirect(nxt, code=302)
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
-### END OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
-
-
-
-
-
-
-
-
-
+### END OF SECTION 8/8 — WELCOME GATE (FIXED WITH FOOTER FALLBACK + CSRF)
 
 
 
