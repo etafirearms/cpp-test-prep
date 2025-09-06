@@ -2143,7 +2143,6 @@ def tutor():
         }
         
         function formatContent(content) {
-          // Simple formatting - convert newlines to paragraphs and preserve structure
           return escapeHtml(content)
             .replace(/\n\n/g, '</p><p>')
             .replace(/\n/g, '<br>')
@@ -3423,3 +3422,4 @@ if __name__ == "__main__":
         port=port,
         debug=DEBUG
     )
+
