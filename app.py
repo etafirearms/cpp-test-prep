@@ -1426,28 +1426,27 @@ class CPPContentGenerator:
         questions = domain_questions.get(domain_num, [original_stem])
         if variant_num < len(questions):
             return questions[variant_num]
-        
-        # Fallback
-variations = {
-           1: original_stem.replace("MOST", "BEST").replace("PRIMARY", "MAIN"),
-           2: original_stem.replace("Which", "What").replace("MOST effective", "BEST approach")
-       }
-       return variations.get(variant_num, original_stem)
+    # Fallback variations
+        variations = {
+            1: original_stem.replace("MOST", "BEST").replace("PRIMARY", "MAIN"),
+            2: original_stem.replace("Which", "What").replace("MOST effective", "BEST approach")
+        }
+        return variations.get(variant_num, original_stem)
 
-   @classmethod
-   def _shuffle_choices(cls, choices: List[str], correct_idx: int) -> List[str]:
-       """Shuffle choices while maintaining variety"""
-       shuffled = choices.copy()
-       random.shuffle(shuffled)
-       return shuffled
+    @classmethod
+    def _shuffle_choices(cls, choices: List[str], correct_idx: int) -> List[str]:
+        """Shuffle choices while maintaining variety"""
+        shuffled = choices.copy()
+        random.shuffle(shuffled)
+        return shuffled
 
-   @classmethod
-   def _find_new_answer_index(cls, new_choices: List[str], correct_answer: str) -> int:
-       """Find the index of the correct answer in shuffled choices"""
-       try:
-           return new_choices.index(correct_answer)
-       except ValueError:
-           return 0
+    @classmethod
+    def _find_new_answer_index(cls, new_choices: List[str], correct_answer: str) -> int:
+        """Find the index of the correct answer in shuffled choices"""
+        try:
+            return new_choices.index(correct_answer)
+        except ValueError:
+            return 0
 
    @classmethod
    def generate_sample_flashcards(cls) -> List[Dict[str, Any]]:
@@ -4142,3 +4141,4 @@ if __name__ == "__main__":
        port=port,
        debug=DEBUG
    )
+
