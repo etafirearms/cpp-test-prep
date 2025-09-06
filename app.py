@@ -1,9 +1,6 @@
 # STABILITY: Ensure source is parsed as UTF-8 everywhere (avoids invalid char errors on Render)
 # -*- coding: utf-8 -*-
 
-# STABILITY: Ensure source is parsed as UTF-8 everywhere (avoids invalid char errors on Render)
-# -*- coding: utf-8 -*-
-
 # =========================
 # SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer, Home, Terms redirect)
 # =========================
@@ -2349,6 +2346,7 @@ def root_redirect():
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
 ### END OF SECTION 8/8 — WELCOME GATE (FIXED WITH FOOTER FALLBACK + CSRF)
+
 
 
 
