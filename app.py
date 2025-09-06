@@ -1,8 +1,11 @@
 # STABILITY: Ensure source is parsed as UTF-8 everywhere (avoids invalid char errors on Render)
 # -*- coding: utf-8 -*-
 
+# STABILITY: Ensure source is parsed as UTF-8 everywhere (avoids invalid char errors on Render)
+# -*- coding: utf-8 -*-
+
 # =========================
-# SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer, Home, Terms)
+# SECTION 1/8: Imports, App Config, Utilities, Security, Base Layout (+ Footer, Home, Terms redirect)
 # =========================
 
 # STABILITY: keep imports largely the same; add ProxyFix and g for request logging & proxy headers.
@@ -76,7 +79,7 @@ STRIPE_PUBLISHABLE_KEY = os.environ.get("STRIPE_PUBLISHABLE_KEY", "")
 STRIPE_MONTHLY_PRICE_ID = os.environ.get("STRIPE_MONTHLY_PRICE_ID", "")
 STRIPE_SIXMONTH_PRICE_ID = os.environ.get("STRIPE_SIXMONTH_PRICE_ID", "")
 STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
-# NOTE: STRIPE_SECRET_KEY and stripe import/config live in Section 5.
+# NOTE: STRIPE_SECRET_KEY and stripe import/config live in Section 5 (Billing).
 
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 
@@ -283,7 +286,7 @@ def _log_event(uid: str, name: str, data: dict | None = None):
     })
     _save_json("events.json", evts)
 
-# ---- Canonical Domains ----
+# ---- Canonical Domains (UI slugs preserved; mapping handled later in selection engine)
 DOMAINS = {
     "random": "Random",
     "security-principles": "Security Principles & Practices",
@@ -295,7 +298,7 @@ DOMAINS = {
     "crisis-management": "Crisis Management",
 }
 
-# ---- Domain Buttons helper (shared across sections) ----
+# ---- Domain Buttons helper (shared across sections; do not remove)
 def domain_buttons_html(selected_key="random", field_name="domain"):
     order = ["random","security-principles","business-principles","investigations",
              "personnel-security","physical-security","information-security","crisis-management"]
@@ -313,14 +316,15 @@ def domain_buttons_html(selected_key="random", field_name="domain"):
     )
     return f'<div class="d-flex flex-wrap gap-2">{"".join(b)}</div>{hidden}'
 
-# ---- Global Footer ----
+# ---- Global Footer (single owner)
 def _footer_html():
     # STABILITY: replace © with &copy; to avoid source-encoding issues in some environments.
     return """
     <footer class="mt-5 py-3 border-top text-center small text-muted">
       <div>
-        Educational use only. Not affiliated with ASIS. No legal, safety, or professional advice.
-        Use official sources to verify. No refunds. &copy; CPP-Exam-Prep
+        Educational use only. Not affiliated with ASIS International. No legal, safety, or professional advice.
+        Use official sources to verify. No guarantee of results. &copy; CPP-Exam-Prep
+        &nbsp;•&nbsp;<a class="text-decoration-none" href="/terms">Terms &amp; Conditions</a>
       </div>
     </footer>
     """
@@ -346,18 +350,23 @@ def base_layout(title: str, body_html: str) -> str:
   <nav class="navbar navbar-expand-lg bg-light border-bottom">
     <div class="container">
       <a class="navbar-brand" href="/"><i class="bi bi-shield-lock"></i> CPP Prep</a>
-      <div class="ms-auto d-flex align-items-center gap-3">
-        <a class="text-decoration-none" href="/flashcards">Flashcards</a>
-        <a class="text-decoration-none" href="/progress">Progress</a>
-        <a class="text-decoration-none" href="/usage">Usage</a>
-        <a class="text-decoration-none" href="/billing">Billing</a>
-        <a class="text-decoration-none" href="/tutor">Tutor</a>
-        <a class="text-decoration-none" href="/legal/terms">Terms</a>
-        {% if session.get('uid') %}
-          <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
-        {% else %}
-          <a class="btn btn-outline-primary btn-sm" href="/login">Login</a>
-        {% endif %}
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navContent">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div id="navContent" class="collapse navbar-collapse">
+        <div class="ms-auto d-flex align-items-center gap-3">
+          <a class="text-decoration-none" href="/flashcards">Flashcards</a>
+          <a class="text-decoration-none" href="/progress">Progress</a>
+          <a class="text-decoration-none" href="/usage">Usage</a>
+          <a class="text-decoration-none" href="/billing">Billing</a>
+          <a class="text-decoration-none" href="/tutor">Tutor</a>
+          <a class="text-decoration-none" href="/terms">Terms</a>
+          {% if session.get('uid') %}
+            <a class="btn btn-outline-danger btn-sm" href="/logout">Logout</a>
+          {% else %}
+            <a class="btn btn-outline-primary btn-sm" href="/login">Login</a>
+          {% endif %}
+        </div>
       </div>
     </div>
   </nav>
@@ -374,7 +383,7 @@ def base_layout(title: str, body_html: str) -> str:
     """
     return render_template_string(tpl, title=(title or "CPP Exam Prep"), body_html=body_html, footer=_footer_html())
 
-# ---- Domain weights (for Content Balance; used later) ----
+# ---- Domain weights (for Content Balance; used later)
 DOMAIN_TARGETS = {
     "security-principles": {"total": 198, "MCQ": 99, "TF": 50, "SC": 50},
     "business-principles": {"total": 198, "MCQ": 99, "TF": 50, "SC": 50},
@@ -412,9 +421,10 @@ def init_sample_data():
 init_sample_data()
 
 # ---- Public, unprotected routes owned by Section 1 ----
-# STABILITY: provide real owners for "/" and "/legal/terms" to avoid 404 at root.
+# NOTE: "/" is NOT defined here to avoid conflicts with the Welcome gate (Section 8).
+# We expose /home for the dashboard tiles, and keep /legal/terms as a redirect to /terms.
 
-@app.get("/", endpoint="sec1_home_page")
+@app.get("/home", endpoint="sec1_home_page")
 def sec1_home_page():
     body = """
     <div class="container">
@@ -460,123 +470,95 @@ def sec1_home_page():
           <a class="btn btn-outline-secondary btn-sm" href="/progress"><i class="bi bi-graph-up me-1"></i> Progress</a>
           <a class="btn btn-outline-secondary btn-sm" href="/usage"><i class="bi bi-speedometer2 me-1"></i> Usage</a>
           <a class="btn btn-outline-secondary btn-sm" href="/billing"><i class="bi bi-credit-card me-1"></i> Billing</a>
-          <a class="btn btn-outline-secondary btn-sm" href="/legal/terms"><i class="bi bi-file-earmark-text me-1"></i> Terms</a>
+          <a class="btn btn-outline-secondary btn-sm" href="/terms"><i class="bi bi-file-earmark-text me-1"></i> Terms</a>
         </div>
       </div>
     </div>
     """
     return base_layout("Home", body)
 
-@app.get("/legal/terms", endpoint="sec1_legal_terms")
-def sec1_legal_terms():
-    body = """
-    <div class="container">
-      <div class="py-4">
-        <h1 class="h4 mb-3"><i class="bi bi-file-earmark-text"></i> Terms</h1>
-        <div class="p-3 border rounded-3">
-          <p class="small text-muted mb-2">
-            Educational use only. Not affiliated with ASIS International. This site provides practice
-            content generated from public sources; it does not include actual exam items. No legal,
-            safety, or professional advice. Verify information with official sources.
-          </p>
-          <p class="small text-muted mb-0">
-            Use constitutes acceptance of these terms. No refunds.
-          </p>
-        </div>
-        <a class="btn btn-outline-secondary mt-3" href="/"><i class="bi bi-house me-1"></i> Home</a>
-      </div>
-    </div>
+# Backward-compat: keep /legal/terms but redirect to canonical /terms
+@app.get("/legal/terms", endpoint="sec1_legal_terms_redirect")
+def sec1_legal_terms_redirect():
+    return redirect("/terms", code=302)
+
+# =========================
+# SECTION 2/8: Ops hardening + single /healthz + Terms page + restore utility pages (if missing)
+# =========================
+
+# Ensure we have a boot timestamp for uptime calc
+app.config.setdefault("_BOOT_TS", time.time())
+
+# ---------- Health: single stable /healthz ----------
+def _writable_probe(base_dir: str) -> tuple[bool, str]:
     """
-    return base_layout("Terms", body)
-# ---- Health probe & /healthz (append to end of Section 1/8; do NOT remove anything above) ----
-
-# Service start time (used for uptime)
-_SERVICE_STARTED_AT = time.time()
-
-def _probe_data_dir() -> dict:
-    """Check that DATA_DIR exists and is writable via an atomic write probe."""
-    exists = os.path.isdir(DATA_DIR)
-    writable = False
-    err = ""
-    probe_path = os.path.join(DATA_DIR, ".health_probe.tmp")
+    Try to create, fsync, and delete a tiny probe file inside base_dir.
+    Keep it simple and robust (no rename-needed semantics to avoid FS quirks).
+    """
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(probe_path, "w", encoding="utf-8") as f:
+        os.makedirs(base_dir, exist_ok=True)
+        test_path = os.path.join(base_dir, ".health_probe.tmp")
+        with open(test_path, "w", encoding="utf-8") as f:
             f.write(str(time.time()))
             f.flush()
             os.fsync(f.fileno())
-        os.replace(probe_path, probe_path + ".done")
-        os.remove(probe_path + ".done")
-        writable = True
-    except Exception as e:
-        err = str(e)
+        # best-effort cleanup
         try:
-            # Clean up if partial files exist
-            if os.path.exists(probe_path):
-                os.remove(probe_path)
-            if os.path.exists(probe_path + ".done"):
-                os.remove(probe_path + ".done")
-        except Exception:
+            os.remove(test_path)
+        except FileNotFoundError:
             pass
-    return {
-        "exists": exists,
-        "writable": writable,
-        "error": err,
-    }
+        return True, ""
+    except Exception as e:
+        return False, str(e)
 
-@app.get("/healthz", endpoint="sec1_healthz")
-def sec1_healthz():
+@app.get("/healthz", endpoint="sec2_healthz")
+def sec2_healthz():
     """
-    Lightweight health endpoint for Render.
-    Returns 200 with basic service and filesystem status.
+    Simple, stable health endpoint.
+    - Verifies DATA_DIR exists and is writable (tolerant of FS quirks).
+    - Never does outbound calls.
     """
-    probe = _probe_data_dir()
-    payload = {
-        "service": "cpp-test-prep",
+    exists = os.path.isdir(DATA_DIR)
+    ok, err = _writable_probe(DATA_DIR) if exists else (False, "DATA_DIR missing")
+    if not ok and err:
+        logger.warning("healthz: data_dir writable check failed: %s", err)
+    resp = {
+        "service": "cpp-exam-prep",
         "version": APP_VERSION,
         "debug": bool(DEBUG),
         "staging": bool(IS_STAGING),
-        "started_at": datetime.utcfromtimestamp(_SERVICE_STARTED_AT).isoformat() + "Z",
-        "uptime_seconds": int(time.time() - _SERVICE_STARTED_AT),
+        "started_at": datetime.utcfromtimestamp(app.config.get("_BOOT_TS", time.time())).isoformat() + "Z",
+        "uptime_seconds": int(time.time() - app.config.get("_BOOT_TS", time.time())),
         "data_dir": DATA_DIR,
-        "data_dir_exists": probe["exists"],
-        "data_dir_writable": probe["writable"],
+        "data_dir_exists": exists,
+        "data_dir_writable": bool(ok),
     }
-    # If the directory is missing or unwritable, still return 200 so Render doesn't kill the deploy,
-    # but include the error detail to logs.
-    if not probe["writable"] and probe["error"]:
-        logger.warning("healthz data_dir probe issue: %s", probe["error"])
-    return jsonify(payload), 200
+    return jsonify(resp), 200
 
-
-# ==== START SECTION 2/8 — Terms & Conditions (Standalone) + Footer Helper ====
-# STABILITY: Footer snippet appended to pages without altering existing templates.
+# ---------- Terms & Conditions (standalone) ----------
 TERMS_EFFECTIVE_DATE = os.getenv("TERMS_EFFECTIVE_DATE", "2025-09-04")
 
-# STABILITY: Small, non-intrusive footer to show on pages (opt-in via _with_footer()).
-FOOTER_HTML = f"""
-<div class="app-footer text-center text-muted" style="margin-top:24px;font-size:0.9rem;">
-  <hr style="margin:8px 0 12px 0;">
-  <div>
-    CPP_Test_Prep is an independent study resource and is <strong>not</strong> affiliated with, endorsed by, or
-    sponsored by ASIS International. Use is subject to our
-    <a href="{ { } if False else '' }" onclick="window.location.href='{ { } if False else '' }'; return false;" style="display:none"></a>
-    <a href="/terms" rel="noopener">Terms &amp; Conditions</a>.
-  </div>
-</div>
-"""
+def _route_exists(path: str) -> bool:
+    try:
+        for rule in app.url_map.iter_rules():
+            if str(rule.rule) == path:
+                return True
+    except Exception:
+        pass
+    return False
 
-def _with_footer(inner_html: str) -> str:
-    """Append a standard footer under page content."""
-    return f"{inner_html}\n{FOOTER_HTML}"
-
-# STABILITY: Standalone Terms & Conditions page (GET only). Kept self-contained to avoid template churn.
-@app.get("/terms")
+@app.get("/terms", endpoint="legal_terms")
 def legal_terms():
-    content = f"""
+    # Resolve a safe "back" link (to Welcome if present, else Home)
+    try:
+        back_href = url_for("sec8_welcome")
+    except Exception:
+        back_href = "/home"
+
+    content_tpl = """
     <div class="container" style="max-width:960px;">
-      <h1 id="terms-top" class="mb-3">CPP_Test_Prep — Terms and Conditions</h1>
-      <div class="text-muted mb-4">Effective Date: {TERMS_EFFECTIVE_DATE}</div>
+      <h1 class="mb-2">CPP_Test_Prep — Terms and Conditions</h1>
+      <div class="text-muted mb-4">Effective Date: {{ eff_date }}</div>
 
       <ol class="lh-base" style="padding-left: 1.2rem;">
         <li id="t1"><strong>Who we are</strong><br>
@@ -733,85 +715,22 @@ def legal_terms():
          “as is” and may change.</p>
 
       <div class="mt-4">
-        <a class="btn btn-primary" href="{url_for('sec8_welcome')}">Back to Welcome</a>
+        <a class="btn btn-primary" href="{{ back_href }}">Back</a>
       </div>
     </div>
     """
-    return base_layout("Terms & Conditions", _with_footer(content))
+    html_out = render_template_string(
+        content_tpl,
+        eff_date=TERMS_EFFECTIVE_DATE,
+        back_href=back_href,
+    )
+    return base_layout("Terms & Conditions", html_out)
 
-# STABILITY: Simple alias for convenience (no new behavior).
-@app.get("/legal")
-def legal_alias():
-    return redirect(url_for("legal_terms"), code=302)
-# =========================
-# SECTION 2.x: Ops hardening + restore utility pages if missing
-# (Place after Section 1, before Tutor/Quiz sections.)
-# =========================
-
-# Ensure we have a boot timestamp for uptime calc
-app.config.setdefault("_BOOT_TS", time.time())
-
-def _path_writable_probe(base_dir: str) -> Tuple[bool, str]:
-    """
-    Try to create, fsync, and atomically move a tiny probe file inside base_dir.
-    Returns (ok, error_message_if_any). Robust to FS quirks.
-    """
-    try:
-        os.makedirs(base_dir, exist_ok=True)
-        test_tmp = os.path.join(base_dir, ".health_probe.tmp")
-
-        # Create+write+fsync probe file
-        with open(test_tmp, "w", encoding="utf-8") as f:
-            f.write("ok")
-            f.flush()
-            os.fsync(f.fileno())
-
-        # Try atomic replace to verify rename semantics
-        done = test_tmp + ".done"
-        try:
-            os.replace(test_tmp, done)
-        except FileNotFoundError as e:
-            # If a quirky FS removed tmp, report the truth (not writable) with detail
-            if not os.path.exists(test_tmp):
-                return False, f"tmp missing after write: {e}"
-        except Exception as e:
-            return False, f"replace failed: {e}"
-
-        # Cleanup best-effort
-        try:
-            if os.path.exists(done):
-                os.remove(done)
-        except Exception:
-            pass
-
-        return True, ""
-    except Exception as e:
-        return False, str(e)
-
-@app.get("/healthz", endpoint="sec2_healthz")
-def sec2_healthz():
-    """
-    Simple, stable health endpoint.
-    - Verifies DATA_DIR exists and is writable (tolerant of FS quirks).
-    - Never does outbound calls.
-    """
-    ok, err = _path_writable_probe(DATA_DIR)
-    if not ok:
-        logger.warning("healthz data_dir writable check failed: %s", err)
-    resp = {
-        "service": "cpp-exam-prep",
-        "version": APP_VERSION,
-        "debug": DEBUG,
-        "staging": IS_STAGING,
-        "started_at": datetime.utcfromtimestamp(app.config.get("_BOOT_TS", time.time())).isoformat() + "Z",
-        "uptime_seconds": int(time.time() - app.config.get("_BOOT_TS", time.time())),
-        "data_dir": DATA_DIR,
-        "data_dir_exists": os.path.isdir(DATA_DIR),
-        "data_dir_writable": ok,
-        "note": ("If data_dir_writable is false, ensure the Render Disk is attached and DATA_DIR "
-                 "matches the mount path (e.g., /data)."),
-    }
-    return jsonify(resp), 200
+# Simple alias for convenience (optional, avoids 404 if someone visits /legal)
+if not _route_exists("/legal"):
+    @app.get("/legal")
+    def legal_alias():
+        return redirect(url_for("legal_terms"), code=302)
 
 # ---------- Restore utility pages if missing ----------
 def _route_missing(path: str) -> bool:
@@ -903,10 +822,6 @@ if _route_missing("/billing"):
         </div>
         """
         return base_layout("Billing", body)
-
-
-# ==== END SECTION 2/8 — Terms & Conditions (Standalone) + Footer Helper ====
-
 
 # =========================
 # SECTION 3/8: Tutor (UI + API, intro, rotating suggested questions, safe OpenAI call)
@@ -2443,6 +2358,7 @@ def root_redirect():
     return redirect(url_for("sec8_welcome", next=nxt), code=302)
 
 ### END OF SECTION 8/8 — WELCOME GATE (UPDATED WITH TERMS LINK + FOOTER)
+
 
 
 
