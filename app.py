@@ -5,10 +5,6 @@ A comprehensive Flask application for ASIS CPP exam preparation
 with subscription billing, enhanced UI, and complete study modes
 """
 
-# ================================================================
-# SECTION 1: CORE SETUP & CONFIGURATION - START
-# ================================================================
-
 import os
 import re
 import json
@@ -34,6 +30,10 @@ from flask import (
 from flask import render_template_string
 from werkzeug.security import generate_password_hash, check_password_hash
 from werkzeug.middleware.proxy_fix import ProxyFix
+
+# ====================================================================================================
+# APPLICATION SETUP & CONFIGURATION
+# ====================================================================================================
 
 APP_VERSION = os.environ.get("APP_VERSION", "2.1.0")
 
@@ -182,14 +182,9 @@ def _reqlog_end(resp):
         pass
     return resp
 
-# ================================================================
-# SECTION 1: CORE SETUP & CONFIGURATION - END
-# ================================================================
-
-
-# ================================================================
-# SECTION 2: DATA & USER MANAGEMENT - START
-# ================================================================
+# ====================================================================================================
+# DATA LAYER & UTILITIES
+# ====================================================================================================
 
 def _path(name: str) -> str:
     return os.path.join(DATA_DIR, name)
@@ -257,6 +252,10 @@ def _write_jsonl(path: str, rows: List[Dict[str, Any]]) -> None:
         buf.write(json.dumps(r, ensure_ascii=False))
         buf.write("\n")
     _atomic_write_text(path, buf.getvalue())
+
+# ====================================================================================================
+# USER MANAGEMENT & BILLING
+# ====================================================================================================
 
 def _users_all() -> List[dict]:
     return _load_json("users.json", [])
@@ -374,14 +373,9 @@ def subscription_required(fn):
 def is_admin() -> bool:
     return bool(session.get("admin_ok"))
 
-# ================================================================
-# SECTION 2: DATA & USER MANAGEMENT - END
-# ================================================================
-
-
-# ================================================================
-# SECTION 3: CONTENT & BUSINESS LOGIC - START
-# ================================================================
+# ====================================================================================================
+# CPP DOMAIN DEFINITIONS & CONTENT SYSTEM
+# ====================================================================================================
 
 # CPP Exam Domains with official weightings
 CPP_DOMAINS = {
@@ -466,6 +460,10 @@ SEED_FLASHCARDS = [
         "tags": ["controls", "fundamentals"]
     }
 ]
+
+# ====================================================================================================
+# CONTENT BANK MANAGEMENT
+# ====================================================================================================
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}_{uuid.uuid4().hex[:12]}"
@@ -615,6 +613,10 @@ def select_questions(domains: List[str],
     
     return random.sample(questions, count)
 
+# ====================================================================================================
+# AI TUTOR SYSTEM
+# ====================================================================================================
+
 def _ai_enabled() -> bool:
     return bool(OPENAI_API_KEY)
 
@@ -674,6 +676,10 @@ def _openai_chat_completion(user_prompt: str) -> Tuple[bool, str]:
         logger.warning("Tutor error: %s", e)
         return False, "Tutor is temporarily unavailable. Please try again."
 
+# ====================================================================================================
+# EVENT LOGGING
+# ====================================================================================================
+
 def _log_event(uid: str, name: str, data: dict | None = None):
     evts = _load_json("events.json", [])
     evts.append({
@@ -700,14 +706,9 @@ def _append_attempt(uid: str, mode: str, score: int = None, total: int = None,
     attempts.append(rec)
     _save_json("attempts.json", attempts)
 
-# ================================================================
-# SECTION 3: CONTENT & BUSINESS LOGIC - END
-# ================================================================
-
-
-# ================================================================
-# SECTION 4: UI COMPONENTS & HELPERS - START
-# ================================================================
+# ====================================================================================================
+# UI HELPERS & BASE LAYOUT - MUST BE DEFINED BEFORE ROUTES
+# ====================================================================================================
 
 def _footer_html():
     """Standard footer with ASIS disclaimer"""
@@ -1076,14 +1077,9 @@ def _show_quiz_results():
     """
     return base_layout("Quiz Results", content)
 
-# ================================================================
-# SECTION 4: UI COMPONENTS & HELPERS - END
-# ================================================================
-
-
-# ================================================================
-# SECTION 5: ROUTE HANDLERS - START
-# ================================================================
+# ====================================================================================================
+# HEALTH CHECK ROUTE (REQUIRED FOR RENDER) - MUST BE FIRST ROUTE
+# ====================================================================================================
 
 @app.route("/healthz")
 def health_check():
@@ -1093,6 +1089,10 @@ def health_check():
         "version": APP_VERSION,
         "timestamp": datetime.utcnow().isoformat()
     })
+
+# ====================================================================================================
+# ROUTES - LANDING PAGE & AUTHENTICATION
+# ====================================================================================================
 
 @app.route("/")
 def landing_page():
@@ -1489,4 +1489,353 @@ def tutor():
           
           <div class="card shadow-sm">
             <div class="card-header bg-light">
-              <h5
+              <h5 class="mb-0">Ask Your Question</h5>
+            </div>
+            <div class="card-body">
+              <form method="post">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                <div class="mb-3">
+                  <textarea name="question" class="form-control" rows="4" 
+                           placeholder="e.g., 'Explain the difference between administrative, physical, and technical controls'" 
+                           required></textarea>
+                </div>
+                <div class="d-flex justify-content-between align-items-center">
+                  <small class="text-muted">
+                    <i class="bi bi-lightbulb me-1"></i>
+                    Tip: Be specific for better explanations
+                  </small>
+                  <button type="submit" class="btn btn-primary">
+                    <i class="bi bi-send me-1"></i>Ask Tutor
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("AI Tutor", content)
+    
+    # POST - handle question
+    if not _csrf_ok():
+        abort(403)
+    
+    question = request.form.get("question", "").strip()
+    if not question:
+        return redirect("/tutor")
+    
+    # Rate limiting
+    if not _rate_ok(f"tutor_{_user_id()}", 0.1):  # 1 request per 10 seconds
+        content = """
+        <div class="container">
+          <div class="alert alert-warning">
+            Please wait a moment before asking another question.
+          </div>
+          <a href="/tutor" class="btn btn-primary">Back to Tutor</a>
+        </div>
+        """
+        return base_layout("Rate Limited", content)
+    
+    success, response = _openai_chat_completion(question)
+    _append_attempt(_user_id(), "tutor", question=question, answer=response)
+    
+    # Enhanced response formatting
+    formatted_response = response.replace('\n', '<br>').replace('**', '<strong>').replace('**', '</strong>')
+    
+    content = f"""
+    <div class="container">
+      <div class="tutor-chat p-4 mb-4">
+        <h1 class="h4 text-white mb-0">
+          <i class="bi bi-chat-dots me-2"></i>AI Tutor Response
+        </h1>
+      </div>
+      
+      <div class="row">
+        <div class="col-md-6 mb-4">
+          <div class="card shadow-sm">
+            <div class="card-header bg-primary text-white">
+              <i class="bi bi-person-fill me-2"></i>Your Question
+            </div>
+            <div class="card-body user-message">
+              {html.escape(question)}
+            </div>
+          </div>
+        </div>
+        
+        <div class="col-md-6 mb-4">
+          <div class="card shadow-sm">
+            <div class="card-header bg-success text-white">
+              <i class="bi bi-robot me-2"></i>Tutor Response
+            </div>
+            <div class="card-body tutor-message">
+              {formatted_response}
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="text-center">
+        <a href="/tutor" class="btn btn-primary btn-lg">
+          <i class="bi bi-plus-circle me-2"></i>Ask Another Question
+        </a>
+        <a href="/dashboard" class="btn btn-outline-secondary btn-lg ms-2">
+          <i class="bi bi-house me-2"></i>Back to Dashboard
+        </a>
+      </div>
+    </div>
+    """
+    return base_layout("AI Tutor", content)
+
+@app.route("/quiz", methods=["GET", "POST"])
+@login_required
+def quiz():
+    if request.method == "GET":
+        # Check if we're in the middle of a quiz
+        if "quiz_questions" in session:
+            current_q_idx = session.get("quiz_current", 0)
+            questions = session["quiz_questions"]
+            
+            if current_q_idx < len(questions):
+                return _render_quiz_question(questions, current_q_idx)
+            else:
+                # Quiz completed, show results
+                return _show_quiz_results()
+        
+        # Show quiz setup
+        content = f"""
+        <div class="container">
+          <div class="row justify-content-center">
+            <div class="col-md-8">
+              <div class="card shadow-sm">
+                <div class="card-header bg-warning text-dark text-center">
+                  <h4 class="mb-0">
+                    <i class="bi bi-ui-checks-grid me-2"></i>Practice Quiz Setup
+                  </h4>
+                </div>
+                <div class="card-body">
+                  <form method="post">
+                    <input type="hidden" name="csrf_token" value="{csrf_token()}"/>
+                    
+                    <div class="mb-4">
+                      <label class="form-label fw-bold">Number of Questions</label>
+                      <select name="count" class="form-select">
+                        <option value="5">5 Questions (Quick Practice)</option>
+                        <option value="10" selected>10 Questions (Standard)</option>
+                        <option value="15">15 Questions (Extended)</option>
+                      </select>
+                    </div>
+                    
+                    <div class="alert alert-info">
+                      <i class="bi bi-info-circle me-2"></i>
+                      <strong>Quiz Format:</strong> You'll answer one question at a time with immediate feedback. 
+                      Green indicates correct answers, red shows incorrect with explanations.
+                    </div>
+                    
+                    <div class="d-grid gap-2">
+                      <button type="submit" class="btn btn-warning btn-lg">
+                        <i class="bi bi-play-circle me-2"></i>Start Quiz
+                      </button>
+                      <a href="/dashboard" class="btn btn-outline-secondary">Cancel</a>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """
+        return base_layout("Quiz Setup", content)
+    
+    # POST - start quiz
+    if not _csrf_ok():
+        abort(403)
+    
+    count = int(request.form.get("count", 10))
+    
+    questions = select_questions([], count, user_id=_user_id())
+    
+    if not questions:
+        content = """
+        <div class="container">
+          <div class="alert alert-warning">
+            No questions available. Please try again later.
+          </div>
+          <a href="/quiz" class="btn btn-primary">Try Again</a>
+        </div>
+        """
+        return base_layout("Quiz", content)
+    
+    # Store quiz in session
+    session["quiz_questions"] = questions
+    session["quiz_current"] = 0
+    session["quiz_answers"] = []
+    
+    return _render_quiz_question(questions, 0)
+
+@app.route("/quiz/answer", methods=["POST"])
+@login_required
+def quiz_answer():
+    """Process quiz answer and show feedback"""
+    if not _csrf_ok():
+        abort(403)
+    
+    if "quiz_questions" not in session:
+        return redirect("/quiz")
+    
+    questions = session["quiz_questions"]
+    current_idx = session.get("quiz_current", 0)
+    
+    if current_idx >= len(questions):
+        return redirect("/quiz")
+    
+    q = questions[current_idx]
+    user_answer = request.form.get("answer", "")
+    
+    # Determine if answer is correct
+    is_correct = False
+    correct_answer = ""
+    
+    if q.get("type") == "mc":
+        try:
+            user_idx = int(user_answer)
+            correct_idx = q.get("answer", 0)
+            is_correct = (user_idx == correct_idx)
+            correct_answer = q.get("choices", [])[correct_idx] if correct_idx < len(q.get("choices", [])) else ""
+        except (ValueError, IndexError):
+            pass
+    elif q.get("type") == "tf":
+        correct_bool = q.get("answer", False)
+        user_bool = user_answer.lower() == "true"
+        is_correct = (user_bool == correct_bool)
+        correct_answer = str(correct_bool)
+    
+    # Store answer
+    if "quiz_answers" not in session:
+        session["quiz_answers"] = []
+    
+    session["quiz_answers"].append({
+        "question": q.get("stem", ""),
+        "user_answer": user_answer,
+        "is_correct": is_correct,
+        "explanation": q.get("explanation", ""),
+        "domain": q.get("domain", "")
+    })
+    
+    # Log attempt
+    _append_attempt(_user_id(), "quiz", score=1 if is_correct else 0, total=1, 
+                   domain=q.get("domain"), question=q.get("stem"), answer=user_answer)
+    
+    # Show feedback
+    feedback_class = "correct-answer" if is_correct else "incorrect-answer"
+    feedback_icon = "bi-check-circle-fill text-success" if is_correct else "bi-x-circle-fill text-danger"
+    feedback_title = "Correct!" if is_correct else "Incorrect"
+    
+    explanation = q.get("explanation", "No explanation available.")
+    
+    next_btn_text = "Next Question" if current_idx + 1 < len(questions) else "View Results"
+    next_url = f"/quiz/next" if current_idx + 1 < len(questions) else "/quiz/results"
+    
+    content = f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-md-10">
+          <div class="card shadow-sm {feedback_class}">
+            <div class="card-header text-center">
+              <h4 class="mb-0">
+                <i class="bi {feedback_icon} me-2"></i>
+                {feedback_title}
+              </h4>
+            </div>
+            <div class="card-body">
+              <h6 class="text-muted mb-3">Question:</h6>
+              <p class="mb-3">{html.escape(q.get('stem', ''))}</p>
+              
+              {f'<p><strong>Your Answer:</strong> {html.escape(user_answer)}</p>' if not is_correct else ''}
+              {f'<p><strong>Correct Answer:</strong> {html.escape(correct_answer)}</p>' if not is_correct and correct_answer else ''}
+              
+              <div class="alert alert-{'success' if is_correct else 'info'}">
+                <strong>Explanation:</strong> {html.escape(explanation)}
+              </div>
+              
+              <div class="text-center">
+                <a href="{next_url}" class="btn btn-primary btn-lg">
+                  {next_btn_text} <i class="bi bi-arrow-right ms-2"></i>
+                </a>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """
+    return base_layout("Quiz Feedback", content)
+
+@app.route("/quiz/next")
+@login_required
+def quiz_next():
+    """Move to next question"""
+    if "quiz_questions" not in session:
+        return redirect("/quiz")
+    
+    current_idx = session.get("quiz_current", 0)
+    session["quiz_current"] = current_idx + 1
+    
+    questions = session["quiz_questions"]
+    if session["quiz_current"] >= len(questions):
+        return redirect("/quiz/results")
+    
+    return _render_quiz_question(questions, session["quiz_current"])
+
+@app.route("/quiz/results")
+@login_required
+def quiz_results():
+    """Show quiz results"""
+    return _show_quiz_results()
+
+@app.route("/terms")
+def terms():
+    """Terms and conditions page"""
+    content = """
+    <div class="container" style="max-width: 800px;">
+      <h1 class="mb-4">Terms & Conditions</h1>
+      
+      <div class="card">
+        <div class="card-body">
+          <h5>1. Acceptance of Terms</h5>
+          <p>By using this CPP Exam Preparation service, you agree to these terms and conditions.</p>
+          
+          <h5>2. Service Description</h5>
+          <p>This service provides study materials and practice questions for the ASIS Certified Protection Professional (CPP) exam. This program is not affiliated with or approved by ASIS International.</p>
+          
+          <h5>3. Disclaimer</h5>
+          <p><strong>This program is not affiliated with or approved by ASIS International. It uses only open-source and publicly available study materials. No ASIS-protected content is included.</strong></p>
+          
+          <h5>4. Educational Use Only</h5>
+          <p>All content is for educational purposes only. No legal, safety, or professional advice is provided. Users should verify information with official sources.</p>
+          
+          <h5>5. No Guarantee</h5>
+          <p>We do not guarantee exam results or certification success. Individual results may vary.</p>
+          
+          <h5>6. Privacy</h5>
+          <p>We collect minimal personal information and do not share user data with third parties except as required for payment processing.</p>
+          
+          <p class="text-muted mt-4">
+            <small>Last updated: January 2024</small>
+          </p>
+        </div>
+      </div>
+      
+      <div class="text-center mt-4">
+        <a href="/" class="btn btn-primary">Back to Home</a>
+      </div>
+    </div>
+    """
+    return base_layout("Terms & Conditions", content, show_nav=False)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 5000))
+    app.run(
+        host="0.0.0.0",
+        port=port,
+        debug=DEBUG
+    )
+
