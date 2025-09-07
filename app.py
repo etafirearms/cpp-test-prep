@@ -1979,3 +1979,616 @@ if __name__ == "__main__":
        logger.info(f"Initialized flashcard bank with {len(flashcards)} flashcards")
    
    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=DEBUG)  
+
+# Continue from previous code - Add these routes after the dashboard route
+
+@app.route("/quiz", methods=["GET", "POST"])
+@subscription_required
+def quiz():
+    user = _current_user()
+    uid = user["id"]
+    
+    if request.method == "GET":
+        # Show quiz setup page
+        progress_data = calculate_user_progress(uid)
+        progress_html = progress_meter_html(progress_data)
+        
+        return base_layout("Practice Quiz Setup", f"""
+        <div class="container">
+          <div class="row justify-content-center">
+            <div class="col-lg-8">
+              <div class="text-center mb-4">
+                <h2 class="display-5 fw-bold text-primary">
+                  <i class="bi bi-ui-checks me-3"></i>Practice Quiz
+                </h2>
+                <p class="lead">Test your knowledge with immediate feedback</p>
+              </div>
+              
+              {progress_html}
+              
+              <div class="card shadow-lg border-0 mb-4">
+                <div class="card-header bg-warning text-dark text-center">
+                  <h4 class="mb-0">
+                    <i class="bi bi-ui-checks-grid me-2"></i>Practice Quiz Setup
+                  </h4>
+                </div>
+                <div class="card-body p-4">
+                  <form method="post" action="/quiz">
+                    <input type="hidden" name="csrf_token" value="{csrf_token()}">
+                    
+                    <div class="row mb-4">
+                      <div class="col-md-6">
+                        <label class="form-label fw-bold">Number of Questions</label>
+                        <select name="question_count" class="form-select" required>
+                          <option value="5">Quick Review (5 questions)</option>
+                          <option value="10" selected>Standard Quiz (10 questions)</option>
+                          <option value="15">Extended Quiz (15 questions)</option>
+                          <option value="25">Comprehensive (25 questions)</option>
+                          <option value="50">Domain Focus (50 questions)</option>
+                        </select>
+                      </div>
+                      <div class="col-md-6">
+                        <label class="form-label fw-bold">Question Types</label>
+                        <select name="question_types" class="form-select">
+                          <option value="all" selected>All Types (Recommended)</option>
+                          <option value="mc">Multiple Choice Only</option>
+                          <option value="tf">True/False Only</option>
+                          <option value="scenario">Scenarios Only</option>
+                        </select>
+                      </div>
+                    </div>
+                    
+                    {domain_selector_html()}
+                    
+                    <div class="alert alert-info mb-4">
+                      <h6><i class="bi bi-info-circle me-2"></i>Quiz Features</h6>
+                      <ul class="mb-0">
+                        <li>Immediate feedback after each question</li>
+                        <li>Detailed explanations for all answers</li>
+                        <li>Questions distributed by CPP exam weights</li>
+                        <li>Progress tracking and analytics</li>
+                        <li>No time pressure - learn at your pace</li>
+                      </ul>
+                    </div>
+                    
+                    <div class="d-grid">
+                      <button type="submit" class="btn btn-warning btn-lg">
+                        <i class="bi bi-play-circle me-2"></i>Start Practice Quiz
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+        """)
+    
+    elif request.method == "POST":
+        if not _csrf_ok():
+            return redirect("/quiz")
+        
+        try:
+            question_count = int(request.form.get("question_count", 10))
+            question_types = request.form.get("question_types", "all")
+            domains = request.form.getlist("domains")
+            
+            if not domains:
+                domains = ["all"]
+            
+            # Determine question type mix
+            type_mix = None
+            if question_types == "mc":
+                type_mix = {"mc": 1.0}
+            elif question_types == "tf":
+                type_mix = {"tf": 1.0}
+            elif question_types == "scenario":
+                type_mix = {"scenario": 1.0}
+            else:
+                type_mix = QUESTION_TYPE_MIX
+            
+            # Generate questions for quiz
+            questions = select_questions(
+                domains=domains,
+                count=question_count,
+                mix=type_mix,
+                user_id=uid
+            )
+            
+            if not questions:
+                return base_layout("Error", """
+                <div class="container">
+                  <div class="alert alert-danger">
+                    <h4>No Questions Available</h4>
+                    <p>Unable to generate quiz questions. Please try again or contact support.</p>
+                    <a href="/quiz" class="btn btn-primary">Try Again</a>
+                  </div>
+                </div>
+                """)
+            
+            # Store quiz session
+            session_id = uuid.uuid4().hex
+            session["quiz_session"] = {
+                "session_id": session_id,
+                "questions": questions,
+                "start_time": datetime.utcnow().isoformat(),
+                "current_question": 0,
+                "answers": {},
+                "completed": False
+            }
+            
+            return redirect(f"/quiz/take")
+            
+        except Exception as e:
+            logger.warning("Quiz setup error: %s", e)
+            return redirect("/quiz")
+
+@app.route("/quiz/take")
+@subscription_required
+def quiz_take():
+    quiz_session = session.get("quiz_session")
+    if not quiz_session or quiz_session.get("completed"):
+        return redirect("/quiz")
+    
+    user = _current_user()
+    uid = user["id"]
+    
+    questions = quiz_session["questions"]
+    current_idx = quiz_session.get("current_question", 0)
+    answers = quiz_session.get("answers", {})
+    
+    if current_idx >= len(questions):
+        return redirect("/quiz/results")
+    
+    current_question = questions[current_idx]
+    domain_info = CPP_DOMAINS.get(current_question.get("domain", ""), {})
+    domain_name = domain_info.get("name", "Unknown Domain")
+    domain_code = domain_info.get("code", "D?")
+    
+    # Question choices HTML
+    choices_html = ""
+    if current_question["type"] == "tf":
+        choices_html = """
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="radio" name="answer" value="true" id="choice_true" required>
+          <label class="form-check-label fw-bold" for="choice_true">True</label>
+        </div>
+        <div class="form-check mb-3">
+          <input class="form-check-input" type="radio" name="answer" value="false" id="choice_false" required>
+          <label class="form-check-label fw-bold" for="choice_false">False</label>
+        </div>
+        """
+    else:
+        for i, choice in enumerate(current_question.get("choices", [])):
+            choices_html += f"""
+            <div class="form-check mb-3">
+              <input class="form-check-input" type="radio" name="answer" value="{i}" id="choice_{i}" required>
+              <label class="form-check-label" for="choice_{i}">{html.escape(choice)}</label>
+            </div>
+            """
+    
+    # Progress indicator
+    progress_percentage = ((current_idx) / len(questions)) * 100
+    
+    return base_layout("Practice Quiz", f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-lg-10">
+          <div class="mb-4">
+            <div class="d-flex justify-content-between align-items-center mb-2">
+              <h4 class="mb-0">Practice Quiz</h4>
+              <span class="badge bg-primary">Question {current_idx + 1} of {len(questions)}</span>
+            </div>
+            <div class="progress">
+              <div class="progress-bar" style="width: {progress_percentage}%"></div>
+            </div>
+          </div>
+          
+          <div class="card shadow-lg question-card">
+            <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+              <h5 class="mb-0">
+                <i class="bi bi-question-circle me-2"></i>
+                {domain_code}: {html.escape(domain_name)}
+              </h5>
+              <span class="badge bg-light text-dark">
+                {current_question.get("type", "").upper()}
+                {' - ' + current_question.get("difficulty", "").title() if current_question.get("difficulty") else ''}
+              </span>
+            </div>
+            <div class="card-body p-4">
+              <form method="post" action="/quiz/answer">
+                <input type="hidden" name="csrf_token" value="{csrf_token()}">
+                <input type="hidden" name="question_index" value="{current_idx}">
+                
+                <div class="question-stem mb-4">
+                  <h6 class="fw-bold mb-3">{html.escape(current_question.get("stem", ""))}</h6>
+                </div>
+                
+                <div class="choices mb-4">
+                  {choices_html}
+                </div>
+                
+                <div class="d-flex justify-content-between">
+                  <div>
+                    {f'<a href="/quiz/results" class="btn btn-outline-secondary">Skip Quiz</a>' if current_idx > 0 else ''}
+                  </div>
+                  <div>
+                    <button type="submit" class="btn btn-primary btn-lg">
+                      Submit Answer <i class="bi bi-arrow-right ms-2"></i>
+                    </button>
+                  </div>
+                </div>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """)
+
+@app.route("/quiz/answer", methods=["POST"])
+@subscription_required
+def quiz_answer():
+    if not _csrf_ok():
+        return redirect("/quiz")
+    
+    quiz_session = session.get("quiz_session")
+    if not quiz_session:
+        return redirect("/quiz")
+    
+    user = _current_user()
+    uid = user["id"]
+    
+    try:
+        question_index = int(request.form.get("question_index", 0))
+        user_answer = request.form.get("answer", "")
+        
+        questions = quiz_session["questions"]
+        if question_index >= len(questions):
+            return redirect("/quiz/results")
+        
+        current_question = questions[question_index]
+        
+        # Determine if answer is correct
+        is_correct = False
+        if current_question["type"] == "tf":
+            correct_answer = current_question.get("answer", False)
+            is_correct = (user_answer.lower() == "true") == correct_answer
+        else:
+            correct_answer = current_question.get("answer", 0)
+            try:
+                is_correct = int(user_answer) == correct_answer
+            except (ValueError, TypeError):
+                is_correct = False
+        
+        # Store answer
+        quiz_session["answers"][str(question_index)] = {
+            "user_answer": user_answer,
+            "is_correct": is_correct,
+            "question_id": current_question.get("id", ""),
+            "domain": current_question.get("domain", "")
+        }
+        
+        # Log attempt for progress tracking
+        _append_attempt(
+            uid=uid,
+            mode="quiz",
+            score=1 if is_correct else 0,
+            total=1,
+            domain=current_question.get("domain"),
+            question=current_question.get("id", f"q_{question_index}"),
+            answer=user_answer
+        )
+        
+        session["quiz_session"] = quiz_session
+        
+        # Show immediate feedback
+        return redirect(f"/quiz/feedback/{question_index}")
+        
+    except Exception as e:
+        logger.warning("Quiz answer error: %s", e)
+        return redirect("/quiz")
+
+@app.route("/quiz/feedback/<int:question_index>")
+@subscription_required
+def quiz_feedback(question_index):
+    quiz_session = session.get("quiz_session")
+    if not quiz_session:
+        return redirect("/quiz")
+    
+    questions = quiz_session["questions"]
+    answers = quiz_session.get("answers", {})
+    
+    if question_index >= len(questions) or str(question_index) not in answers:
+        return redirect("/quiz")
+    
+    current_question = questions[question_index]
+    answer_data = answers[str(question_index)]
+    is_correct = answer_data["is_correct"]
+    user_answer = answer_data["user_answer"]
+    
+    domain_info = CPP_DOMAINS.get(current_question.get("domain", ""), {})
+    domain_name = domain_info.get("name", "Unknown Domain")
+    domain_code = domain_info.get("code", "D?")
+    
+    # Get correct answer display
+    if current_question["type"] == "tf":
+        correct_answer = "True" if current_question.get("answer", False) else "False"
+        user_answer_display = user_answer.title()
+    else:
+        correct_answer_idx = current_question.get("answer", 0)
+        choices = current_question.get("choices", [])
+        correct_answer = choices[correct_answer_idx] if correct_answer_idx < len(choices) else "Unknown"
+        try:
+            user_answer_idx = int(user_answer)
+            user_answer_display = choices[user_answer_idx] if user_answer_idx < len(choices) else "Unknown"
+        except (ValueError, TypeError):
+            user_answer_display = "No answer"
+    
+    # Feedback styling
+    feedback_class = "correct-answer" if is_correct else "incorrect-answer"
+    feedback_color = "success" if is_correct else "danger"
+    feedback_icon = "check-circle" if is_correct else "x-circle"
+    feedback_title = "Correct!" if is_correct else "Incorrect"
+    
+    # Next question or results
+    next_question_index = question_index + 1
+    if next_question_index >= len(questions):
+        quiz_session["completed"] = True
+        session["quiz_session"] = quiz_session
+        next_url = "/quiz/results"
+        next_text = "View Results"
+    else:
+        quiz_session["current_question"] = next_question_index
+        session["quiz_session"] = quiz_session
+        next_url = "/quiz/take"
+        next_text = "Next Question"
+    
+    return base_layout("Quiz Feedback", f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-lg-10">
+          <div class="card shadow-lg {feedback_class}">
+            <div class="card-header bg-{feedback_color} text-white text-center">
+              <h4 class="mb-0">
+                <i class="bi bi-{feedback_icon} me-2"></i>{feedback_title}
+              </h4>
+            </div>
+            <div class="card-body p-4">
+              <div class="mb-4">
+                <h6 class="fw-bold mb-3">Question:</h6>
+                <p class="mb-3">{html.escape(current_question.get("stem", ""))}</p>
+                <small class="text-muted">{domain_code}: {html.escape(domain_name)} - {current_question.get("type", "").upper()}</small>
+              </div>
+              
+              <div class="row mb-4">
+                <div class="col-md-6">
+                  <div class="alert alert-{'success' if is_correct else 'danger'}">
+                    <h6><i class="bi bi-person me-2"></i>Your Answer</h6>
+                    <p class="mb-0 fw-bold">{html.escape(user_answer_display)}</p>
+                  </div>
+                </div>
+                <div class="col-md-6">
+                  <div class="alert alert-success">
+                    <h6><i class="bi bi-check-circle me-2"></i>Correct Answer</h6>
+                    <p class="mb-0 fw-bold">{html.escape(correct_answer)}</p>
+                  </div>
+                </div>
+              </div>
+              
+              <div class="alert alert-info">
+                <h6><i class="bi bi-lightbulb me-2"></i>Explanation</h6>
+                <p class="mb-0">{html.escape(current_question.get("explanation", "No explanation available."))}</p>
+              </div>
+              
+              <div class="d-flex justify-content-between align-items-center">
+                <div>
+                  <span class="text-muted">Question {question_index + 1} of {len(questions)}</span>
+                </div>
+                <div>
+                  <a href="{next_url}" class="btn btn-primary btn-lg">
+                    {next_text} <i class="bi bi-arrow-right ms-2"></i>
+                  </a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """)
+
+@app.route("/quiz/results")
+@subscription_required
+def quiz_results():
+    quiz_session = session.get("quiz_session")
+    if not quiz_session:
+        return redirect("/quiz")
+    
+    questions = quiz_session["questions"]
+    answers = quiz_session.get("answers", {})
+    start_time = datetime.fromisoformat(quiz_session["start_time"])
+    end_time = datetime.utcnow()
+    
+    # Calculate results
+    total_questions = len(questions)
+    answered_questions = len(answers)
+    correct_answers = sum(1 for a in answers.values() if a.get("is_correct", False))
+    accuracy = (correct_answers / answered_questions * 100) if answered_questions > 0 else 0
+    duration_minutes = int((end_time - start_time).total_seconds() / 60)
+    
+    # Domain breakdown
+    domain_results = {}
+    for domain in CPP_DOMAINS.keys():
+        domain_results[domain] = {"total": 0, "correct": 0, "accuracy": 0}
+    
+    for i, question in enumerate(questions):
+        domain = question.get("domain", "unknown")
+        if domain in domain_results:
+            domain_results[domain]["total"] += 1
+            if str(i) in answers and answers[str(i)].get("is_correct", False):
+                domain_results[domain]["correct"] += 1
+    
+    # Calculate domain accuracies
+    for domain in domain_results:
+        if domain_results[domain]["total"] > 0:
+            domain_results[domain]["accuracy"] = (
+                domain_results[domain]["correct"] / domain_results[domain]["total"]
+            ) * 100
+    
+    # Performance analysis
+    if accuracy >= 90:
+        performance_class = "success"
+        performance_message = "Excellent work! You have a strong understanding of these concepts."
+    elif accuracy >= 80:
+        performance_class = "success"
+        performance_message = "Great job! You're demonstrating solid knowledge."
+    elif accuracy >= 70:
+        performance_class = "warning"
+        performance_message = "Good progress! Focus on the areas you missed."
+    elif accuracy >= 60:
+        performance_class = "warning"
+        performance_message = "You're building knowledge. Continue practicing these topics."
+    else:
+        performance_class = "danger"
+        performance_message = "More study needed. Review the fundamentals in your weaker areas."
+    
+    # Domain breakdown HTML
+    domain_breakdown_html = ""
+    weak_domains = []
+    
+    for domain_key, domain_data in domain_results.items():
+        if domain_data["total"] == 0:
+            continue
+            
+        domain_info = CPP_DOMAINS.get(domain_key, {})
+        domain_name = domain_info.get("name", domain_key)
+        domain_code = domain_info.get("code", domain_key.upper())
+        accuracy_pct = domain_data["accuracy"]
+        correct = domain_data["correct"]
+        total = domain_data["total"]
+        
+        color_class = "success" if accuracy_pct >= 80 else "warning" if accuracy_pct >= 60 else "danger"
+        
+        if accuracy_pct < 70:
+            weak_domains.append(domain_name)
+        
+        domain_breakdown_html += f"""
+        <div class="row mb-3">
+          <div class="col-md-8">
+            <h6 class="fw-bold">{html.escape(domain_code)}: {html.escape(domain_name)}</h6>
+          </div>
+          <div class="col-md-4">
+            <div class="d-flex justify-content-between align-items-center">
+              <span>{correct}/{total}</span>
+              <span class="badge bg-{color_class}">{accuracy_pct:.1f}%</span>
+            </div>
+            <div class="progress mt-1">
+              <div class="progress-bar bg-{color_class}" style="width: {accuracy_pct}%"></div>
+            </div>
+          </div>
+        </div>
+        """
+    
+    # Study recommendations
+    recommendations_html = ""
+    if weak_domains:
+        recommendations_html = f"""
+        <div class="alert alert-warning">
+          <h6><i class="bi bi-target me-2"></i>Recommended Study Areas</h6>
+          <p class="mb-1">Consider additional practice in: <strong>{', '.join(weak_domains[:3])}</strong></p>
+          <small>Take targeted quizzes in these domains or review flashcards.</small>
+        </div>
+        """
+    
+    # Clear quiz session
+    if "quiz_session" in session:
+        del session["quiz_session"]
+    
+    return base_layout("Quiz Results", f"""
+    <div class="container">
+      <div class="row justify-content-center">
+        <div class="col-lg-10">
+          <div class="text-center mb-4">
+            <h2 class="display-5 fw-bold">Quiz Complete!</h2>
+            <p class="lead text-muted">Here's how you performed</p>
+          </div>
+          
+          <div class="card shadow-lg mb-4">
+            <div class="card-header bg-{performance_class} text-white text-center">
+              <h4 class="mb-0">
+                <i class="bi bi-bar-chart me-2"></i>
+                {accuracy:.1f}% Accuracy
+              </h4>
+            </div>
+            <div class="card-body">
+              <div class="row text-center mb-4">
+                <div class="col-md-3">
+                  <div class="display-6 fw-bold text-success">{correct_answers}</div>
+                  <small class="text-muted">Correct</small>
+                </div>
+                <div class="col-md-3">
+                  <div class="display-6 fw-bold text-danger">{answered_questions - correct_answers}</div>
+                  <small class="text-muted">Incorrect</small>
+                </div>
+                <div class="col-md-3">
+                  <div class="display-6 fw-bold text-info">{answered_questions}</div>
+                  <small class="text-muted">Answered</small>
+                </div>
+                <div class="col-md-3">
+                  <div class="display-6 fw-bold text-warning">{duration_minutes}</div>
+                  <small class="text-muted">Minutes</small>
+                </div>
+              </div>
+              
+              <div class="alert alert-{performance_class}">
+                <h6><i class="bi bi-info-circle me-2"></i>Performance Assessment</h6>
+                <p class="mb-0">{performance_message}</p>
+              </div>
+            </div>
+          </div>
+          
+          <div class="card shadow-sm mb-4">
+            <div class="card-header bg-light">
+              <h5 class="mb-0"><i class="bi bi-pie-chart me-2"></i>Domain Performance</h5>
+            </div>
+            <div class="card-body">
+              {domain_breakdown_html if domain_breakdown_html else "<p class='text-muted'>No domain data available.</p>"}
+            </div>
+          </div>
+          
+          <div class="row">
+            <div class="col-md-8">
+              {recommendations_html}
+            </div>
+            <div class="col-md-4">
+              <div class="card">
+                <div class="card-header bg-light">
+                  <h6 class="mb-0"><i class="bi bi-arrow-right me-2"></i>Continue Studying</h6>
+                </div>
+                <div class="card-body">
+                  <div class="d-grid gap-2">
+                    <a href="/quiz" class="btn btn-primary">
+                      <i class="bi bi-arrow-clockwise me-2"></i>Take Another Quiz
+                    </a>
+                    <a href="/mock-exam" class="btn btn-success">
+                      <i class="bi bi-clipboard-check me-2"></i>Try Mock Exam
+                    </a>
+                    <a href="/flashcards" class="btn btn-info">
+                      <i class="bi bi-card-text me-2"></i>Study Flashcards
+                    </a>
+                    <a href="/tutor" class="btn btn-warning">
+                      <i class="bi bi-robot me-2"></i>Ask AI Tutor
+                    </a>
+                    <a href="/progress" class="btn btn-outline-primary">
+                      <i class="bi bi-graph-up me-2"></i>View Progress
+                    </a>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    """)
