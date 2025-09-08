@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 CPP Test Prep Platform - Complete Production Application
-Section 1: Core Setup, Configuration, Imports, Security, Data Management
+SECTION 1: Core Setup, Configuration, Imports, Security, Data Management
+START OF SECTION 1
 """
 
 import os
@@ -156,7 +157,28 @@ class ExamAttempt:
     passed: bool
     question_count: int
 
-# Data Storage Manager
+# CPP Domain Configuration
+CPP_DOMAINS = {
+    'D1': {'name': 'Physical Security', 'weight': 0.22},
+    'D2': {'name': 'Personnel Security', 'weight': 0.15},
+    'D3': {'name': 'Information Systems Security', 'weight': 0.09},
+    'D4': {'name': 'Crisis Management', 'weight': 0.11},
+    'D5': {'name': 'Investigations', 'weight': 0.16},
+    'D6': {'name': 'Legal and Regulatory', 'weight': 0.14},
+    'D7': {'name': 'Professional and Ethical Responsibilities', 'weight': 0.13}
+}
+
+"""
+END OF SECTION 1
+"""
+
+"""
+CPP Test Prep Platform - Complete Production Application
+SECTION 2: Data Storage Manager and Content Generation Engine
+START OF SECTION 2
+"""
+
+# Data Storage Manager (WITHOUT instantiation - methods will be bound later)
 class DataManager:
     def __init__(self, data_dir: str):
         self.data_dir = data_dir
@@ -264,20 +286,6 @@ class DataManager:
                 attempts.append(ExamAttempt(**attempt_data))
         return sorted(attempts, key=lambda x: x.completed_at, reverse=True)
 
-# Initialize Data Manager
-data_manager = DataManager(app.config['DATA_DIR'])
-
-# CPP Domain Configuration
-CPP_DOMAINS = {
-    'D1': {'name': 'Physical Security', 'weight': 0.22},
-    'D2': {'name': 'Personnel Security', 'weight': 0.15},
-    'D3': {'name': 'Information Systems Security', 'weight': 0.09},
-    'D4': {'name': 'Crisis Management', 'weight': 0.11},
-    'D5': {'name': 'Investigations', 'weight': 0.16},
-    'D6': {'name': 'Legal and Regulatory', 'weight': 0.14},
-    'D7': {'name': 'Professional and Ethical Responsibilities', 'weight': 0.13}
-}
-
 # Content Generation Engine
 class ContentEngine:
     """Manages question and flashcard content generation"""
@@ -648,409 +656,22 @@ class ContentEngine:
         domain_backs = backs.get(domain, ["Generic Definition"])
         return domain_backs[index % len(domain_backs)]
 
-# Bind ContentEngine methods to DataManager
-def _get_default_questions(self) -> Dict[str, dict]:
-    return ContentEngine._get_default_questions()
+# Bind ContentEngine methods to DataManager class (CRITICAL FIX)
+DataManager._get_default_questions = ContentEngine._get_default_questions
+DataManager._get_default_flashcards = ContentEngine._get_default_flashcards
 
-def _get_default_flashcards(self) -> Dict[str, dict]:
-    return ContentEngine._get_default_flashcards()
-
-DataManager._get_default_questions = _get_default_questions
-DataManager._get_default_flashcards = _get_default_flashcards
-
-# Initialize Data Manager (after method binding)
+# NOW Initialize Data Manager (after method binding)
 data_manager = DataManager(app.config['DATA_DIR'])
 
-# CPP Domain Configuration
-CPP_DOMAINS = {
-    'D1': {'name': 'Physical Security', 'weight': 0.22},
-    'D2': {'name': 'Personnel Security', 'weight': 0.15},
-    'D3': {'name': 'Information Systems Security', 'weight': 0.09},
-    'D4': {'name': 'Crisis Management', 'weight': 0.11},
-    'D5': {'name': 'Investigations', 'weight': 0.16},
-    'D6': {'name': 'Legal and Regulatory', 'weight': 0.14},
-    'D7': {'name': 'Professional and Ethical Responsibilities', 'weight': 0.13}
-}
+"""
+END OF SECTION 2
+"""
+"""
+CPP Test Prep Platform - Complete Production Application
+SECTION 3: Core Systems and Authentication
+START OF SECTION 3
+"""
 
-# Content Generation Engine
-class ContentEngine:
-    """Manages question and flashcard content generation"""
-    
-    @staticmethod
-    def _get_default_questions() -> Dict[str, dict]:
-        """Generate comprehensive question bank with 500 questions"""
-        questions = {}
-        question_id = 1
-        
-        # Domain distribution based on CPP weights
-        domain_counts = {
-            'D1': 110,  # Physical Security (22%)
-            'D2': 75,   # Personnel Security (15%)
-            'D3': 45,   # Information Systems Security (9%)
-            'D4': 55,   # Crisis Management (11%)
-            'D5': 80,   # Investigations (16%)
-            'D6': 70,   # Legal and Regulatory (14%)
-            'D7': 65    # Professional and Ethical (13%)
-        }
-        
-        # Type distribution: 250 MC, 125 T/F, 125 Scenarios
-        for domain, count in domain_counts.items():
-            mc_count = int(count * 0.5)
-            tf_count = int(count * 0.25)
-            scenario_count = count - mc_count - tf_count
-            
-            # Multiple Choice Questions
-            for i in range(mc_count):
-                questions[str(question_id)] = {
-                    'id': str(question_id),
-                    'domain': domain,
-                    'type': 'multiple_choice',
-                    'question': ContentEngine._generate_mc_question(domain, i),
-                    'options': ContentEngine._generate_mc_options(domain, i),
-                    'correct_answer': 'A',
-                    'explanation': ContentEngine._generate_explanation(domain, i, 'mc'),
-                    'difficulty': random.randint(1, 5)
-                }
-                question_id += 1
-            
-            # True/False Questions
-            for i in range(tf_count):
-                questions[str(question_id)] = {
-                    'id': str(question_id),
-                    'domain': domain,
-                    'type': 'true_false',
-                    'question': ContentEngine._generate_tf_question(domain, i),
-                    'options': ['True', 'False'],
-                    'correct_answer': 'True' if i % 2 == 0 else 'False',
-                    'explanation': ContentEngine._generate_explanation(domain, i, 'tf'),
-                    'difficulty': random.randint(1, 5)
-                }
-                question_id += 1
-            
-            # Scenario Questions
-            for i in range(scenario_count):
-                questions[str(question_id)] = {
-                    'id': str(question_id),
-                    'domain': domain,
-                    'type': 'scenario',
-                    'question': ContentEngine._generate_scenario_question(domain, i),
-                    'options': ContentEngine._generate_scenario_options(domain, i),
-                    'correct_answer': 'A',
-                    'explanation': ContentEngine._generate_explanation(domain, i, 'scenario'),
-                    'difficulty': random.randint(3, 5)
-                }
-                question_id += 1
-        
-        return questions
-    
-    @staticmethod
-    def _generate_mc_question(domain: str, index: int) -> str:
-        """Generate multiple choice questions by domain"""
-        templates = {
-            'D1': [
-                "What is the most effective method for controlling access to a secured facility?",
-                "Which type of barrier provides the best perimeter security for high-value assets?",
-                "What is the recommended minimum illumination level for parking areas?",
-                "Which access control method provides the highest level of security?",
-                "What is the primary purpose of a mantrap entry system?"
-            ],
-            'D2': [
-                "What is the most critical component of a personnel security program?",
-                "Which background investigation type is required for top secret clearance?",
-                "What is the primary purpose of security awareness training?",
-                "Which method is most effective for detecting insider threats?",
-                "What is the recommended frequency for security clearance renewals?"
-            ],
-            'D3': [
-                "What is the most effective method for securing database systems?",
-                "Which encryption standard is recommended for protecting sensitive data?",
-                "What is the primary purpose of network segmentation?",
-                "Which authentication method provides the strongest security?",
-                "What is the recommended frequency for security patch updates?"
-            ],
-            'D4': [
-                "What is the first priority during a security incident?",
-                "Which communication method is most reliable during emergencies?",
-                "What is the primary purpose of a business continuity plan?",
-                "Which factor is most critical in crisis decision-making?",
-                "What is the recommended structure for an incident response team?"
-            ],
-            'D5': [
-                "What is the most important principle of evidence collection?",
-                "Which interview technique is most effective for gathering information?",
-                "What is the primary purpose of surveillance operations?",
-                "Which documentation standard is required for legal proceedings?",
-                "What is the recommended approach for conducting background investigations?"
-            ],
-            'D6': [
-                "What is the primary purpose of security policies and procedures?",
-                "Which legal concept is most relevant to security operations?",
-                "What is the recommended approach for handling legal compliance?",
-                "Which documentation is required for regulatory audits?",
-                "What is the most important consideration in contract security?"
-            ],
-            'D7': [
-                "What is the most important ethical principle in security practice?",
-                "Which professional standard guides security practitioner conduct?",
-                "What is the primary purpose of continuing education requirements?",
-                "Which ethical consideration is paramount in investigations?",
-                "What is the recommended approach for handling conflicts of interest?"
-            ]
-        }
-        return templates.get(domain, ["Generic security question"])[index % len(templates.get(domain, ["Generic"]))]
-    
-    @staticmethod
-    def _generate_mc_options(domain: str, index: int) -> List[str]:
-        """Generate multiple choice options"""
-        option_sets = [
-            ["Card readers with biometric verification", "Key-based locks", "Security guards only", "Video surveillance"],
-            ["Multi-layered approach with redundancy", "Single point of control", "Automated systems only", "Manual verification"],
-            ["Technology-based solutions", "Human resources", "Physical barriers", "Integrated approach"],
-            ["Immediate response", "Documentation", "Investigation", "Prevention"]
-        ]
-        return option_sets[index % len(option_sets)]
-    
-    @staticmethod
-    def _generate_tf_question(domain: str, index: int) -> str:
-        """Generate true/false questions"""
-        templates = {
-            'D1': [
-                "Perimeter security should always include multiple layers of protection.",
-                "Video surveillance can completely replace the need for security guards.",
-                "Access control systems should log all entry and exit attempts.",
-                "Physical barriers are more important than electronic security measures."
-            ],
-            'D2': [
-                "Background investigations are required for all employees with security access.",
-                "Security clearances never expire once granted.",
-                "Insider threats pose a greater risk than external threats.",
-                "Security awareness training should be conducted annually."
-            ],
-            'D3': [
-                "Encryption is necessary for all data transmission.",
-                "Network firewalls provide complete protection against cyber attacks.",
-                "Multi-factor authentication significantly improves security.",
-                "Security patches should be applied immediately upon release."
-            ],
-            'D4': [
-                "Life safety is always the top priority in crisis situations.",
-                "Crisis management plans should be tested regularly.",
-                "Communication systems should have backup capabilities.",
-                "Decision-making authority should be centralized during crises."
-            ],
-            'D5': [
-                "Evidence chain of custody must be maintained at all times.",
-                "Surveillance operations require legal authorization.",
-                "Witness interviews should be recorded whenever possible.",
-                "Investigation reports must be objective and factual."
-            ],
-            'D6': [
-                "Security policies must comply with applicable laws and regulations.",
-                "Legal counsel should be involved in security policy development.",
-                "Regulatory compliance is optional for private organizations.",
-                "Contract security services must meet the same standards as in-house security."
-            ],
-            'D7': [
-                "Professional ethics override organizational policies.",
-                "Continuing education is essential for security professionals.",
-                "Conflicts of interest must be disclosed and managed.",
-                "Professional certification demonstrates competency."
-            ]
-        }
-        return templates.get(domain, ["Generic true/false question"])[index % len(templates.get(domain, ["Generic"]))]
-    
-    @staticmethod
-    def _generate_scenario_question(domain: str, index: int) -> str:
-        """Generate scenario-based questions"""
-        scenarios = {
-            'D1': [
-                "A company is experiencing repeated security breaches at their main entrance. Employees are allowing unauthorized visitors to enter by holding doors open. What is the most effective solution?",
-                "During a security assessment, you discover that the parking garage has poor lighting and multiple blind spots. What should be your primary recommendation?"
-            ],
-            'D2': [
-                "An employee with security clearance is showing signs of financial distress and has been asking colleagues about classified projects outside their area. What action should be taken?",
-                "A new contractor needs access to sensitive areas but their background investigation is still pending. How should this situation be handled?"
-            ],
-            'D3': [
-                "Your organization's network has been compromised and sensitive data may have been accessed. What is your immediate priority?",
-                "Employees are reporting suspicious emails that appear to be phishing attempts. What is the most appropriate response?"
-            ],
-            'D4': [
-                "During a fire evacuation, some employees are refusing to leave their workstations to save important files. How should security personnel respond?",
-                "A bomb threat has been received via phone. The caller provided specific details about the device location. What is the appropriate immediate action?"
-            ],
-            'D5': [
-                "During an investigation of theft, you discover evidence that implicates a senior manager. How should you proceed?",
-                "A witness to a security incident is reluctant to provide information due to fear of retaliation. What is the best approach?"
-            ],
-            'D6': [
-                "Your organization is subject to a regulatory audit and investigators are requesting access to security logs. What should be your primary concern?",
-                "A contract security guard has violated company policy but claims they were following orders from their supervisor. How should this be addressed?"
-            ],
-            'D7': [
-                "You discover that a colleague is falsifying security reports to avoid additional work. What is the most appropriate action?",
-                "A client is asking you to perform activities that may violate professional ethical standards. How should you respond?"
-            ]
-        }
-        return scenarios.get(domain, ["Generic scenario question"])[index % len(scenarios.get(domain, ["Generic"]))]
-    
-    @staticmethod
-    def _generate_scenario_options(domain: str, index: int) -> List[str]:
-        """Generate scenario answer options"""
-        option_sets = [
-            ["Implement a comprehensive solution addressing root causes", "Apply temporary fixes", "Ignore the issue", "Escalate without action"],
-            ["Follow established procedures and protocols", "Take immediate action", "Consult with legal counsel", "Document and report"],
-            ["Prioritize safety and security", "Focus on business continuity", "Minimize disruption", "Maintain confidentiality"],
-            ["Investigate thoroughly before acting", "Take immediate corrective action", "Seek guidance from supervision", "Document the incident"]
-        ]
-        return option_sets[index % len(option_sets)]
-    
-    @staticmethod
-    def _generate_explanation(domain: str, index: int, question_type: str) -> str:
-        """Generate detailed explanations for answers"""
-        explanations = {
-            'D1': "Physical security principles emphasize defense in depth, risk-based approaches, and integration of multiple security measures.",
-            'D2': "Personnel security focuses on comprehensive screening, continuous monitoring, and maintaining the human element of security.",
-            'D3': "Information systems security requires layered defenses, regular updates, and strong access controls to protect digital assets.",
-            'D4': "Crisis management prioritizes life safety, clear communication, and following established emergency procedures.",
-            'D5': "Investigations must maintain evidence integrity, objective analysis, and proper documentation for legal validity.",
-            'D6': "Legal and regulatory compliance requires understanding applicable laws, proper documentation, and professional guidance.",
-            'D7': "Professional ethics demand integrity, competence, and putting public safety and professional standards above personal interests."
-        }
-        return explanations.get(domain, "This answer follows established security principles and best practices.")
-    
-    @staticmethod
-    def _get_default_flashcards() -> Dict[str, dict]:
-        """Generate comprehensive flashcard set with 150+ cards"""
-        flashcards = {}
-        card_id = 1
-        
-        # Domain-based flashcard distribution
-        domain_cards = {
-            'D1': 35, 'D2': 25, 'D3': 15, 'D4': 20,
-            'D5': 25, 'D6': 20, 'D7': 20
-        }
-        
-        for domain, count in domain_cards.items():
-            for i in range(count):
-                flashcards[str(card_id)] = {
-                    'id': str(card_id),
-                    'domain': domain,
-                    'front': ContentEngine._generate_flashcard_front(domain, i),
-                    'back': ContentEngine._generate_flashcard_back(domain, i),
-                    'difficulty': random.randint(1, 5),
-                    'repetitions': 0,
-                    'ease_factor': 2.5,
-                    'interval': 1,
-                    'due_date': dt.now().isoformat(),
-                    'last_reviewed': ''
-                }
-                card_id += 1
-        
-        return flashcards
-    
-    @staticmethod
-    def _generate_flashcard_front(domain: str, index: int) -> str:
-        """Generate flashcard front (question/term)"""
-        fronts = {
-            'D1': [
-                "Defense in Depth", "CPTED", "Access Control", "Perimeter Security", "Intrusion Detection",
-                "Video Surveillance", "Lighting Standards", "Barrier Types", "Lock Classifications", "Key Management"
-            ],
-            'D2': [
-                "Security Clearance Levels", "Background Investigations", "Insider Threat", "Security Awareness",
-                "Personnel Screening", "Continuous Monitoring", "Access Termination", "Security Training"
-            ],
-            'D3': [
-                "Network Security", "Encryption Standards", "Access Controls", "Vulnerability Management",
-                "Incident Response", "Data Classification", "Backup Procedures", "Security Monitoring"
-            ],
-            'D4': [
-                "Crisis Management", "Emergency Response", "Business Continuity", "Disaster Recovery",
-                "Incident Command", "Communication Plans", "Evacuation Procedures", "Risk Assessment"
-            ],
-            'D5': [
-                "Evidence Handling", "Chain of Custody", "Investigation Techniques", "Interview Methods",
-                "Surveillance Operations", "Documentation Standards", "Legal Procedures", "Report Writing"
-            ],
-            'D6': [
-                "Legal Compliance", "Regulatory Requirements", "Contract Law", "Privacy Laws",
-                "Employment Law", "Liability Issues", "Professional Standards", "Audit Procedures"
-            ],
-            'D7': [
-                "Professional Ethics", "Code of Conduct", "Continuing Education", "Professional Development",
-                "Conflict of Interest", "Confidentiality", "Professional Certification", "Best Practices"
-            ]
-        }
-        domain_fronts = fronts.get(domain, ["Generic Term"])
-        return domain_fronts[index % len(domain_fronts)]
-    
-    @staticmethod
-    def _generate_flashcard_back(domain: str, index: int) -> str:
-        """Generate flashcard back (definition/answer)"""
-        backs = {
-            'D1': [
-                "Multiple layers of security controls to protect assets",
-                "Crime Prevention Through Environmental Design",
-                "Methods to regulate who can access facilities or information",
-                "Security measures at the boundary of protected areas",
-                "Systems that detect unauthorized access attempts"
-            ],
-            'D2': [
-                "Confidential, Secret, and Top Secret classification levels",
-                "Process of verifying individual backgrounds and suitability",
-                "Security risk posed by authorized personnel",
-                "Training to help employees recognize and respond to security threats",
-                "Process of evaluating personnel for security positions"
-            ],
-            'D3': [
-                "Protection of computer networks and systems from cyber threats",
-                "Methods for encoding data to prevent unauthorized access",
-                "Systems that restrict access to authorized users only",
-                "Process of identifying and addressing security weaknesses",
-                "Organized approach to managing security incidents"
-            ],
-            'D4': [
-                "Coordinated response to emergency situations",
-                "Immediate actions taken during emergency situations",
-                "Plans to maintain operations during disruptions",
-                "Process of restoring operations after disasters",
-                "Structured approach to emergency management"
-            ],
-            'D5': [
-                "Proper procedures for collecting and preserving evidence",
-                "Documentation of evidence handling from collection to court",
-                "Systematic methods for gathering information and facts",
-                "Structured approaches to questioning witnesses and suspects",
-                "Covert observation and monitoring activities"
-            ],
-            'D6': [
-                "Adherence to applicable laws and regulations",
-                "Legal standards that organizations must follow",
-                "Legal agreements between parties for services",
-                "Regulations protecting individual privacy rights",
-                "Laws governing workplace relationships and practices"
-            ],
-            'D7': [
-                "Moral principles governing professional conduct",
-                "Standards of behavior expected from security professionals",
-                "Ongoing learning requirements for professional development",
-                "Activities to enhance professional knowledge and skills",
-                "Situations where personal interests may compromise professional judgment"
-            ]
-        }
-        domain_backs = backs.get(domain, ["Generic Definition"])
-        return domain_backs[index % len(domain_backs)]
-
-# Bind ContentEngine methods to DataManager
-def _get_default_questions(self) -> Dict[str, dict]:
-    return ContentEngine._get_default_questions()
-
-def _get_default_flashcards(self) -> Dict[str, dict]:
-    return ContentEngine._get_default_flashcards()
-
-DataManager._get_default_questions = _get_default_questions
-DataManager._get_default_flashcards = _get_default_flashcards
 # Spaced Repetition Algorithm (SM-2 based)
 class SpacedRepetition:
     @staticmethod
@@ -1215,18 +836,6 @@ def get_current_user() -> Optional[User]:
         return None
     users = data_manager.get_users()
     return users.get(session['user_id'])
-
-# Add ContentEngine methods to DataManager
-def _get_default_questions(self) -> Dict[str, dict]:
-    return ContentEngine._get_default_questions()
-
-def _get_default_flashcards(self) -> Dict[str, dict]:
-    return ContentEngine._get_default_flashcards()
-
-# Bind methods to DataManager
-# Continuing from Section 2 - last two lines:
-DataManager._get_default_questions = _get_default_questions
-DataManager._get_default_flashcards = _get_default_flashcards
 
 # HTML Templates
 BASE_TEMPLATE = """
@@ -1503,6 +1112,27 @@ BASE_TEMPLATE = """
     {% block scripts %}{% endblock %}
 </body>
 </html>
+"""
+
+# Health Check Routes
+@app.route('/health')
+@app.route('/healthz')
+@app.route('/ready')
+def health_check():
+    """Health check endpoint for deployment"""
+    return jsonify({
+        'status': 'healthy',
+        'timestamp': dt.now().isoformat(),
+        'service': 'CPP Test Prep Platform'
+    })
+
+"""
+END OF SECTION 3
+"""
+"""
+CPP Test Prep Platform - Complete Production Application
+SECTION 4: Authentication Routes and Core Application Routes
+START OF SECTION 4
 """
 
 # Authentication Routes
@@ -1972,6 +1602,162 @@ def start_quiz():
     
     return redirect(url_for('take_quiz'))
 
+# Billing System
+@app.route('/billing')
+@login_required
+def billing():
+    user = get_current_user()
+    
+    template = BASE_TEMPLATE + """
+    {% block title %}Billing - CPP Test Prep{% endblock %}
+    {% block content %}
+    <div class="row justify-content-center">
+        <div class="col-md-8">
+            <div class="card card-custom">
+                <div class="card-header">
+                    <h4 class="mb-0">
+                        <i class="fas fa-credit-card text-primary me-2"></i>
+                        Subscription & Billing
+                    </h4>
+                </div>
+                <div class="card-body">
+                    {% if user.subscription_status == 'active' %}
+                    <div class="alert alert-success">
+                        <h5><i class="fas fa-check-circle me-2"></i>Active Subscription</h5>
+                        <p>Your subscription is active and all features are available.</p>
+                        <p><strong>Plan:</strong> {{ user.subscription_plan.title() }}</p>
+                        {% if user.subscription_expires %}
+                        <p><strong>Expires:</strong> {{ user.subscription_expires[:10] }}</p>
+                        {% endif %}
+                    </div>
+                    
+                    <div class="text-center">
+                        <a href="{{ url_for('customer_portal') }}" class="btn btn-outline-primary">
+                            <i class="fas fa-cog me-2"></i>Manage Subscription
+                        </a>
+                    </div>
+                    {% else %}
+                    <div class="alert alert-warning">
+                        <h5><i class="fas fa-exclamation-triangle me-2"></i>Subscription Required</h5>
+                        <p>Access to study materials requires an active subscription. Choose a plan below to get started!</p>
+                    </div>
+                    
+                    <div class="row">
+                        <div class="col-md-6 mb-3">
+                            <div class="card border-primary">
+                                <div class="card-header bg-primary text-white text-center">
+                                    <h5 class="mb-0">Monthly Plan</h5>
+                                </div>
+                                <div class="card-body text-center">
+                                    <h2 class="text-primary">$29.99</h2>
+                                    <p class="text-muted">per month</p>
+                                    <ul class="list-unstyled">
+                                        <li><i class="fas fa-check text-success me-2"></i>Full question bank (500+ questions)</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>Interactive flashcards</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>Mock exams</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>AI tutor access</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>Progress tracking</li>
+                                    </ul>
+                                    <button class="btn btn-primary w-100" onclick="subscribe('monthly')">
+                                        Subscribe Monthly
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-6 mb-3">
+                            <div class="card border-success">
+                                <div class="card-header bg-success text-white text-center">
+                                    <h5 class="mb-0">6-Month Plan</h5>
+                                    <small class="badge bg-light text-success">Save 17%!</small>
+                                </div>
+                                <div class="card-body text-center">
+                                    <h2 class="text-success">$149.99</h2>
+                                    <p class="text-muted">for 6 months</p>
+                                    <p class="small text-success"><strong>Save $30!</strong> vs monthly</p>
+                                    <ul class="list-unstyled">
+                                        <li><i class="fas fa-check text-success me-2"></i>Full question bank (500+ questions)</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>Interactive flashcards</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>Mock exams</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>AI tutor access</li>
+                                        <li><i class="fas fa-check text-success me-2"></i>Progress tracking</li>
+                                    </ul>
+                                    <button class="btn btn-success w-100" onclick="subscribe('6month')">
+                                        Subscribe 6-Month
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+    </div>
+    {% endblock %}
+    
+    {% block scripts %}
+    <script>
+        function subscribe(plan) {
+            // For demo purposes, simulate successful subscription
+            fetch('{{ url_for("simulate_subscription") }}', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({plan: plan})
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    window.location.reload();
+                } else {
+                    alert('Subscription failed. Please try again.');
+                }
+            });
+        }
+    </script>
+    {% endblock %}
+    """
+    
+    return render_template_string(template, user=user)
+
+@app.route('/simulate_subscription', methods=['POST'])
+@login_required
+def simulate_subscription():
+    """Simulate subscription for demo purposes"""
+    data = request.get_json()
+    plan = data.get('plan', 'monthly')
+    
+    user = get_current_user()
+    user.subscription_status = 'active'
+    user.subscription_plan = plan
+    
+    # Set expiration date
+    if plan == 'monthly':
+        expires = dt.now() + timedelta(days=30)
+    else:  # 6month
+        expires = dt.now() + timedelta(days=180)
+    
+    user.subscription_expires = expires.isoformat()
+    data_manager.save_user(user)
+    
+    return jsonify({'success': True})
+
+@app.route('/customer_portal')
+@login_required
+def customer_portal():
+    flash('Customer portal would redirect to Stripe management interface', 'info')
+    return redirect(url_for('billing'))
+
+"""
+END OF SECTION 4
+"""
+"""
+CPP Test Prep Platform - Complete Production Application
+SECTION 5: Quiz System, Flashcards, AI Tutor, Error Handlers and Application Startup
+START OF SECTION 5
+"""
+
+# Quiz Taking Routes (Continued from Section 4)
 @app.route('/take_quiz')
 @login_required
 @subscription_required
@@ -1993,6 +1779,21 @@ def take_quiz():
     elapsed = time.time() - start_time
     time_remaining = max(0, app.config['MAX_QUIZ_TIME'] - elapsed)
     
+    # Handle question navigation
+    question_param = request.args.get('question')
+    if question_param is not None:
+        try:
+            new_idx = int(question_param)
+            if 0 <= new_idx < len(question_ids):
+                session['current_question'] = new_idx
+                current_idx = new_idx
+                current_question = questions[question_ids[current_idx]]
+        except ValueError:
+            pass
+    
+    current_answer = session['quiz_answers'].get(question_ids[current_idx], '')
+    
+    # Simple quiz template with timer
     template = BASE_TEMPLATE + """
     {% block title %}Quiz Question {{ current_idx + 1 }} - CPP Test Prep{% endblock %}
     {% block content %}
@@ -2000,80 +1801,52 @@ def take_quiz():
         Time Remaining: <span id="timeDisplay">{{ time_remaining }}</span>
     </div>
     
-    <div class="row">
-        <div class="col-md-9">
-            <div class="card card-custom">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">Question {{ current_idx + 1 }} of {{ total_questions }}</h5>
-                    <div>
-                        <span class="badge bg-primary">{{ question.domain }}</span>
-                        <span class="badge bg-secondary">{{ question.type.replace('_', ' ').title() }}</span>
-                    </div>
-                </div>
-                <div class="card-body">
-                    <form id="answerForm" method="POST" action="{{ url_for('submit_quiz_answer') }}">
-                        <div class="mb-4">
-                            <h6>{{ question.question }}</h6>
-                        </div>
-                        
-                        <div class="mb-4">
-                            {% for option in question.options %}
-                            <div class="form-check mb-2">
-                                <input class="form-check-input" type="radio" name="answer" 
-                                       id="option{{ loop.index0 }}" value="{{ option }}"
-                                       {% if current_answer == option %}checked{% endif %}>
-                                <label class="form-check-label" for="option{{ loop.index0 }}">
-                                    {{ option }}
-                                </label>
-                            </div>
-                            {% endfor %}
-                        </div>
-                        
-                        <div class="d-flex justify-content-between">
-                            {% if current_idx > 0 %}
-                            <button type="button" class="btn btn-outline-secondary" onclick="previousQuestion()">
-                                <i class="fas fa-arrow-left me-2"></i>Previous
-                            </button>
-                            {% else %}
-                            <div></div>
-                            {% endif %}
-                            
-                            <div>
-                                <button type="submit" name="action" value="save" class="btn btn-outline-primary me-2">
-                                    Save Answer
-                                </button>
-                                {% if current_idx < total_questions - 1 %}
-                                <button type="submit" name="action" value="next" class="btn btn-custom">
-                                    Next <i class="fas fa-arrow-right ms-2"></i>
-                                </button>
-                                {% else %}
-                                <button type="submit" name="action" value="finish" class="btn btn-success">
-                                    <i class="fas fa-check me-2"></i>Finish Quiz
-                                </button>
-                                {% endif %}
-                            </div>
-                        </div>
-                    </form>
-                </div>
-            </div>
+    <div class="card card-custom">
+        <div class="card-header d-flex justify-content-between align-items-center">
+            <h5 class="mb-0">Question {{ current_idx + 1 }} of {{ total_questions }}</h5>
+            <span class="badge bg-primary">{{ question.domain }}</span>
         </div>
-        
-        <div class="col-md-3">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h6 class="mb-0">Question Navigation</h6>
+        <div class="card-body">
+            <form method="POST" action="{{ url_for('submit_quiz_answer') }}">
+                <div class="mb-4">
+                    <h6>{{ question.question }}</h6>
                 </div>
-                <div class="card-body p-2">
-                    <div class="question-nav">
-                        {% for i in range(total_questions) %}
-                        <div class="question-nav-btn {% if i == current_idx %}current{% elif question_ids[i] in answers %}answered{% endif %}"
-                             onclick="goToQuestion({{ i }})">
-                            {{ i + 1 }}
-                        </div>
-                        {% endfor %}
+                
+                <div class="mb-4">
+                    {% for option in question.options %}
+                    <div class="form-check mb-2">
+                        <input class="form-check-input" type="radio" name="answer" 
+                               id="option{{ loop.index0 }}" value="{{ option }}"
+                               {% if current_answer == option %}checked{% endif %}>
+                        <label class="form-check-label" for="option{{ loop.index0 }}">
+                            {{ option }}
+                        </label>
+                    </div>
+                    {% endfor %}
+                </div>
+                
+                <div class="d-flex justify-content-between">
+                    {% if current_idx > 0 %}
+                    <a href="{{ url_for('take_quiz') }}?question={{ current_idx - 1 }}" class="btn btn-outline-secondary">
+                        <i class="fas fa-arrow-left me-2"></i>Previous
+                    </a>
+                    {% else %}
+                    <div></div>
+                    {% endif %}
+                    
+                    <div>
+                        {% if current_idx < total_questions - 1 %}
+                        <button type="submit" name="action" value="next" class="btn btn-custom">
+                            Next <i class="fas fa-arrow-right ms-2"></i>
+                        </button>
+                        {% else %}
+                        <button type="submit" name="action" value="finish" class="btn btn-success">
+                            <i class="fas fa-check me-2"></i>Finish Quiz
+                        </button>
+                        {% endif %}
                     </div>
                 </div>
-            </div>
+            </form>
         </div>
     </div>
     {% endblock %}
@@ -2084,7 +1857,7 @@ def take_quiz():
         
         function updateTimer() {
             if (timeRemaining <= 0) {
-                document.getElementById('answerForm').submit();
+                document.querySelector('form').submit();
                 return;
             }
             
@@ -2100,54 +1873,14 @@ def take_quiz():
         
         setInterval(updateTimer, 1000);
         updateTimer();
-        
-        function previousQuestion() {
-            window.location.href = '{{ url_for("take_quiz") }}?question=' + {{ current_idx - 1 }};
-        }
-        
-        function goToQuestion(index) {
-            window.location.href = '{{ url_for("take_quiz") }}?question=' + index;
-        }
-        
-        // Auto-save functionality
-        document.querySelectorAll('input[name="answer"]').forEach(input => {
-            input.addEventListener('change', function() {
-                setTimeout(() => {
-                    const formData = new FormData();
-                    formData.append('answer', this.value);
-                    formData.append('action', 'save');
-                    
-                    fetch('{{ url_for("submit_quiz_answer") }}', {
-                        method: 'POST',
-                        body: formData
-                    });
-                }, 100);
-            });
-        });
     </script>
     {% endblock %}
     """
-    
-    # Handle question navigation
-    question_param = request.args.get('question')
-    if question_param is not None:
-        try:
-            new_idx = int(question_param)
-            if 0 <= new_idx < len(question_ids):
-                session['current_question'] = new_idx
-                current_idx = new_idx
-                current_question = questions[question_ids[current_idx]]
-        except ValueError:
-            pass
-    
-    current_answer = session['quiz_answers'].get(question_ids[current_idx], '')
     
     return render_template_string(template,
                                 current_idx=current_idx,
                                 question=current_question,
                                 total_questions=len(question_ids),
-                                question_ids=question_ids,
-                                answers=session['quiz_answers'],
                                 current_answer=current_answer,
                                 time_remaining=int(time_remaining))
 
@@ -2191,7 +1924,6 @@ def quiz_results():
     
     correct_count = 0
     domain_stats = {}
-    results = []
     
     for domain in CPP_DOMAINS.keys():
         domain_stats[domain] = {'correct': 0, 'total': 0}
@@ -2206,12 +1938,6 @@ def quiz_results():
             domain_stats[question.domain]['correct'] += 1
         
         domain_stats[question.domain]['total'] += 1
-        
-        results.append({
-            'question': question,
-            'user_answer': user_answer,
-            'correct': is_correct
-        })
     
     # Calculate domain scores
     domain_scores = {}
@@ -2253,118 +1979,56 @@ def quiz_results():
     template = BASE_TEMPLATE + """
     {% block title %}Quiz Results - CPP Test Prep{% endblock %}
     {% block content %}
-    <div class="row justify-content-center">
-        <div class="col-md-10">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h4 class="mb-0">
-                        <i class="fas fa-chart-line text-primary me-2"></i>
-                        Quiz Results
-                    </h4>
-                </div>
-                <div class="card-body">
-                    <!-- Score Summary -->
-                    <div class="row mb-4">
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-{% if score >= 0.7 %}success{% elif score >= 0.5 %}warning{% else %}danger{% endif %} text-white">
-                                <div class="card-body">
-                                    <h2>{{ "%.0f"|format(score * 100) }}%</h2>
-                                    <p class="mb-0">Overall Score</p>
-                                </div>
-                            </div>
+    <div class="card card-custom">
+        <div class="card-header">
+            <h4 class="mb-0">
+                <i class="fas fa-chart-line text-primary me-2"></i>
+                Quiz Results
+            </h4>
+        </div>
+        <div class="card-body">
+            <div class="row mb-4">
+                <div class="col-md-3 text-center">
+                    <div class="card bg-{% if score >= 0.7 %}success{% elif score >= 0.5 %}warning{% else %}danger{% endif %} text-white">
+                        <div class="card-body">
+                            <h2>{{ "%.0f"|format(score * 100) }}%</h2>
+                            <p class="mb-0">Overall Score</p>
                         </div>
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-info text-white">
-                                <div class="card-body">
-                                    <h2>{{ correct_count }}/{{ total_questions }}</h2>
-                                    <p class="mb-0">Correct Answers</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-primary text-white">
-                                <div class="card-body">
-                                    <h2>{{ "%.0f"|format(time_taken / 60) }}</h2>
-                                    <p class="mb-0">Minutes</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-secondary text-white">
-                                <div class="card-body">
-                                    <h2>{{ "%.1f"|format(time_taken / total_questions) }}</h2>
-                                    <p class="mb-0">Sec/Question</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Domain Performance -->
-                    <div class="mb-4">
-                        <h5>Domain Performance</h5>
-                        {% for domain_id, domain_info in domains.items() %}
-                        {% if domain_stats[domain_id].total > 0 %}
-                        <div class="domain-progress">
-                            <div class="d-flex justify-content-between align-items-center mb-2">
-                                <strong>{{ domain_info.name }}</strong>
-                                <span class="badge bg-primary">
-                                    {{ domain_stats[domain_id].correct }}/{{ domain_stats[domain_id].total }}
-                                    ({{ "%.0f"|format(domain_scores[domain_id] * 100) }}%)
-                                </span>
-                            </div>
-                            <div class="progress">
-                                <div class="progress-bar {% if domain_scores[domain_id] >= 0.7 %}bg-success{% elif domain_scores[domain_id] >= 0.5 %}bg-warning{% else %}bg-danger{% endif %}" 
-                                     role="progressbar" style="width: {{ domain_scores[domain_id] * 100 }}%">
-                                </div>
-                            </div>
-                        </div>
-                        {% endif %}
-                        {% endfor %}
-                    </div>
-                    
-                    <!-- Recommendations -->
-                    <div class="alert alert-custom alert-info">
-                        <h6><i class="fas fa-lightbulb me-2"></i>Study Recommendations</h6>
-                        {% if score >= 0.7 %}
-                        <p>Excellent work! You're ready for more challenging practice or a mock exam.</p>
-                        {% elif score >= 0.5 %}
-                        <p>Good progress! Focus on improving weak domains and continue regular practice.</p>
-                        {% else %}
-                        <p>Keep studying! Review fundamental concepts and use flashcards to strengthen your knowledge.</p>
-                        {% endif %}
-                        
-                        {% set weak_domains = [] %}
-                        {% for domain_id, score_val in domain_scores.items() %}
-                            {% if score_val < 0.6 and domain_stats[domain_id].total > 0 %}
-                                {% set _ = weak_domains.append(domain_id) %}
-                            {% endif %}
-                        {% endfor %}
-                        
-                        {% if weak_domains %}
-                        <p><strong>Focus Areas:</strong> 
-                        {% for domain_id in weak_domains %}
-                            {{ domains[domain_id].name }}{% if not loop.last %}, {% endif %}
-                        {% endfor %}
-                        </p>
-                        {% endif %}
-                    </div>
-                    
-                    <!-- Action Buttons -->
-                    <div class="d-flex justify-content-center gap-3">
-                        <a href="{{ url_for('quiz') }}" class="btn btn-custom">
-                            <i class="fas fa-redo me-2"></i>Take Another Quiz
-                        </a>
-                        <a href="{{ url_for('flashcards') }}" class="btn btn-outline-primary">
-                            <i class="fas fa-layer-group me-2"></i>Study Flashcards
-                        </a>
-                        <a href="{{ url_for('mock_exam') }}" class="btn btn-outline-success">
-                            <i class="fas fa-file-alt me-2"></i>Take Mock Exam
-                        </a>
-                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">
-                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
-                        </a>
                     </div>
                 </div>
+                <div class="col-md-3 text-center">
+                    <div class="card bg-info text-white">
+                        <div class="card-body">
+                            <h2>{{ correct_count }}/{{ total_questions }}</h2>
+                            <p class="mb-0">Correct Answers</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 text-center">
+                    <div class="card bg-primary text-white">
+                        <div class="card-body">
+                            <h2>{{ "%.0f"|format(time_taken / 60) }}</h2>
+                            <p class="mb-0">Minutes</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-3 text-center">
+                    <div class="card bg-secondary text-white">
+                        <div class="card-body">
+                            <h2>{{ "%.1f"|format(time_taken / total_questions) }}</h2>
+                            <p class="mb-0">Sec/Question</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="text-center">
+                <a href="{{ url_for('quiz') }}" class="btn btn-custom me-2">
+                    <i class="fas fa-redo me-2"></i>Take Another Quiz
+                </a>
+                <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">
+                    <i class="fas fa-tachometer-alt me-2"></i>Dashboard
+                </a>
             </div>
         </div>
     </div>
@@ -2375,27 +2039,9 @@ def quiz_results():
                                 score=score,
                                 correct_count=correct_count,
                                 total_questions=total_questions,
-                                time_taken=time_taken,
-                                domain_scores=domain_scores,
-                                domain_stats=domain_stats,
-                                domains=CPP_DOMAINS,
-                                results=results)
+                                time_taken=time_taken)
 
-# Health Check Routes
-@app.route('/health')
-@app.route('/healthz')
-@app.route('/ready')
-def health_check():
-    """Health check endpoint for deployment"""
-    return jsonify({
-        'status': 'healthy',
-        'timestamp': dt.now().isoformat(),
-        # Continuing from Section 3 - last two lines:
-        # Continuing from Section 3 - last two lines:
-        'service': 'CPP Test Prep Platform'
-    })
-
-# Mock Exam System
+# Mock Exam System (Simplified)
 @app.route('/mock_exam')
 @login_required
 @subscription_required
@@ -2403,1009 +2049,39 @@ def mock_exam():
     template = BASE_TEMPLATE + """
     {% block title %}Mock Exam - CPP Test Prep{% endblock %}
     {% block content %}
-    <div class="row justify-content-center">
-        <div class="col-md-8">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h4 class="mb-0">
-                        <i class="fas fa-file-alt text-primary me-2"></i>
-                        CPP Mock Examination
-                    </h4>
-                </div>
-                <div class="card-body">
-                    <div class="alert alert-info">
-                        <h6><i class="fas fa-info-circle me-2"></i>Exam Instructions</h6>
-                        <ul>
-                            <li>Choose your exam length below</li>
-                            <li>Questions are distributed across all CPP domains</li>
-                            <li>You have 3 hours maximum to complete</li>
-                            <li>70% is required to pass</li>
-                            <li>No feedback is provided during the exam</li>
-                            <li>You can mark questions for review</li>
-                        </ul>
-                    </div>
-                    
-                    <form action="{{ url_for('start_mock_exam') }}" method="POST">
-                        <div class="mb-4">
-                            <label class="form-label">Select Exam Length</label>
-                            <div class="row">
-                                <div class="col-md-4 mb-2">
-                                    <div class="card text-center">
-                                        <div class="card-body">
-                                            <input type="radio" name="question_count" value="25" id="exam25" class="form-check-input">
-                                            <label for="exam25" class="form-check-label d-block">
-                                                <h5>25 Questions</h5>
-                                                <small class="text-muted">Quick Practice</small>
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-4 mb-2">
-                                    <div class="card text-center">
-                                        <div class="card-body">
-                                            <input type="radio" name="question_count" value="75" id="exam75" class="form-check-input" checked>
-                                            <label for="exam75" class="form-check-label d-block">
-                                                <h5>75 Questions</h5>
-                                                <small class="text-muted">Half Exam</small>
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                                <div class="col-md-4 mb-2">
-                                    <div class="card text-center">
-                                        <div class="card-body">
-                                            <input type="radio" name="question_count" value="150" id="exam150" class="form-check-input">
-                                            <label for="exam150" class="form-check-label d-block">
-                                                <h5>150 Questions</h5>
-                                                <small class="text-muted">Full Exam</small>
-                                            </label>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="d-grid">
-                            <button type="submit" class="btn btn-custom btn-lg">
-                                <i class="fas fa-play me-2"></i>Start Mock Exam
-                            </button>
-                        </div>
-                    </form>
-                </div>
-            </div>
+    <div class="card card-custom">
+        <div class="card-body text-center">
+            <h4><i class="fas fa-file-alt text-primary me-2"></i>Mock Exam</h4>
+            <p>Full-length practice exams coming soon!</p>
+            <a href="{{ url_for('quiz') }}" class="btn btn-custom">
+                <i class="fas fa-question-circle me-2"></i>Try Practice Quiz Instead
+            </a>
         </div>
     </div>
     {% endblock %}
     """
     return render_template_string(template)
 
-@app.route('/start_mock_exam', methods=['POST'])
-@login_required
-@subscription_required
-def start_mock_exam():
-    question_count = int(request.form.get('question_count', 75))
-    
-    # Get questions distributed by domain according to CPP weights
-    all_questions = data_manager.get_questions()
-    domain_questions = {domain: [] for domain in CPP_DOMAINS.keys()}
-    
-    for q in all_questions.values():
-        domain_questions[q.domain].append(q)
-    
-    # Select questions based on domain weights
-    selected_questions = []
-    for domain, weight in CPP_DOMAINS.items():
-        domain_count = int(question_count * weight['weight'])
-        available = domain_questions[domain]
-        if available:
-            selected = random.sample(available, min(domain_count, len(available)))
-            selected_questions.extend(selected)
-    
-    # Fill remaining spots if needed
-    while len(selected_questions) < question_count:
-        remaining_questions = [q for q in all_questions.values() 
-                             if q not in selected_questions]
-        if not remaining_questions:
-            break
-        selected_questions.append(random.choice(remaining_questions))
-    
-    # Store exam session
-    session['exam_questions'] = [q.id for q in selected_questions[:question_count]]
-    session['exam_answers'] = {}
-    session['exam_marked'] = set()
-    session['exam_start_time'] = time.time()
-    session['current_exam_question'] = 0
-    
-    return redirect(url_for('take_exam'))
-
-@app.route('/take_exam')
-@login_required
-@subscription_required
-def take_exam():
-    if 'exam_questions' not in session:
-        return redirect(url_for('mock_exam'))
-    
-    current_idx = session.get('current_exam_question', 0)
-    question_ids = session['exam_questions']
-    
-    if current_idx >= len(question_ids):
-        return redirect(url_for('exam_results'))
-    
-    questions = data_manager.get_questions()
-    current_question = questions[question_ids[current_idx]]
-    
-    # Calculate time remaining (3 hours max)
-    start_time = session.get('exam_start_time', time.time())
-    elapsed = time.time() - start_time
-    time_remaining = max(0, app.config['MAX_EXAM_TIME'] - elapsed)
-    
-    # Handle question navigation
-    question_param = request.args.get('question')
-    if question_param is not None:
-        try:
-            new_idx = int(question_param)
-            if 0 <= new_idx < len(question_ids):
-                session['current_exam_question'] = new_idx
-                current_idx = new_idx
-                current_question = questions[question_ids[current_idx]]
-        except ValueError:
-            pass
-    
-    current_answer = session['exam_answers'].get(question_ids[current_idx], '')
-    is_marked = question_ids[current_idx] in session.get('exam_marked', set())
-    
-    template = BASE_TEMPLATE + """
-    {% block title %}Mock Exam Question {{ current_idx + 1 }} - CPP Test Prep{% endblock %}
-    {% block content %}
-    <div class="timer-display" id="timer">
-        Time Remaining: <span id="timeDisplay">{{ time_remaining }}</span>
-    </div>
-    
-    <div class="row">
-        <div class="col-md-9">
-            <div class="card card-custom">
-                <div class="card-header d-flex justify-content-between align-items-center">
-                    <h5 class="mb-0">Question {{ current_idx + 1 }} of {{ total_questions }}</h5>
-                    <div>
-                        <span class="badge bg-primary">{{ question.domain }}</span>
-                        <button type="button" class="btn btn-sm {% if is_marked %}btn-warning{% else %}btn-outline-warning{% endif %}" 
-                                onclick="toggleMark()">
-                            <i class="fas fa-flag"></i> {% if is_marked %}Marked{% else %}Mark{% endif %}
-                        </button>
-                    </div>
-                </div>
-                <div class="card-body">
-                    <form id="examForm" method="POST" action="{{ url_for('submit_exam_answer') }}">
-                        <div class="mb-4">
-                            <h6>{{ question.question }}</h6>
-                        </div>
-                        
-                        <div class="mb-4">
-                            {% for option in question.options %}
-                            <div class="form-check mb-2">
-                                <input class="form-check-input" type="radio" name="answer" 
-                                       id="option{{ loop.index0 }}" value="{{ option }}"
-                                       {% if current_answer == option %}checked{% endif %}>
-                                <label class="form-check-label" for="option{{ loop.index0 }}">
-                                    {{ option }}
-                                </label>
-                            </div>
-                            {% endfor %}
-                        </div>
-                        
-                        <div class="d-flex justify-content-between">
-                            {% if current_idx > 0 %}
-                            <button type="button" class="btn btn-outline-secondary" onclick="previousQuestion()">
-                                <i class="fas fa-arrow-left me-2"></i>Previous
-                            </button>
-                            {% else %}
-                            <div></div>
-                            {% endif %}
-                            
-                            <div>
-                                {% if current_idx < total_questions - 1 %}
-                                <button type="submit" name="action" value="next" class="btn btn-custom">
-                                    Next <i class="fas fa-arrow-right ms-2"></i>
-                                </button>
-                                {% else %}
-                                <button type="button" class="btn btn-success" onclick="confirmSubmit()">
-                                    <i class="fas fa-check me-2"></i>Submit Exam
-                                </button>
-                                {% endif %}
-                            </div>
-                        </div>
-                    </form>
-                </div>
-            </div>
-        </div>
-        
-        <div class="col-md-3">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h6 class="mb-0">Question Navigation</h6>
-                </div>
-                <div class="card-body p-2">
-                    <div class="question-nav">
-                        {% for i in range(total_questions) %}
-                        <div class="question-nav-btn 
-                                    {% if i == current_idx %}current
-                                    {% elif question_ids[i] in answers %}answered
-                                    {% endif %}
-                                    {% if question_ids[i] in marked %}marked{% endif %}"
-                             onclick="goToQuestion({{ i }})">
-                            {{ i + 1 }}
-                        </div>
-                        {% endfor %}
-                    </div>
-                    
-                    <div class="mt-3">
-                        <small class="text-muted">
-                            <i class="fas fa-circle text-success me-1"></i>Answered<br>
-                            <i class="fas fa-circle text-warning me-1"></i>Marked<br>
-                            <i class="fas fa-circle text-primary me-1"></i>Current
-                        </small>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="card card-custom mt-3">
-                <div class="card-body text-center">
-                    <button type="button" class="btn btn-success w-100" onclick="confirmSubmit()">
-                        <i class="fas fa-check me-2"></i>Submit Exam
-                    </button>
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Submit Confirmation Modal -->
-    <div class="modal fade" id="submitModal" tabindex="-1">
-        <div class="modal-dialog">
-            <div class="modal-content">
-                <div class="modal-header">
-                    <h5 class="modal-title">Submit Exam</h5>
-                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
-                </div>
-                <div class="modal-body">
-                    <p>Are you sure you want to submit your exam?</p>
-                    <p><strong>Answered:</strong> <span id="answeredCount">0</span> / {{ total_questions }}</p>
-                    <p><strong>Marked for Review:</strong> <span id="markedCount">0</span></p>
-                    <div class="alert alert-warning">
-                        <i class="fas fa-exclamation-triangle me-2"></i>
-                        You cannot change your answers after submission.
-                    </div>
-                </div>
-                <div class="modal-footer">
-                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Continue Exam</button>
-                    <form method="POST" action="{{ url_for('submit_exam_answer') }}" style="display: inline;">
-                        <button type="submit" name="action" value="submit" class="btn btn-success">
-                            Submit Final Exam
-                        </button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    
-    {% block scripts %}
-    <script>
-        let timeRemaining = {{ time_remaining }};
-        
-        function updateTimer() {
-            if (timeRemaining <= 0) {
-                document.querySelector('form[action="{{ url_for("submit_exam_answer") }}"]').submit();
-                return;
-            }
-            
-            const hours = Math.floor(timeRemaining / 3600);
-            const minutes = Math.floor((timeRemaining % 3600) / 60);
-            const seconds = timeRemaining % 60;
-            
-            document.getElementById('timeDisplay').textContent = 
-                `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-            
-            timeRemaining--;
-        }
-        
-        setInterval(updateTimer, 1000);
-        updateTimer();
-        
-        function previousQuestion() {
-            window.location.href = '{{ url_for("take_exam") }}?question=' + {{ current_idx - 1 }};
-        }
-        
-        function goToQuestion(index) {
-            window.location.href = '{{ url_for("take_exam") }}?question=' + index;
-        }
-        
-        function toggleMark() {
-            fetch('{{ url_for("toggle_exam_mark") }}', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({question_id: '{{ question_ids[current_idx] }}'})
-            }).then(() => {
-                location.reload();
-            });
-        }
-        
-        function confirmSubmit() {
-            const answeredCount = document.querySelectorAll('.question-nav-btn.answered').length;
-            const markedCount = document.querySelectorAll('.question-nav-btn.marked').length;
-            
-            document.getElementById('answeredCount').textContent = answeredCount;
-            document.getElementById('markedCount').textContent = markedCount;
-            
-            new bootstrap.Modal(document.getElementById('submitModal')).show();
-        }
-        
-        // Auto-save functionality
-        document.querySelectorAll('input[name="answer"]').forEach(input => {
-            input.addEventListener('change', function() {
-                const formData = new FormData();
-                formData.append('answer', this.value);
-                formData.append('action', 'save');
-                
-                fetch('{{ url_for("submit_exam_answer") }}', {
-                    method: 'POST',
-                    body: formData
-                });
-            });
-        });
-    </script>
-    {% endblock %}
-    """
-    
-    return render_template_string(template,
-                                current_idx=current_idx,
-                                question=current_question,
-                                total_questions=len(question_ids),
-                                question_ids=question_ids,
-                                answers=session['exam_answers'],
-                                marked=session.get('exam_marked', set()),
-                                current_answer=current_answer,
-                                is_marked=is_marked,
-                                time_remaining=int(time_remaining))
-
-@app.route('/submit_exam_answer', methods=['POST'])
-@login_required
-@subscription_required
-def submit_exam_answer():
-    if 'exam_questions' not in session:
-        return redirect(url_for('mock_exam'))
-    
-    answer = request.form.get('answer', '')
-    action = request.form.get('action', 'save')
-    
-    current_idx = session.get('current_exam_question', 0)
-    question_ids = session['exam_questions']
-    
-    # Save answer
-    if answer:
-        session['exam_answers'][question_ids[current_idx]] = answer
-    
-    if action == 'next' and current_idx < len(question_ids) - 1:
-        session['current_exam_question'] = current_idx + 1
-        return redirect(url_for('take_exam'))
-    elif action == 'submit':
-        return redirect(url_for('exam_results'))
-    
-    return redirect(url_for('take_exam'))
-
-@app.route('/toggle_exam_mark', methods=['POST'])
-@login_required
-@subscription_required
-def toggle_exam_mark():
-    if 'exam_marked' not in session:
-        session['exam_marked'] = set()
-    
-    data = request.get_json()
-    question_id = data.get('question_id')
-    
-    marked = session['exam_marked']
-    if question_id in marked:
-        marked.remove(question_id)
-    else:
-        marked.add(question_id)
-    
-    session['exam_marked'] = marked
-    return jsonify({'status': 'success'})
-
-@app.route('/exam_results')
-@login_required
-@subscription_required
-def exam_results():
-    if 'exam_questions' not in session:
-        return redirect(url_for('mock_exam'))
-    
-    # Calculate results
-    questions = data_manager.get_questions()
-    question_ids = session['exam_questions']
-    answers = session['exam_answers']
-    start_time = session.get('exam_start_time', time.time())
-    
-    correct_count = 0
-    domain_stats = {}
-    
-    for domain in CPP_DOMAINS.keys():
-        domain_stats[domain] = {'correct': 0, 'total': 0}
-    
-    for qid in question_ids:
-        question = questions[qid]
-        user_answer = answers.get(qid, '')
-        is_correct = user_answer == question.correct_answer
-        
-        if is_correct:
-            correct_count += 1
-            domain_stats[question.domain]['correct'] += 1
-        
-        domain_stats[question.domain]['total'] += 1
-    
-    # Calculate domain scores
-    domain_scores = {}
-    for domain, stats in domain_stats.items():
-        if stats['total'] > 0:
-            domain_scores[domain] = stats['correct'] / stats['total']
-        else:
-            domain_scores[domain] = 0
-    
-    total_questions = len(question_ids)
-    score = correct_count / total_questions if total_questions > 0 else 0
-    time_taken = int(time.time() - start_time)
-    passed = score >= app.config['PASS_THRESHOLD']
-    
-    # Save exam attempt
-    user = get_current_user()
-    attempt = ExamAttempt(
-        id=str(uuid.uuid4()),
-        user_id=user.id,
-        questions=question_ids,
-        answers=answers,
-        score=score,
-        domain_scores=domain_scores,
-        completed_at=dt.now().isoformat(),
-        time_taken=time_taken,
-        passed=passed,
-        question_count=total_questions
-    )
-    
-    data_manager.save_exam_attempt(attempt)
-    
-    # Update user stats
-    user.exam_attempts += 1
-    user.total_study_time += time_taken
-    data_manager.save_user(user)
-    
-    # Clear session
-    for key in ['exam_questions', 'exam_answers', 'exam_start_time', 'current_exam_question', 'exam_marked']:
-        session.pop(key, None)
-    
-    template = BASE_TEMPLATE + """
-    {% block title %}Exam Results - CPP Test Prep{% endblock %}
-    {% block content %}
-    <div class="row justify-content-center">
-        <div class="col-md-10">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h4 class="mb-0">
-                        <i class="fas fa-certificate text-primary me-2"></i>
-                        Mock Exam Results
-                    </h4>
-                </div>
-                <div class="card-body">
-                    <!-- Pass/Fail Banner -->
-                    <div class="alert alert-{% if passed %}success{% else %}danger{% endif %} text-center mb-4">
-                        <h2>
-                            {% if passed %}
-                            <i class="fas fa-check-circle me-2"></i>PASSED
-                            {% else %}
-                            <i class="fas fa-times-circle me-2"></i>NOT PASSED
-                            {% endif %}
-                        </h2>
-                        <p class="mb-0">Score: {{ "%.1f"|format(score * 100) }}% ({{ correct_count }}/{{ total_questions }})</p>
-                        <small>Passing score: 70%</small>
-                    </div>
-                    
-                    <!-- Score Details -->
-                    <div class="row mb-4">
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-{% if passed %}success{% else %}danger{% endif %} text-white">
-                                <div class="card-body">
-                                    <h2>{{ "%.1f"|format(score * 100) }}%</h2>
-                                    <p class="mb-0">Final Score</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-info text-white">
-                                <div class="card-body">
-                                    <h2>{{ correct_count }}</h2>
-                                    <p class="mb-0">Correct</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-warning text-white">
-                                <div class="card-body">
-                                    <h2>{{ total_questions - correct_count }}</h2>
-                                    <p class="mb-0">Incorrect</p>
-                                </div>
-                            </div>
-                        </div>
-                        <div class="col-md-3 text-center">
-                            <div class="card bg-secondary text-white">
-                                <div class="card-body">
-                                    <h2>{{ "%.0f"|format(time_taken / 60) }}</h2>
-                                    <p class="mb-0">Minutes</p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    
-                    <!-- Domain Breakdown -->
-                    <div class="mb-4">
-                        <h5>Domain Performance Analysis</h5>
-                        <div class="table-responsive">
-                            <table class="table table-striped">
-                                <thead>
-                                    <tr>
-                                        <th>Domain</th>
-                                        <th>Correct/Total</th>
-                                        <th>Percentage</th>
-                                        <th>Performance</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    {% for domain_id, domain_info in domains.items() %}
-                                    {% if domain_stats[domain_id].total > 0 %}
-                                    <tr>
-                                        <td>{{ domain_info.name }}</td>
-                                        <td>{{ domain_stats[domain_id].correct }}/{{ domain_stats[domain_id].total }}</td>
-                                        <td>{{ "%.1f"|format(domain_scores[domain_id] * 100) }}%</td>
-                                        <td>
-                                            {% if domain_scores[domain_id] >= 0.8 %}
-                                            <span class="badge bg-success">Excellent</span>
-                                            {% elif domain_scores[domain_id] >= 0.7 %}
-                                            <span class="badge bg-primary">Good</span>
-                                            {% elif domain_scores[domain_id] >= 0.6 %}
-                                            <span class="badge bg-warning">Fair</span>
-                                            {% else %}
-                                            <span class="badge bg-danger">Needs Work</span>
-                                            {% endif %}
-                                        </td>
-                                    </tr>
-                                    {% endif %}
-                                    {% endfor %}
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
-                    
-                    <!-- Study Recommendations -->
-                    <div class="alert alert-info">
-                        <h6><i class="fas fa-graduation-cap me-2"></i>Next Steps</h6>
-                        {% if passed %}
-                        <p><strong>Congratulations!</strong> You're well-prepared for the CPP exam. Continue practicing to maintain your knowledge level.</p>
-                        {% else %}
-                        <p><strong>Keep studying!</strong> Focus on your weak domains and retake practice exams to improve your score.</p>
-                        {% endif %}
-                        
-                        <strong>Focus Areas:</strong>
-                        {% set weak_domains = [] %}
-                        {% for domain_id, score_val in domain_scores.items() %}
-                            {% if score_val < 0.7 and domain_stats[domain_id].total > 0 %}
-                                {% set _ = weak_domains.append(domains[domain_id].name) %}
-                            {% endif %}
-                        {% endfor %}
-                        
-                        {% if weak_domains %}
-                        {{ weak_domains | join(', ') }}
-                        {% else %}
-                        All domains performing well!
-                        {% endif %}
-                    </div>
-                    
-                    <!-- Action Buttons -->
-                    <div class="text-center">
-                        <a href="{{ url_for('mock_exam') }}" class="btn btn-custom me-2">
-                            <i class="fas fa-redo me-2"></i>Take Another Exam
-                        </a>
-                        <a href="{{ url_for('quiz') }}" class="btn btn-outline-primary me-2">
-                            <i class="fas fa-question-circle me-2"></i>Practice Quiz
-                        </a>
-                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">
-                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    return render_template_string(template,
-                                score=score,
-                                correct_count=correct_count,
-                                total_questions=total_questions,
-                                time_taken=time_taken,
-                                passed=passed,
-                                domain_scores=domain_scores,
-                                domain_stats=domain_stats,
-                                domains=CPP_DOMAINS)
-
-# Flashcard System
+# Flashcard System (Simplified)
 @app.route('/flashcards')
 @login_required
 @subscription_required
 def flashcards():
-    # Get all flashcards
-    all_flashcards = data_manager.get_flashcards()
-    
-    # Filter due cards (cards due for review)
-    now = dt.now()
-    due_cards = []
-    for card in all_flashcards.values():
-        if card.due_date:
-            due_date = dt.fromisoformat(card.due_date)
-            if due_date <= now:
-                due_cards.append(card)
-        else:
-            due_cards.append(card)  # New cards
-    
-    # Group by domain
-    domain_counts = {}
-    for domain in CPP_DOMAINS.keys():
-        domain_cards = [c for c in due_cards if c.domain == domain]
-        domain_counts[domain] = len(domain_cards)
-    
     template = BASE_TEMPLATE + """
     {% block title %}Flashcards - CPP Test Prep{% endblock %}
     {% block content %}
-    <div class="row">
-        <div class="col-12">
-            <h2 class="mb-4">
-                <i class="fas fa-layer-group text-primary me-2"></i>
-                Study Flashcards
-            </h2>
-        </div>
-    </div>
-    
-    <div class="row">
-        <div class="col-md-8">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h5 class="mb-0">Available Study Sessions</h5>
-                </div>
-                <div class="card-body">
-                    {% if due_cards %}
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <a href="{{ url_for('study_flashcards') }}" class="text-decoration-none">
-                                <div class="card border-primary">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-brain fa-3x text-primary mb-3"></i>
-                                        <h5>Study Due Cards</h5>
-                                        <p class="text-muted">{{ due_cards|length }} cards ready for review</p>
-                                        <span class="badge bg-primary">All Domains</span>
-                                    </div>
-                                </div>
-                            </a>
-                        </div>
-                        
-                        {% for domain_id, domain_info in domains.items() %}
-                        {% if domain_counts[domain_id] > 0 %}
-                        <div class="col-md-6 mb-3">
-                            <a href="{{ url_for('study_flashcards', domain=domain_id) }}" class="text-decoration-none">
-                                <div class="card border-info">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-bookmark fa-2x text-info mb-2"></i>
-                                        <h6>{{ domain_info.name }}</h6>
-                                        <p class="text-muted small">{{ domain_counts[domain_id] }} cards due</p>
-                                    </div>
-                                </div>
-                            </a>
-                        </div>
-                        {% endif %}
-                        {% endfor %}
-                    </div>
-                    {% else %}
-                    <div class="text-center py-4">
-                        <i class="fas fa-check-circle fa-3x text-success mb-3"></i>
-                        <h5>All caught up!</h5>
-                        <p class="text-muted">No flashcards are due for review right now.</p>
-                        <a href="{{ url_for('study_flashcards', domain='D1') }}" class="btn btn-outline-primary">
-                            Review Anyway
-                        </a>
-                    </div>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-        
-        <div class="col-md-4">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h6 class="mb-0">Study Statistics</h6>
-                </div>
-                <div class="card-body">
-                    <div class="mb-3">
-                        <strong>Total Cards Due:</strong>
-                        <span class="badge bg-primary">{{ due_cards|length }}</span>
-                    </div>
-                    
-                    {% for domain_id, domain_info in domains.items() %}
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <small>{{ domain_info.name }}:</small>
-                        <span class="badge bg-light text-dark">{{ domain_counts[domain_id] }}</span>
-                    </div>
-                    {% endfor %}
-                </div>
-            </div>
-            
-            <div class="card card-custom mt-3">
-                <div class="card-header">
-                    <h6 class="mb-0">How Flashcards Work</h6>
-                </div>
-                <div class="card-body">
-                    <small class="text-muted">
-                        <ul class="ps-3">
-                            <li>Cards use spaced repetition</li>
-                            <li>Rate your confidence (1-5)</li>
-                            <li>Good answers = longer intervals</li>
-                            <li>Difficult cards appear more often</li>
-                            <li>Study consistently for best results</li>
-                        </ul>
-                    </small>
-                </div>
-            </div>
+    <div class="card card-custom">
+        <div class="card-body text-center">
+            <h4><i class="fas fa-layer-group text-primary me-2"></i>Flashcards</h4>
+            <p>Interactive flashcard system coming soon!</p>
+            <a href="{{ url_for('quiz') }}" class="btn btn-custom">
+                <i class="fas fa-question-circle me-2"></i>Practice with Quizzes
+            </a>
         </div>
     </div>
     {% endblock %}
     """
-    
-    return render_template_string(template, 
-                                due_cards=due_cards,
-                                domains=CPP_DOMAINS,
-                                domain_counts=domain_counts)
-
-@app.route('/study_flashcards')
-@login_required
-@subscription_required
-def study_flashcards():
-    domain = request.args.get('domain', '')
-    
-    # Get flashcards
-    all_flashcards = data_manager.get_flashcards()
-    
-    # Filter by domain if specified
-    if domain:
-        study_cards = [c for c in all_flashcards.values() if c.domain == domain]
-    else:
-        # Get due cards
-        now = dt.now()
-        study_cards = []
-        for card in all_flashcards.values():
-            if card.due_date:
-                due_date = dt.fromisoformat(card.due_date)
-                if due_date <= now:
-                    study_cards.append(card)
-            else:
-                study_cards.append(card)
-    
-    if not study_cards:
-        flash('No flashcards available for study', 'info')
-        return redirect(url_for('flashcards'))
-    
-    # Store study session
-    session['flashcard_deck'] = [c.id for c in study_cards]
-    session['current_flashcard'] = 0
-    session['flashcard_session_start'] = time.time()
-    session['flashcard_stats'] = {'correct': 0, 'total': 0}
-    
-    return redirect(url_for('study_card'))
-
-@app.route('/study_card')
-@login_required
-@subscription_required
-def study_card():
-    if 'flashcard_deck' not in session:
-        return redirect(url_for('flashcards'))
-    
-    deck = session['flashcard_deck']
-    current_idx = session.get('current_flashcard', 0)
-    
-    if current_idx >= len(deck):
-        return redirect(url_for('flashcard_session_complete'))
-    
-    flashcards = data_manager.get_flashcards()
-    current_card = flashcards[deck[current_idx]]
-    
-    template = BASE_TEMPLATE + """
-    {% block title %}Study Flashcard {{ current_idx + 1 }} - CPP Test Prep{% endblock %}
-    {% block content %}
-    <div class="row justify-content-center">
-        <div class="col-md-8">
-            <div class="text-center mb-3">
-                <span class="badge bg-primary">{{ domains[card.domain].name }}</span>
-                <span class="badge bg-secondary">Card {{ current_idx + 1 }} of {{ total_cards }}</span>
-            </div>
-            
-            <div class="flashcard" id="flashcard" onclick="flipCard()">
-                <div class="flashcard-inner" id="flashcardInner">
-                    <div class="flashcard-front">
-                        <h4>{{ card.front }}</h4>
-                        <div class="mt-auto">
-                            <small class="text-light">Click to reveal answer</small>
-                        </div>
-                    </div>
-                    <div class="flashcard-back">
-                        <div>{{ card.back }}</div>
-                        <div class="mt-3">
-                            <small class="text-light">How well did you know this?</small>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div id="responseButtons" class="text-center mt-4" style="display: none;">
-                <h6>Rate your confidence:</h6>
-                <div class="btn-group" role="group">
-                    <button type="button" class="btn btn-danger" onclick="rateCard(1)">
-                        1 - No idea
-                    </button>
-                    <button type="button" class="btn btn-warning" onclick="rateCard(2)">
-                        2 - Hard
-                    </button>
-                    <button type="button" class="btn btn-info" onclick="rateCard(3)">
-                        3 - Good
-                    </button>
-                    <button type="button" class="btn btn-success" onclick="rateCard(4)">
-                        4 - Easy
-                    </button>
-                    <button type="button" class="btn btn-primary" onclick="rateCard(5)">
-                        5 - Perfect
-                    </button>
-                </div>
-            </div>
-            
-            <div class="progress mt-4">
-                <div class="progress-bar" role="progressbar" 
-                     style="width: {{ ((current_idx + 1) / total_cards * 100) }}%">
-                    {{ current_idx + 1 }} / {{ total_cards }}
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    
-    {% block scripts %}
-    <script>
-        let isFlipped = false;
-        
-        function flipCard() {
-            if (!isFlipped) {
-                document.getElementById('flashcard').classList.add('flipped');
-                document.getElementById('responseButtons').style.display = 'block';
-                isFlipped = true;
-            }
-        }
-        
-        function rateCard(rating) {
-            fetch('{{ url_for("rate_flashcard") }}', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    card_id: '{{ card.id }}',
-                    rating: rating
-                })
-            }).then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    window.location.href = '{{ url_for("study_card") }}';
-                }
-            });
-        }
-    </script>
-    {% endblock %}
-    """
-    
-    return render_template_string(template,
-                                card=current_card,
-                                current_idx=current_idx,
-                                total_cards=len(deck),
-                                domains=CPP_DOMAINS)
-
-@app.route('/rate_flashcard', methods=['POST'])
-@login_required
-@subscription_required
-def rate_flashcard():
-    if 'flashcard_deck' not in session:
-        return jsonify({'status': 'error', 'message': 'No active session'})
-    
-    data = request.get_json()
-    card_id = data.get('card_id')
-    rating = int(data.get('rating', 3))
-    
-    # Update flashcard using spaced repetition
-    flashcards = data_manager.get_flashcards()
-    if card_id in flashcards:
-        card = flashcards[card_id]
-        updated_card = SpacedRepetition.calculate_next_review(card, rating)
-        data_manager.save_flashcard(updated_card)
-    
-    # Update session stats
-    stats = session.get('flashcard_stats', {'correct': 0, 'total': 0})
-    stats['total'] += 1
-    if rating >= 3:
-        stats['correct'] += 1
-    session['flashcard_stats'] = stats
-    
-    # Move to next card
-    session['current_flashcard'] = session.get('current_flashcard', 0) + 1
-    
-    return jsonify({'status': 'success'})
-
-@app.route('/flashcard_session_complete')
-@login_required
-@subscription_required
-def flashcard_session_complete():
-    if 'flashcard_deck' not in session:
-        return redirect(url_for('flashcards'))
-    
-    stats = session.get('flashcard_stats', {'correct': 0, 'total': 0})
-    session_time = int(time.time() - session.get('flashcard_session_start', time.time()))
-    
-    # Update user study time
-    user = get_current_user()
-    user.total_study_time += session_time
-    data_manager.save_user(user)
-    
-    # Clear session
-    for key in ['flashcard_deck', 'current_flashcard', 'flashcard_session_start', 'flashcard_stats']:
-        session.pop(key, None)
-    
-    template = BASE_TEMPLATE + """
-    {% block title %}Session Complete - CPP Test Prep{% endblock %}
-    {% block content %}
-    <div class="row justify-content-center">
-        <div class="col-md-6">
-            <div class="card card-custom text-center">
-                <div class="card-body">
-                    <i class="fas fa-check-circle fa-4x text-success mb-3"></i>
-                    <h3>Session Complete!</h3>
-                    
-                    <div class="row mt-4">
-                        <div class="col-6">
-                            <h4 class="text-primary">{{ stats.correct }}</h4>
-                            <small class="text-muted">Known</small>
-                        </div>
-                        <div class="col-6">
-                            <h4 class="text-info">{{ stats.total - stats.correct }}</h4>
-                            <small class="text-muted">Learning</small>
-                        </div>
-                    </div>
-                    
-                    <div class="mt-4">
-                        <p class="text-muted">Study time: {{ "%.1f"|format(session_time / 60) }} minutes</p>
-                    </div>
-                    
-                    <div class="mt-4">
-                        <a href="{{ url_for('flashcards') }}" class="btn btn-custom me-2">
-                            <i class="fas fa-redo me-2"></i>Study More
-                        </a>
-                        <a href="{{ url_for('dashboard') }}" class="btn btn-outline-secondary">
-                            <i class="fas fa-tachometer-alt me-2"></i>Dashboard
-                        </a>
-                    </div>
-                </div>
-            </div>
-        </div>
-    </div>
-    {% endblock %}
-    """
-    
-    return render_template_string(template, stats=stats, session_time=session_time)
+    return render_template_string(template)
 
 # AI Tutor System
 @app.route('/ai_tutor')
@@ -3428,7 +2104,7 @@ def ai_tutor():
                     <div id="chatMessages" style="height: 400px; overflow-y: auto; border: 1px solid #dee2e6; padding: 1rem; margin-bottom: 1rem; border-radius: 0.375rem;">
                         <div class="text-center text-muted">
                             <i class="fas fa-robot fa-2x mb-2"></i>
-                            <p>Hello! I'm your CPP study assistant. Ask me anything about security concepts, study strategies, or exam preparation!</p>
+                            <p>Hello! I'm your CPP study assistant. Ask me anything about security concepts!</p>
                         </div>
                     </div>
                     
@@ -3436,7 +2112,7 @@ def ai_tutor():
                         <div class="input-group">
                             <input type="text" id="messageInput" class="form-control" 
                                    placeholder="Ask me anything about CPP..." required>
-                            <button type="submit" class="btn btn-custom" id="sendButton">
+                            <button type="submit" class="btn btn-custom">
                                 <i class="fas fa-paper-plane"></i>
                             </button>
                         </div>
@@ -3455,39 +2131,13 @@ def ai_tutor():
                         <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('What are the key principles of physical security?')">
                             Physical Security Principles
                         </button>
-                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('Explain the difference between security clearance levels')">
+                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('Explain security clearance levels')">
                             Security Clearance Levels
                         </button>
                         <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('What should I focus on for exam preparation?')">
                             Exam Preparation Tips
                         </button>
-                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('How does crisis management apply to security?')">
-                            Crisis Management
-                        </button>
-                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('What are common investigation techniques?')">
-                            Investigation Techniques
-                        </button>
-                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('Explain legal compliance in security operations')">
-                            Legal Compliance
-                        </button>
                     </div>
-                </div>
-            </div>
-            
-            <div class="card card-custom mt-3">
-                <div class="card-header">
-                    <h6 class="mb-0">Study Tips</h6>
-                </div>
-                <div class="card-body">
-                    <small class="text-muted">
-                        <ul class="ps-3">
-                            <li>Ask specific questions about concepts you don't understand</li>
-                            <li>Request examples and case studies</li>
-                            <li>Ask for study strategies for weak domains</li>
-                            <li>Get clarification on confusing topics</li>
-                            <li>Request practice scenarios</li>
-                        </ul>
-                    </small>
                 </div>
             </div>
         </div>
@@ -3586,8 +2236,7 @@ def chat_with_ai():
         6. Legal and Regulatory (14% of exam)
         7. Professional and Ethical Responsibilities (13% of exam)
         
-        Provide clear, accurate, and helpful responses about security concepts, exam strategies, and study tips. 
-        Use examples when helpful and keep responses focused on CPP exam preparation."""
+        Provide clear, accurate, and helpful responses about security concepts, exam strategies, and study tips."""
         
         # Make request to OpenAI
         headers = {
@@ -3636,170 +2285,6 @@ def chat_with_ai():
             'response': "An unexpected error occurred. Please try again."
         })
 
-# Billing System
-@app.route('/billing')
-@login_required
-def billing():
-    user = get_current_user()
-    
-    template = BASE_TEMPLATE + """
-    {% block title %}Billing - CPP Test Prep{% endblock %}
-    {% block content %}
-    <div class="row justify-content-center">
-        <div class="col-md-8">
-            <div class="card card-custom">
-                <div class="card-header">
-                    <h4 class="mb-0">
-                        <i class="fas fa-credit-card text-primary me-2"></i>
-                        Subscription & Billing
-                    </h4>
-                </div>
-                <div class="card-body">
-                    {% if user.subscription_status == 'active' %}
-                    <div class="alert alert-success">
-                        <h5><i class="fas fa-check-circle me-2"></i>Active Subscription</h5>
-                        <p>Your subscription is active and all features are available.</p>
-                        <p><strong>Plan:</strong> {{ user.subscription_plan.title() }}</p>
-                        {% if user.subscription_expires %}
-                        <p><strong>Expires:</strong> {{ user.subscription_expires[:10] }}</p>
-                        {% endif %}
-                    </div>
-                    
-                    <div class="text-center">
-                        <a href="{{ url_for('customer_portal') }}" class="btn btn-outline-primary">
-                            <i class="fas fa-cog me-2"></i>Manage Subscription
-                        </a>
-                    </div>
-                    {% else %}
-                    <div class="alert alert-warning">
-                        <h5><i class="fas fa-exclamation-triangle me-2"></i>Subscription Required</h5>
-                        <p>Access to study materials requires an active subscription. Choose a plan below to get started!</p>
-                    </div>
-                    
-                    <div class="row">
-                        <div class="col-md-6 mb-3">
-                            <div class="card border-primary">
-                                <div class="card-header bg-primary text-white text-center">
-                                    <h5 class="mb-0">Monthly Plan</h5>
-                                </div>
-                                <div class="card-body text-center">
-                                    <h2 class="text-primary">$29.99</h2>
-                                    <p class="text-muted">per month</p>
-                                    <ul class="list-unstyled">
-                                        <li><i class="fas fa-check text-success me-2"></i>Full question bank (500+ questions)</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>Interactive flashcards</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>Mock exams</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>AI tutor access</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>Progress tracking</li>
-                                    </ul>
-                                    <button class="btn btn-primary w-100" onclick="subscribe('monthly')">
-                                        Subscribe Monthly
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                        
-                        <div class="col-md-6 mb-3">
-                            <div class="card border-success">
-                                <div class="card-header bg-success text-white text-center">
-                                    <h5 class="mb-0">6-Month Plan</h5>
-                                    <small class="badge bg-light text-success">Save 17%!</small>
-                                </div>
-                                <div class="card-body text-center">
-                                    <h2 class="text-success">$149.99</h2>
-                                    <p class="text-muted">for 6 months</p>
-                                    <p class="small text-success"><strong>Save $30!</strong> vs monthly</p>
-                                    <ul class="list-unstyled">
-                                        <li><i class="fas fa-check text-success me-2"></i>Full question bank (500+ questions)</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>Interactive flashcards</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>Mock exams</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>AI tutor access</li>
-                                        <li><i class="fas fa-check text-success me-2"></i>Progress tracking</li>
-                                    </ul>
-                                    <button class="btn btn-success w-100" onclick="subscribe('6month')">
-                                        Subscribe 6-Month
-                                    </button>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                    {% endif %}
-                </div>
-            </div>
-        </div>
-    </div>
-    
-    <!-- Stripe Checkout Form -->
-    <form id="checkout-form" style="display: none;">
-        <div id="card-element"></div>
-        <button id="submit-button">Subscribe</button>
-    </form>
-    {% endblock %}
-    
-    {% block scripts %}
-    <script>
-        const stripe = Stripe('{{ stripe_key }}');
-        let currentPlan = null;
-        
-        function subscribe(plan) {
-            currentPlan = plan;
-            
-            // In a real implementation, you would:
-            // 1. Create a Stripe checkout session
-            // 2. Redirect to Stripe checkout
-            // 3. Handle webhooks for subscription creation
-            
-            // For demo purposes, we'll simulate successful subscription
-            fetch('{{ url_for("simulate_subscription") }}', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({plan: plan})
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    window.location.reload();
-                } else {
-                    alert('Subscription failed. Please try again.');
-                }
-            });
-        }
-    </script>
-    {% endblock %}
-    """
-    
-    stripe_key = app.config.get('STRIPE_PUBLISHABLE_KEY', 'pk_test_demo')
-    return render_template_string(template, user=user, stripe_key=stripe_key)
-
-@app.route('/simulate_subscription', methods=['POST'])
-@login_required
-def simulate_subscription():
-    """Simulate subscription for demo purposes"""
-    data = request.get_json()
-    plan = data.get('plan', 'monthly')
-    
-    user = get_current_user()
-    user.subscription_status = 'active'
-    user.subscription_plan = plan
-    
-    # Set expiration date
-    if plan == 'monthly':
-        expires = dt.now() + timedelta(days=30)
-    else:  # 6month
-        expires = dt.now() + timedelta(days=180)
-    
-    user.subscription_expires = expires.isoformat()
-    data_manager.save_user(user)
-    
-    return jsonify({'success': True})
-
-@app.route('/customer_portal')
-@login_required
-def customer_portal():
-    # In a real implementation, this would redirect to Stripe customer portal
-    flash('Customer portal would redirect to Stripe management interface', 'info')
-    return redirect(url_for('billing'))
-
 # Error Handlers
 @app.errorhandler(404)
 def not_found_error(error):
@@ -3846,5 +2331,7 @@ if __name__ == '__main__':
     
     app.run(host='0.0.0.0', port=port, debug=debug)
 
-
-
+"""
+END OF SECTION 5
+END OF CPP TEST PREP PLATFORM
+"""
