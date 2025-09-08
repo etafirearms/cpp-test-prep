@@ -657,8 +657,9 @@ class ContentEngine:
         return domain_backs[index % len(domain_backs)]
 
 # Bind ContentEngine methods to DataManager class (CRITICAL FIX)
-DataManager._get_default_questions = ContentEngine._get_default_questions
-DataManager._get_default_flashcards = ContentEngine._get_default_flashcards
+# Use lambda to handle the self parameter that DataManager instance methods expect
+DataManager._get_default_questions = lambda self: ContentEngine._get_default_questions()
+DataManager._get_default_flashcards = lambda self: ContentEngine._get_default_flashcards()
 
 # NOW Initialize Data Manager (after method binding)
 data_manager = DataManager(app.config['DATA_DIR'])
@@ -2335,3 +2336,4 @@ if __name__ == '__main__':
 END OF SECTION 5
 END OF CPP TEST PREP PLATFORM
 """
+
