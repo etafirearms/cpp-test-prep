@@ -275,11 +275,10 @@ CPP_DOMAINS = {
     'D4': {'name': 'Crisis Management', 'weight': 0.11},
     'D5': {'name': 'Investigations', 'weight': 0.16},
     'D6': {'name': 'Legal and Regulatory', 'weight': 0.14},
-   # Continuing from Section 1 - last two lines:
     'D7': {'name': 'Professional and Ethical Responsibilities', 'weight': 0.13}
 }
 
-# Content Generation and Business Logic
+# Content Generation Engine
 class ContentEngine:
     """Manages question and flashcard content generation"""
     
@@ -649,6 +648,15 @@ class ContentEngine:
         domain_backs = backs.get(domain, ["Generic Definition"])
         return domain_backs[index % len(domain_backs)]
 
+# Bind ContentEngine methods to DataManager
+def _get_default_questions(self) -> Dict[str, dict]:
+    return ContentEngine._get_default_questions()
+
+def _get_default_flashcards(self) -> Dict[str, dict]:
+    return ContentEngine._get_default_flashcards()
+
+DataManager._get_default_questions = _get_default_questions
+DataManager._get_default_flashcards = _get_default_flashcards
 # Spaced Repetition Algorithm (SM-2 based)
 class SpacedRepetition:
     @staticmethod
@@ -3443,3 +3451,4 @@ if __name__ == '__main__':
     logger.info(f"Data directory: {app.config['DATA_DIR']}")
     
     app.run(host='0.0.0.0', port=port, debug=debug)
+
