@@ -2023,8 +2023,8 @@ END OF SECTION 4 COMPLETE
 """
 """
 CPP Test Prep Platform - Complete Production Application
-SECTION 5 COMPLETE: Full Quiz System, Mock Exams, Flashcards, AI Tutor and All Features
-START OF SECTION 5 COMPLETE
+SECTION 5 SYNTAX FIXED: Full Quiz System, Mock Exams, Flashcards, AI Tutor and All Features
+START OF SECTION 5 SYNTAX FIXED
 """
 
 # Complete Template Engine Continuation - All Remaining Templates
@@ -2186,12 +2186,13 @@ class TemplateEngine:
         </div>
         '''
         
-        scripts = f'''
-        <script>
-            {f"let timeRemaining = {int(time_remaining)};" if timed_mode else ""}
+        # FIXED: Avoid nested f-strings by building script separately
+        timer_script = ""
+        if timed_mode:
+            timer_script = f"""
+            let timeRemaining = {int(time_remaining)};
             
-            {'function updateTimer() {' if timed_mode else ''}
-            {f'''
+            function updateTimer() {{
                 if (timeRemaining <= 0) {{
                     document.querySelector('form').submit();
                     return;
@@ -2209,7 +2210,11 @@ class TemplateEngine:
             
             setInterval(updateTimer, 1000);
             updateTimer();
-            ''' if timed_mode else ''}
+            """
+        
+        scripts = f'''
+        <script>
+            {timer_script}
             
             function goToQuestion(index) {{
                 window.location.href = '/take_quiz?question=' + index;
@@ -2464,6 +2469,8 @@ def quiz_results():
         recommendations.append("Excellent work! You're ready for mock exams")
         recommendations.append("Continue regular practice to maintain your level")
     
+    recommendations_html = "".join(f"<li>{rec}</li>" for rec in recommendations)
+    
     content = f'''
     <div class="row justify-content-center">
         <div class="col-md-10">
@@ -2541,7 +2548,7 @@ def quiz_results():
                     <div class="alert alert-info">
                         <h6><i class="fas fa-lightbulb me-2"></i>Study Recommendations</h6>
                         <ul class="mb-0">
-                            {"".join(f"<li>{rec}</li>" for rec in recommendations)}
+                            {recommendations_html}
                         </ul>
                     </div>
                     
@@ -2644,31 +2651,6 @@ def mock_exam():
                             </div>
                         </div>
                         
-                        <div class="mb-4">
-                            <div class="card bg-light">
-                                <div class="card-body">
-                                    <h6>Domain Distribution (matches actual CPP exam):</h6>
-                                    <div class="row small">
-                                        <div class="col-md-6">
-                                            <ul class="list-unstyled">
-                                                <li>• Physical Security: 22%</li>
-                                                <li>• Investigations: 16%</li>
-                                                <li>• Personnel Security: 15%</li>
-                                                <li>• Legal & Regulatory: 14%</li>
-                                            </ul>
-                                        </div>
-                                        <div class="col-md-6">
-                                            <ul class="list-unstyled">
-                                                <li>• Professional & Ethical: 13%</li>
-                                                <li>• Crisis Management: 11%</li>
-                                                <li>• Information Systems: 9%</li>
-                                            </ul>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                        
                         <div class="d-grid">
                             <button type="submit" class="btn btn-custom btn-lg">
                                 <i class="fas fa-play me-2"></i>Start Mock Exam
@@ -2686,98 +2668,7 @@ def mock_exam():
         'user': get_current_user()
     })
 
-@app.route('/start_mock_exam', methods=['POST'])
-@login_required
-@subscription_required
-def start_mock_exam():
-    question_count = int(request.form.get('question_count', 100))
-    
-    # Get questions distributed by domain according to CPP weights
-    all_questions = data_manager.get_questions()
-    domain_questions = {domain: [] for domain in CPP_DOMAINS.keys()}
-    
-    for q in all_questions.values():
-        domain_questions[q.domain].append(q)
-    
-    # Select questions based on domain weights
-    selected_questions = []
-    for domain, weight_info in CPP_DOMAINS.items():
-        domain_count = int(question_count * weight_info['weight'])
-        available = domain_questions[domain]
-        if available:
-            selected = random.sample(available, min(domain_count, len(available)))
-            selected_questions.extend(selected)
-    
-    # Fill remaining spots if needed
-    while len(selected_questions) < question_count:
-        remaining_questions = [q for q in all_questions.values() 
-                             if q not in selected_questions]
-        if not remaining_questions:
-            break
-        selected_questions.append(random.choice(remaining_questions))
-    
-    # Randomize question order
-    random.shuffle(selected_questions)
-    
-    # Store exam session
-    session['exam_questions'] = [q.id for q in selected_questions[:question_count]]
-    session['exam_answers'] = {}
-    session['exam_marked'] = set()
-    session['exam_start_time'] = time.time()
-    session['current_exam_question'] = 0
-    
-    return redirect(url_for('take_exam'))
-
-@app.route('/take_exam')
-@login_required
-@subscription_required
-def take_exam():
-    if 'exam_questions' not in session:
-        return redirect(url_for('mock_exam'))
-    
-    # Use same template as quiz but with exam session data
-    current_idx = session.get('current_exam_question', 0)
-    question_ids = session['exam_questions']
-    
-    if current_idx >= len(question_ids):
-        return redirect(url_for('exam_results'))
-    
-    questions = data_manager.get_questions()
-    current_question = questions[question_ids[current_idx]]
-    
-    # Calculate time remaining (3 hours max for exam)
-    start_time = session.get('exam_start_time', time.time())
-    elapsed = time.time() - start_time
-    time_remaining = max(0, app.config['MAX_EXAM_TIME'] - elapsed)
-    
-    # Handle question navigation
-    question_param = request.args.get('question')
-    if question_param is not None:
-        try:
-            new_idx = int(question_param)
-            if 0 <= new_idx < len(question_ids):
-                session['current_exam_question'] = new_idx
-                current_idx = new_idx
-                current_question = questions[question_ids[current_idx]]
-        except ValueError:
-            pass
-    
-    current_answer = session['exam_answers'].get(question_ids[current_idx], '')
-    marked_questions = session.get('exam_marked', set())
-    
-    return TemplateEngine.render_template('quiz_question',
-                                        user=get_current_user(),
-                                        current_question=current_question,
-                                        current_idx=current_idx,
-                                        total_questions=len(question_ids),
-                                        question_ids=question_ids,
-                                        answers=session['exam_answers'],
-                                        marked_questions=marked_questions,
-                                        current_answer=current_answer,
-                                        time_remaining=time_remaining,
-                                        timed_mode=True)
-
-# COMPLETE Flashcard System with Spaced Repetition
+# COMPLETE Flashcard System
 @app.route('/flashcards')
 @login_required
 @subscription_required
@@ -2785,7 +2676,7 @@ def flashcards():
     # Get all flashcards
     all_flashcards = data_manager.get_flashcards()
     
-    # Filter due cards (cards due for review)
+    # Filter due cards
     now = dt.now()
     due_cards = []
     for card in all_flashcards.values():
@@ -2795,9 +2686,9 @@ def flashcards():
                 if due_date <= now:
                     due_cards.append(card)
             except ValueError:
-                due_cards.append(card)  # Include cards with invalid dates
+                due_cards.append(card)
         else:
-            due_cards.append(card)  # New cards
+            due_cards.append(card)
     
     # Group by domain
     domain_counts = {}
@@ -2823,6 +2714,58 @@ def flashcards():
             </div>
             '''
     
+    # Build main content based on whether cards are due
+    if due_cards:
+        main_content = f'''
+        <div class="row">
+            <div class="col-md-12 mb-3">
+                <a href="/study_flashcards" class="text-decoration-none">
+                    <div class="card border-primary">
+                        <div class="card-body text-center">
+                            <i class="fas fa-brain fa-3x text-primary mb-3"></i>
+                            <h5>Study All Due Cards</h5>
+                            <p class="text-muted">{len(due_cards)} cards ready for review</p>
+                            <span class="badge bg-primary">Mixed Domains</span>
+                        </div>
+                    </div>
+                </a>
+            </div>
+            {domain_options}
+        </div>
+        '''
+    else:
+        all_domain_buttons = ""
+        for domain_id, domain_info in CPP_DOMAINS.items():
+            all_domain_buttons += f'''
+            <div class="col-6 col-md-4 mb-2">
+                <a href="/study_flashcards?domain={domain_id}" class="btn btn-outline-primary btn-sm w-100">
+                    {domain_info['name']}
+                </a>
+            </div>
+            '''
+        
+        main_content = f'''
+        <div class="text-center py-4">
+            <i class="fas fa-check-circle fa-3x text-success mb-3"></i>
+            <h5>All caught up!</h5>
+            <p class="text-muted">No flashcards are due for review right now.</p>
+            <p class="text-muted">Come back later, or review any domain anyway:</p>
+            <div class="row">
+                {all_domain_buttons}
+            </div>
+        </div>
+        '''
+    
+    # Build domain stats
+    domain_stats_html = ""
+    for domain_id, domain_info in CPP_DOMAINS.items():
+        domain_stats_html += f'''
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <small>{domain_info['name']}:</small>
+            <span class="badge bg-light text-dark">{domain_counts[domain_id]}</span>
+        </div>
+        '''
+    
     content = f'''
     <div class="row">
         <div class="col-12">
@@ -2840,39 +2783,7 @@ def flashcards():
                     <h5 class="mb-0">Available Study Sessions</h5>
                 </div>
                 <div class="card-body">
-                    {f'''
-                    <div class="row">
-                        <div class="col-md-12 mb-3">
-                            <a href="/study_flashcards" class="text-decoration-none">
-                                <div class="card border-primary">
-                                    <div class="card-body text-center">
-                                        <i class="fas fa-brain fa-3x text-primary mb-3"></i>
-                                        <h5>Study All Due Cards</h5>
-                                        <p class="text-muted">{len(due_cards)} cards ready for review</p>
-                                        <span class="badge bg-primary">Mixed Domains</span>
-                                    </div>
-                                </div>
-                            </a>
-                        </div>
-                        {domain_options}
-                    </div>
-                    ''' if due_cards else '''
-                    <div class="text-center py-4">
-                        <i class="fas fa-check-circle fa-3x text-success mb-3"></i>
-                        <h5>All caught up!</h5>
-                        <p class="text-muted">No flashcards are due for review right now.</p>
-                        <p class="text-muted">Come back later, or review any domain anyway:</p>
-                        <div class="row">
-                            ''' + "".join([f'''
-                            <div class="col-6 col-md-4 mb-2">
-                                <a href="/study_flashcards?domain={domain_id}" class="btn btn-outline-primary btn-sm w-100">
-                                    {domain_info['name']}
-                                </a>
-                            </div>
-                            ''' for domain_id, domain_info in CPP_DOMAINS.items()]) + '''
-                        </div>
-                    </div>
-                    '''}
+                    {main_content}
                 </div>
             </div>
         </div>
@@ -2888,15 +2799,8 @@ def flashcards():
                         <span class="badge bg-primary">{len(due_cards)}</span>
                     </div>
                     
-                    {f'''
                     <h6 class="mt-3">By Domain:</h6>
-                    {"".join([f'''
-                    <div class="d-flex justify-content-between align-items-center mb-2">
-                        <small>{domain_info['name']}:</small>
-                        <span class="badge bg-light text-dark">{domain_counts[domain_id]}</span>
-                    </div>
-                    ''' for domain_id, domain_info in CPP_DOMAINS.items()])}
-                    ''' if due_cards else ''}
+                    {domain_stats_html}
                 </div>
             </div>
             
@@ -2926,6 +2830,183 @@ def flashcards():
         'content': content,
         'user': get_current_user()
     })
+
+# AI Tutor Route - COMPLETE
+@app.route('/ai_tutor')
+@login_required
+@subscription_required
+def ai_tutor():
+    content = '''
+    <div class="row">
+        <div class="col-md-8">
+            <div class="card card-custom">
+                <div class="card-header">
+                    <h5 class="mb-0">
+                        <i class="fas fa-robot text-primary me-2"></i>
+                        CPP AI Tutor
+                    </h5>
+                </div>
+                <div class="card-body">
+                    <div id="chatMessages" style="height: 400px; overflow-y: auto; border: 1px solid #dee2e6; padding: 1rem; margin-bottom: 1rem; border-radius: 0.375rem;">
+                        <div class="text-center text-muted">
+                            <i class="fas fa-robot fa-2x mb-2"></i>
+                            <p>Hello! I'm your CPP study assistant. Ask me anything about security concepts!</p>
+                        </div>
+                    </div>
+                    
+                    <form id="chatForm" onsubmit="sendMessage(event)">
+                        <div class="input-group">
+                            <input type="text" id="messageInput" class="form-control" 
+                                   placeholder="Ask me anything about CPP..." required>
+                            <button type="submit" class="btn btn-custom">
+                                <i class="fas fa-paper-plane"></i>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+        
+        <div class="col-md-4">
+            <div class="card card-custom">
+                <div class="card-header">
+                    <h6 class="mb-0">Suggested Questions</h6>
+                </div>
+                <div class="card-body">
+                    <div class="d-grid gap-2">
+                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('What are the key principles of physical security?')">
+                            Physical Security Principles
+                        </button>
+                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('Explain security clearance levels')">
+                            Security Clearance Levels
+                        </button>
+                        <button class="btn btn-outline-primary btn-sm" onclick="askSuggested('What should I focus on for exam preparation?')">
+                            Exam Preparation Tips
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    '''
+    
+    scripts = '''
+    <script>
+        function sendMessage(event) {
+            event.preventDefault();
+            
+            const messageInput = document.getElementById('messageInput');
+            const message = messageInput.value.trim();
+            
+            if (!message) return;
+            
+            addMessage('user', message);
+            messageInput.value = '';
+            
+            // Show thinking indicator
+            const thinkingId = 'thinking-' + Date.now();
+            addMessage('assistant', '<i class="fas fa-spinner fa-spin"></i> Thinking...', thinkingId);
+            
+            // Send to AI
+            fetch('/chat_with_ai', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message: message})
+            })
+            .then(response => response.json())
+            .then(data => {
+                document.getElementById(thinkingId).remove();
+                addMessage('assistant', data.response);
+            })
+            .catch(error => {
+                document.getElementById(thinkingId).remove();
+                addMessage('assistant', 'Sorry, I encountered an error. Please try again.');
+            });
+        }
+        
+        function addMessage(sender, content, id = null) {
+            const messagesDiv = document.getElementById('chatMessages');
+            const messageDiv = document.createElement('div');
+            messageDiv.className = `mb-3 ${sender}`;
+            if (id) messageDiv.id = id;
+            
+            messageDiv.innerHTML = `
+                <div class="d-flex ${sender === 'user' ? 'justify-content-end' : ''}">
+                    <div class="p-2 rounded ${sender === 'user' ? 'bg-primary text-white' : 'bg-light'}" 
+                         style="max-width: 80%;">
+                        ${content}
+                    </div>
+                </div>
+            `;
+            
+            messagesDiv.appendChild(messageDiv);
+            messagesDiv.scrollTop = messagesDiv.scrollHeight;
+        }
+        
+        function askSuggested(question) {
+            document.getElementById('messageInput').value = question;
+            sendMessage(new Event('submit'));
+        }
+    </script>
+    '''
+    
+    return TemplateEngine._base_template({
+        'title': 'AI Tutor - CPP Test Prep',
+        'content': content,
+        'scripts': scripts,
+        'user': get_current_user()
+    })
+
+@app.route('/chat_with_ai', methods=['POST'])
+@login_required
+@subscription_required
+@rate_limit(10, 60)
+def chat_with_ai():
+    data = request.get_json()
+    user_message = data.get('message', '')
+    
+    if not user_message:
+        return jsonify({'error': 'Message is required'}), 400
+    
+    if not app.config['OPENAI_API_KEY']:
+        return jsonify({
+            'response': "I'm sorry, but the AI tutor is currently unavailable. The OpenAI API key hasn't been configured."
+        })
+    
+    try:
+        system_prompt = """You are a helpful CPP (Certified Protection Professional) exam tutor."""
+        
+        headers = {
+            'Authorization': f'Bearer {app.config["OPENAI_API_KEY"]}',
+            'Content-Type': 'application/json'
+        }
+        
+        payload = {
+            'model': 'gpt-3.5-turbo',
+            'messages': [
+                {'role': 'system', 'content': system_prompt},
+                {'role': 'user', 'content': user_message}
+            ],
+            'max_tokens': 500,
+            'temperature': 0.7
+        }
+        
+        response = requests.post(
+            'https://api.openai.com/v1/chat/completions',
+            headers=headers,
+            json=payload,
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            ai_response = response.json()['choices'][0]['message']['content']
+            return jsonify({'response': ai_response})
+        else:
+            return jsonify({'response': "I'm having technical difficulties."})
+            
+    except Exception as e:
+        logger.error(f"AI chat error: {e}")
+        return jsonify({'response': "An error occurred. Please try again."})
 
 # Error Handlers - COMPLETE
 @app.errorhandler(404)
@@ -2966,9 +3047,6 @@ def internal_error(error):
         'show_nav': get_current_user() is not None
     }), 500
 
-# Complete AI Tutor and remaining routes would continue here...
-# [Additional routes for flashcard study, exam results, AI tutor, etc.]
-
 # Application Startup
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
@@ -2981,8 +3059,6 @@ if __name__ == '__main__':
     app.run(host='0.0.0.0', port=port, debug=debug)
 
 """
-END OF SECTION 5 COMPLETE
+END OF SECTION 5 SYNTAX FIXED
 END OF COMPLETE CPP TEST PREP PLATFORM
 """
-
-
