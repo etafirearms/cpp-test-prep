@@ -1758,8 +1758,8 @@ class TemplateEngine:
 """
 END OF SECTION 4: Template Engine and User Interface System
 """
-    def render_template(template_name: str, **context) -> str:
-        """Render template with context variables"""
+def render_template(template_name: str, **context) -> str:
+    """Render template with context variables"""
         template_map = {
             'base': TemplateEngine._base_template,
             'login': TemplateEngine._login_template,
@@ -3023,3 +3023,4 @@ TemplateEngine._quiz_results_template = TemplateEngineExtensions._quiz_results_t
 """
 END OF SECTION 6: Quiz and Exam Templates
 """
+
