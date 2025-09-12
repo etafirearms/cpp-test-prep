@@ -1776,7 +1776,7 @@ def render_template(template_name: str, **context) -> str:
             'ai_tutor': TemplateEngine._ai_tutor_template,
             'billing': TemplateEngine._billing_template,
             'profile': Template
-
+        }
 """
 CPP Test Prep Platform - Complete Production Application
 SECTION 5: Authentication and Core Routes
@@ -3023,4 +3023,5 @@ TemplateEngine._quiz_results_template = TemplateEngineExtensions._quiz_results_t
 """
 END OF SECTION 6: Quiz and Exam Templates
 """
+
 
